@@ -9,12 +9,13 @@ function sendJson(res, status, value) {
 
 async function readJson(req) {
   let raw = ''
+  let tooLarge = false
   for await (const chunk of req) {
+    if (tooLarge) continue // drain the socket so keep-alive clients are not reset
     raw += chunk
-    if (Buffer.byteLength(raw) > MAX_REQUEST_BODY) {
-      throw new AutomationRequestError('request_too_large', 'automation request body is too large', 413)
-    }
+    if (Buffer.byteLength(raw) > MAX_REQUEST_BODY) { raw = ''; tooLarge = true }
   }
+  if (tooLarge) throw new AutomationRequestError('request_too_large', 'automation request body is too large', 413)
   try { return JSON.parse(raw || '{}') }
   catch { throw new AutomationRequestError('invalid_json', 'request body is not valid JSON') }
 }
