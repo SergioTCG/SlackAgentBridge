@@ -21,7 +21,12 @@ Notable changes to this project. Format based on
   failures without granting prompt access.
 - Automation lifecycle races now preserve late `SessionStart` correlation,
   fence prompt injection after every stop request, verify provider input before
-  claiming a prompt, and serialize exact stop against launch completion.
+  claiming a prompt, and serialize exact stop against launch completion. Exact
+  stop now fails visibly when cleanup is incomplete, watches the full recovered
+  launch window, and fences hooks only from its original tmux identity.
+- Synthetic initial turns retain provider working-status and terminal-failure
+  tracking while suppressing only their prompt echo. URL dot-segment external
+  keys are rejected before they could create an unreachable automation record.
 
 ### Security
 - Automation working directories and provider flags use the existing remote

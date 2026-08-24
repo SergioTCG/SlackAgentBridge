@@ -7,6 +7,7 @@ import path from 'node:path'
 import {
   AutomationRequestError,
   createAutomationLifecycle,
+  shouldFenceAutomationHook,
   validateAutomationRequest,
   waitForProviderInput,
 } from '../daemon/automation.mjs'
@@ -230,6 +231,18 @@ test('provider-specific flags and request fields use the remote launch allowlist
   assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--effort=xhigh'] }, { home: f.root }), /effort/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, provider: undefined }, { home: f.root }), /provider/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, cwd: path.join(f.root, '..', 'escape') }, { home: f.root }), /cwd/i)
+  assert.throws(() => validateAutomationRequest({ ...f.request, externalKey: '.' }, { home: f.root }), /reserved/i)
+  assert.throws(() => validateAutomationRequest({ ...f.request, externalKey: '..' }, { home: f.root }), /reserved/i)
+})
+
+test('stopped automation hooks are fenced only for their exact tmux identity', () => {
+  const record = {
+    tmux: 'sab-auto-original', status: 'failed',
+    stop: { requestedAt: 123, terminated: false },
+  }
+  assert.equal(shouldFenceAutomationHook(record, 'sab-auto-original'), true)
+  assert.equal(shouldFenceAutomationHook(record, 'ccs-resumed'), false)
+  assert.equal(shouldFenceAutomationHook(record, null), false)
 })
 
 test('status is useful before and after SessionStart', async t => {

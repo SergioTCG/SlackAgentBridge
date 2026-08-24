@@ -31,7 +31,10 @@ function validateExternalKey(value) {
   if (typeof value !== 'string' || !value || value !== value.trim() || value.length > MAX_EXTERNAL_KEY || /[\u0000-\u001f\u007f]/.test(value)) {
     requestError('invalid_external_key', `externalKey must be 1-${MAX_EXTERNAL_KEY} printable characters without surrounding whitespace`)
   }
-  if (['__proto__', 'prototype', 'constructor'].includes(value)) requestError('invalid_external_key', 'externalKey is reserved')
+  // URL parsers normalize these two complete path segments before routing, so
+  // accepting either would create a durable automation that status/stop cannot
+  // address through the public lifecycle API.
+  if (['.', '..', '__proto__', 'prototype', 'constructor'].includes(value)) requestError('invalid_external_key', 'externalKey is reserved')
   return value
 }
 
@@ -90,6 +93,11 @@ function errorMessage(error) {
 }
 
 const promptDigest = value => crypto.createHash('sha256').update(String(value || '').trim()).digest('hex')
+
+export function shouldFenceAutomationHook(record, tmux) {
+  if (!record || !tmux || record.tmux !== tmux) return false
+  return Boolean(record.stop?.requestedAt || record.stop?.terminated || ['stopping', 'stopped'].includes(record.status))
+}
 
 export async function waitForProviderInput(session, {
   isProcessAlive,

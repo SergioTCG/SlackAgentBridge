@@ -1,7 +1,28 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { detachAutomationState } from '../daemon/automation-stop.mjs'
+import {
+  AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
+  detachAutomationState,
+  terminateAutomationTmux,
+} from '../daemon/automation-stop.mjs'
+
+test('recovered stop watches through the complete launch window for delayed tmux', async () => {
+  let attempt = 0
+  let alive = false
+  let appeared = false
+  const terminated = []
+  await terminateAutomationTmux('sab-auto-delayed', {
+    isAlive: async () => {
+      if (!appeared && attempt === AUTOMATION_TMUX_LAUNCH_ATTEMPTS) { appeared = true; alive = true }
+      return alive
+    },
+    terminate: async name => { terminated.push(name); alive = false },
+    sleep: async () => { attempt++ },
+  })
+  assert.equal(attempt, AUTOMATION_TMUX_LAUNCH_ATTEMPTS)
+  assert.deepEqual(terminated, ['sab-auto-delayed'])
+})
 
 test('exact automation detach removes only its binding and relevant lineage', () => {
   const record = { sessionId: 'auto', tmux: 'sab-auto-1', channelId: 'CAUTO', provider: 'codex' }

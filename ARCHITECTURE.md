@@ -233,7 +233,10 @@ or missing `SessionStart` into an actionable failure without relaunching. It
 resumes collaborator setup from its per-user checkpoints,
 but a prompt already marked `claimed` is failed as ambiguous rather than sent
 again. Synthetic automation prompts bypass the Slack-message ingress and
-therefore never mint an artifact grant.
+therefore never mint an artifact grant, but their provider turn still starts
+the normal live-status and terminal-failure tracking. Exact stop watches through
+the launcher's full tmux-materialization window after restart and reports a
+failing HTTP result unless termination and any requested archive both complete.
 
 The automation routes accept only loopback Host identities. POST operations
 also require `application/json` and reject browser Origin/fetch metadata, which

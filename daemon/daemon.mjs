@@ -57,10 +57,16 @@ import {
   readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionPatch, validateInstructionResult,
   writeInstructionProposal,
 } from './instructions.mjs'
-import { createAutomationLifecycle, waitForProviderInput } from './automation.mjs'
+import { createAutomationLifecycle, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
 import { handleAutomationHttp } from './automation-http.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
-import { detachAutomationState, validateAutomationStopTarget } from './automation-stop.mjs'
+import {
+  AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
+  AUTOMATION_TMUX_POLL_INTERVAL_MS,
+  detachAutomationState,
+  terminateAutomationTmux,
+  validateAutomationStopTarget,
+} from './automation-stop.mjs'
 
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
@@ -887,11 +893,12 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   const ev = body.hook_event_name
   const pid = await resolveAgentPid(ppid, provider)
   if (!pid) return
+  const requestedTmux = tmux
   if (tmux && !(await validTmuxClaim(pid, tmux))) tmux = null
   const sid = body.session_id
   if (!sid) return
-  const automationHook = automationLifecycle.findForHook(provider, sid, tmux)
-  if (automationHook && (automationHook.stop?.requestedAt || ['stopping', 'stopped'].includes(automationHook.status) || automationHook.stop?.terminated)) {
+  const automationHook = automationLifecycle.findForHook(provider, sid, requestedTmux)
+  if (shouldFenceAutomationHook(automationHook, requestedTmux)) {
     log('ignored hook from stopped automation', ev, String(sid).slice(0, 8), automationHook.externalKey)
     return
   }
@@ -1160,15 +1167,16 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   }
   if (ev === 'UserPromptSubmit') {
     const p = (body.prompt || '').trim()
-    if (automationLifecycle.consumeInitialPromptEcho(sid, p)) return
+    const automationEcho = automationLifecycle.consumeInitialPromptEcho(sid, p)
     if (targetClaim || internalTurns.has(session.id)) {
       consumeInjected(sid, p)
       return
     }
     const ch = session.channel || (await ensureChannel(session))
+    const injected = consumeInjected(sid, p)
     // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
     // system-injected content (task notifications, reminders, local-command echoes).
-    if (p && !consumeInjected(sid, p) && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
+    if (p && !automationEcho && !injected && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
@@ -3027,8 +3035,8 @@ async function launchAutomation(record) {
     provider: record.provider,
   })
   let up = false
-  for (let i = 0; i < 24 && !up; i++) {
-    await sleep(500)
+  for (let i = 0; i < AUTOMATION_TMUX_LAUNCH_ATTEMPTS && !up; i++) {
+    await sleep(AUTOMATION_TMUX_POLL_INTERVAL_MS)
     up = await tmuxAlive(record.tmux)
   }
   if (!up) throw new Error(`automation tmux did not materialize: ${record.tmux}`)
@@ -3063,18 +3071,11 @@ async function terminateAutomation(record) {
     try { await sendPiControl(session, 'managed-cancel') } catch {}
   }
   if (record.tmux) {
-    // `open -na Ghostty` returns before the window command necessarily creates
-    // tmux. Keep reaping this one deterministic identity for a short grace
-    // period so a delayed launch cannot appear after stop reported success.
-    let sawTmux = false
-    for (let i = 0; i < 20; i++) {
-      if (await tmuxAlive(record.tmux)) {
-        sawTmux = true
-        await tmuxKill(record.tmux)
-      } else if (sawTmux) break
-      await sleep(250)
-    }
-    if (await tmuxAlive(record.tmux)) throw new Error('the exact automation tmux could not be terminated')
+    await terminateAutomationTmux(record.tmux, {
+      isAlive: tmuxAlive,
+      terminate: tmuxKill,
+      sleep,
+    })
   }
   if (session?.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
   if (session) {

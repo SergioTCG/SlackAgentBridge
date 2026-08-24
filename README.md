@@ -283,8 +283,9 @@ must use `application/json`; non-loopback Host values and browser Origin/fetch
 metadata are rejected to prevent webpages from driving the local RCE surface.
 
 `externalKey` is the durable idempotency key. Repeating create returns the
-existing automation, even if the later payload differs. Before launching, the
-daemon atomically journals its deterministic tmux name and requested provider,
+existing automation, even if the later payload differs. The URL dot-segment
+values `.` and `..` are reserved. Before launching, the daemon atomically
+journals its deterministic tmux name and requested provider,
 working directory, flags, collaborators, and pending prompt. The eventual
 provider `SessionStart` must claim that tmux before collaborator setup begins.
 Each collaborator is invited and name-resolved before being persisted in the
@@ -297,7 +298,9 @@ side effect. If the daemon dies in that irreducibly ambiguous interval, status
 reports `prompt_delivery_interrupted` and the bridge does not retry something
 that may already be running. Stop similarly checks the exact provider,
 session, tmux, and immutable channel ID before terminating it, revokes its
-grants and handoff state, and archives only that channel when requested.
+grants and handoff state, and archives only that channel when requested. An
+incomplete stop returns HTTP `409` with its actionable failure, so
+`sab-automation stop` exits nonzero instead of reporting false success.
 
 The raw HTTP create body is:
 

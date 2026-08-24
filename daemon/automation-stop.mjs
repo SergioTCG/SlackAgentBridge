@@ -1,5 +1,29 @@
 import { providerOf } from './providers.mjs'
 
+export const AUTOMATION_TMUX_LAUNCH_ATTEMPTS = 24
+export const AUTOMATION_TMUX_POLL_INTERVAL_MS = 500
+
+export async function terminateAutomationTmux(tname, {
+  isAlive,
+  terminate,
+  sleep,
+  launchAttempts = AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
+  intervalMs = AUTOMATION_TMUX_POLL_INTERVAL_MS,
+}) {
+  let sawTmux = false
+  // A recovered stop has no in-memory launch promise. Watch through the same
+  // complete materialization window as the launcher, including the final edge,
+  // so a delayed Ghostty command cannot create tmux after stop reports success.
+  for (let attempt = 0; attempt <= launchAttempts; attempt++) {
+    if (await isAlive(tname)) {
+      sawTmux = true
+      await terminate(tname)
+    } else if (sawTmux) return
+    if (attempt < launchAttempts) await sleep(intervalMs)
+  }
+  if (await isAlive(tname)) throw new Error('the exact automation tmux could not be terminated')
+}
+
 export function validateAutomationStopTarget(state, record) {
   const session = record.sessionId ? state.sessions?.[record.sessionId] : null
   const conflicting = Object.values(state.sessions || {}).find(item => item.id !== record.sessionId && item.tmux === record.tmux)

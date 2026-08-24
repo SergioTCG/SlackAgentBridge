@@ -117,3 +117,31 @@ test('automation JSON decoding preserves UTF-8 split across transport chunks', a
   }
   assert.deepEqual(await readAutomationJson(splitRequest()), { initialPrompt: 'Plan this carefully: 🧠 東京' })
 })
+
+test('an incomplete exact stop returns a failing HTTP result', async () => {
+  const lifecycle = {
+    status: () => null,
+    create: () => assert.fail('create must not be called'),
+    stop: async () => ({
+      externalKey: 'github:org/repo#stop-failed',
+      tmux: 'sab-auto-failed',
+      status: 'failed',
+      failure: { code: 'stop_failed', message: 'the exact tmux is still alive', action: 'Retry stop.' },
+    }),
+  }
+  await withServer(lifecycle, async base => {
+    const response = await fetch(`${base}/automation/sessions/${encodeURIComponent('github:org/repo#stop-failed')}/stop`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    })
+    assert.equal(response.status, 409)
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      externalKey: 'github:org/repo#stop-failed',
+      tmux: 'sab-auto-failed',
+      status: 'failed',
+      failure: { code: 'stop_failed', message: 'the exact tmux is still alive', action: 'Retry stop.' },
+      code: 'stop_failed',
+      error: 'the exact tmux is still alive',
+    })
+  })
+})

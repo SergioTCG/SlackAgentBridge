@@ -87,7 +87,14 @@ export async function handleAutomationHttp(req, res, url, lifecycle) {
       }
       const status = await lifecycle.stop(externalKey, { archive: body.archive === true })
       if (!status) sendJson(res, 404, { ok: false, code: 'automation_not_found', error: 'automation not found' })
-      else sendJson(res, 200, { ok: true, ...status })
+      else if (status.status !== 'stopped') {
+        sendJson(res, 409, {
+          ok: false,
+          ...status,
+          code: status.failure?.code || 'automation_stop_incomplete',
+          error: status.failure?.message || 'automation stop did not complete',
+        })
+      } else sendJson(res, 200, { ok: true, ...status })
       return true
     }
   } catch (error) {
