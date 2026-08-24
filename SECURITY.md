@@ -47,6 +47,19 @@ accounts, and the Mac user running the daemon.
   binds to loopback on port `8877`; it must not be exposed through a proxy.
 - **Restricted spawning:** Slack-created working directories must resolve under
   `$HOME`. Claude, Codex, and Pi use separate remote-flag allowlists.
+- **Loopback automation ownership:** the automation lifecycle API listens only
+  on `127.0.0.1:8877`; possession of the local macOS account is its trust
+  boundary. It rejects non-loopback Host values, browser Origin/fetch metadata,
+  and simple non-JSON mutation requests so an untrusted webpage cannot drive
+  the local RCE surface. It canonicalizes an existing
+  working directory under `$HOME`, applies the provider flag allowlist, rejects
+  Claude `--continue`, journals an exact tmux identity before launch, and
+  refuses stop/archive if the provider, native session, tmux, or channel has
+  been rebound. Never expose this port through SSH forwarding or an HTTP proxy.
+- **Invite before trust:** both automated collaborator setup and the manual
+  status-panel picker call `conversations.invite` before changing the prompt
+  allowlist. Invitation failure is visible and leaves that user untrusted;
+  successful setup persists the display name with the allowlist entry.
 - **Provider isolation:** `/cc-*` can affect only Claude sessions,
   `/codex-*` only Codex sessions, and `/pi-*` only Pi sessions. Cross-provider
   flags are rejected.
@@ -154,6 +167,10 @@ requires immediate rotation. State maps local sessions, processes, paths, and
 Slack channel IDs and should also remain private. During a provider transition,
 it temporarily journals queued owner prompts and minimal Slack-file metadata so
 a daemon restart can return them to the restored or committed leg.
+Pending automations also journal their initial prompt in this `0600` state file.
+At the delivery boundary the bridge persists a digest and removes the plaintext
+before submitting it. Do not place credentials in automation prompts merely
+because the endpoint is local.
 
 ## Research-preview dependencies
 

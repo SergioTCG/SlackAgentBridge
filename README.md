@@ -250,7 +250,74 @@ without changing instructions remains available.
 provides a user-picker for collaborators. Allowed teammates may send labelled
 prompts to a live session, but cannot run slash commands, answer permission
 prompts, or resurrect it. All other actions remain owner-only. The per-channel
-allowlist is persisted across daemon restarts.
+allowlist is persisted across daemon restarts. The bridge first invites a
+selected teammate to the private Slack channel and only then adds them to the
+prompt allowlist. A Slack invitation or scope failure is shown to the owner and
+leaves that user untrusted.
+
+### Script-facing automation lifecycle
+
+Repository automation can create and own one exact bridged session through the
+loopback-only lifecycle API. Prefer the JSON-safe wrapper so prompt text and
+provider flags never need hand-built shell quoting:
+
+```bash
+sab-automation create \
+  --external-key 'github:twenty-five-seven-doo/barrique#123' \
+  --cwd /Users/sergej/Code/barrique-worktree-7 \
+  --provider claude \
+  --collaborator U098WAUUX5M \
+  --prompt-file /path/to/issue-123-prompt.txt \
+  -- --model opus --effort max --dsp --chrome
+
+sab-automation status 'github:twenty-five-seven-doo/barrique#123'
+sab-automation stop 'github:twenty-five-seven-doo/barrique#123' --archive
+```
+
+`--prompt-file -` reads the initial prompt from stdin. The create command calls
+`POST /automation/sessions` and returns the daemon's JSON response; status and
+stop call `GET /automation/sessions/:externalKey` and
+`POST /automation/sessions/:externalKey/stop`. The HTTP service remains bound
+to `127.0.0.1:8877` and must not be exposed through a proxy. Mutating requests
+must use `application/json`; non-loopback Host values and browser Origin/fetch
+metadata are rejected to prevent webpages from driving the local RCE surface.
+
+`externalKey` is the durable idempotency key. Repeating create returns the
+existing automation, even if the later payload differs. The URL dot-segment
+values `.` and `..` are reserved. Before launching, the daemon atomically
+journals its deterministic tmux name and requested provider,
+working directory, flags, collaborators, and pending prompt. The eventual
+provider `SessionStart` must claim that tmux before collaborator setup begins.
+Each collaborator is invited and name-resolved before being persisted in the
+channel allowlist. Only after every invitation succeeds does the daemon submit
+the initial prompt. This synthetic prompt receives no artifact-upload grant.
+
+The prompt handoff uses an at-most-once crash boundary: its digest and claimed
+state are persisted and the plaintext is removed before the tmux/native input
+side effect. If the daemon dies in that irreducibly ambiguous interval, status
+reports `prompt_delivery_interrupted` and the bridge does not retry something
+that may already be running. Stop similarly checks the exact provider,
+session, tmux, and immutable channel ID before terminating it, revokes its
+grants and handoff state, and archives only that channel when requested. An
+incomplete stop returns HTTP `409` with its actionable failure, so
+`sab-automation stop` exits nonzero instead of reporting false success.
+
+The raw HTTP create body is:
+
+```json
+{
+  "externalKey": "github:twenty-five-seven-doo/barrique#123",
+  "cwd": "/Users/sergej/Code/barrique-worktree-7",
+  "provider": "claude",
+  "flags": ["--model", "opus", "--effort", "max", "--dsp", "--chrome"],
+  "collaborators": ["U098WAUUX5M"],
+  "initialPrompt": "..."
+}
+```
+
+Create responds `202` with `externalKey`, tmux name, and lifecycle status.
+There are no new Slack commands or OAuth scopes, so this feature does not
+require reinstalling or updating the Slack app manifest.
 
 ### Return generated files to Slack
 
@@ -286,7 +353,8 @@ protocol:
 - `/cc-*` remains Claude and `/codex-*` remains Codex; 1.5 adds `/pi-*` without
   changing either established namespace or their bare-switch defaults.
 - `sab-cc`, `sab-codex`, and `sab-pi` are canonical; `sab-upload` is their
-  shared, grant-bound artifact helper; `ccs` and `ccs-codex` remain aliases.
+  shared, grant-bound artifact helper; `sab-automation` is the loopback
+  lifecycle client; `ccs` and `ccs-codex` remain aliases.
 - `CCS_*`, `~/.config/ccs`, state records, and port `8877` are unchanged.
 - Existing `~/.claudeslackproxy` installations remain in place.
 - `si.sergej.claudeslackproxy` remains the sole LaunchAgent label.

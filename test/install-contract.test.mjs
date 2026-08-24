@@ -26,6 +26,7 @@ test('installer preserves installed runtime identities', () => {
   assert.match(installer, /bin\/sab-codex/)
   assert.match(installer, /bin\/sab-pi/)
   assert.match(installer, /bin\/sab-upload/)
+  assert.match(installer, /bin\/sab-automation/)
 })
 
 test('legacy Codex activation remains a no-restart operation', () => {
@@ -94,10 +95,12 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-codex')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-pi')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-upload')).isSymbolicLink())
+    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-automation')).isSymbolicLink())
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-cc')), path.resolve('bin/sab-cc'))
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-codex')), path.resolve('bin/sab-codex'))
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-pi')), path.resolve('bin/sab-pi'))
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-upload')), path.resolve('bin/sab-upload'))
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-automation')), path.resolve('bin/sab-automation'))
     assert.equal(fs.existsSync(path.join(temp, '.pi')), false, 'installer must not modify Pi global configuration')
     assert.equal(fs.existsSync(path.join(temp, 'Library/LaunchAgents')), false)
   } finally {

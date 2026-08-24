@@ -4,6 +4,42 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.5.0-rc.9] — 2026-08-24
+
+### Added
+- A loopback-only, persisted automation lifecycle API creates, queries, and
+  exactly stops sessions by caller-supplied idempotency key. Native
+  `SessionStart` correlation, per-collaborator invitation/name/allowlist state,
+  at-most-once initial-prompt claims, exact channel archiving, grant revocation,
+  and restart recovery are journaled atomically.
+- `sab-automation` provides JSON-safe create/status/stop commands with prompt
+  input from a file or stdin.
+
+### Fixed
+- The manual collaborator picker now invites the selected user to the private
+  Slack channel before whitelisting them and reports actionable invitation
+  failures without granting prompt access.
+- Automation lifecycle races now preserve late `SessionStart` correlation,
+  fence prompt injection after every stop request, verify provider input before
+  claiming a prompt, and serialize exact stop against launch completion. Exact
+  stop now fails visibly when cleanup is incomplete, watches the full recovered
+  launch window, and fences hooks only from its original tmux identity.
+- Synthetic initial turns retain provider working-status and terminal-failure
+  tracking while suppressing only their prompt echo. URL dot-segment external
+  keys are rejected before they could create an unreachable automation record.
+
+### Security
+- Automation working directories and provider flags use the existing remote
+  launch boundaries; Claude automations cannot adopt an unrelated conversation
+  with `--continue`. Exact stop refuses rebound tmux/session/channel identities,
+  and synthetic initial prompts never receive artifact-upload grants.
+- Browser-originated, simple-content-type, and non-loopback-Host automation
+  requests are rejected before they can reach the local RCE lifecycle.
+
+[1.5.0-rc.9]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.9
+
 ## [1.5.0-rc.8] — 2026-08-21
 
 ### Fixed

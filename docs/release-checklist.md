@@ -10,7 +10,7 @@
 - [ ] `/cc-*`, `/codex-*`, and `/pi-*` command namespaces match the documented release contract.
 - [ ] The existing Slack app has all commands from the canonical manifest; no
       second app, token set, or daemon exists.
-- [ ] `sab-cc`, `sab-codex`, `sab-pi`, and `sab-upload` work, and `ccs` /
+- [ ] `sab-cc`, `sab-codex`, `sab-pi`, `sab-upload`, and `sab-automation` work, and `ccs` /
       `ccs-codex` forward all args.
 - [ ] Legacy state, config, checkout, control-channel, and LaunchAgent identities
       are covered by tests.
@@ -98,6 +98,10 @@
       stale hashes, traversal, symlink, binary, mode, and oversized proposals fail closed.
 - [ ] Owner and collaborator artifact returns work; expired/replayed grants and
       workspace/symlink escapes are rejected.
+- [ ] Automation create/status/stop is exercised with a disposable external
+      key: duplicate create launches and prompts once, collaborator invitation
+      precedes whitelisting, restart recovery resumes setup, and exact archive
+      leaves unrelated sessions/channels untouched.
 - [ ] Claude/Codex permission relay and Pi safe-mode relay are exercised in
       non-destructive test sessions.
 - [ ] No duplicate Slack channels appear.

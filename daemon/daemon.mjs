@@ -19,7 +19,7 @@ import {
   CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, PI_EFFORTS, PROVIDERS, acceptHookSettings, allowedFlags,
   codexFlagsWithoutInitialPrompt, codexPermissionDecision, codexStatusRecoveryDecision,
   defaultNewFlagsFor, displayFlagsFor,
-  isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
+  isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, normalizeRemoteLaunchFlags, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   submitTargetValidation, switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
   waitForCodexInterrupt,
@@ -57,6 +57,16 @@ import {
   readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionPatch, validateInstructionResult,
   writeInstructionProposal,
 } from './instructions.mjs'
+import { createAutomationLifecycle, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
+import { handleAutomationHttp } from './automation-http.mjs'
+import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
+import {
+  AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
+  AUTOMATION_TMUX_POLL_INTERVAL_MS,
+  detachAutomationState,
+  terminateAutomationTmux,
+  validateAutomationStopTarget,
+} from './automation-stop.mjs'
 
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
@@ -192,6 +202,12 @@ async function resolveUserName(userId) {
   nameCache.set(userId, name)
   return name
 }
+const inviteSlackCollaborator = (channel, userId) => inviteAndResolveCollaborator({
+  channel,
+  userId,
+  invite: (target, user) => web.conversations.invite({ channel: target, users: user }),
+  resolveUserName,
+})
 const collaborators = ch => state.whitelist[ch] || {}
 const whitelistedName = (ch, userId) => collaborators(ch)[userId] || null
 async function postSlackMessage(channel, payload, { waitForBump = true } = {}) {
@@ -877,9 +893,15 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   const ev = body.hook_event_name
   const pid = await resolveAgentPid(ppid, provider)
   if (!pid) return
+  const requestedTmux = tmux
   if (tmux && !(await validTmuxClaim(pid, tmux))) tmux = null
   const sid = body.session_id
   if (!sid) return
+  const automationHook = automationLifecycle.findForHook(provider, sid, requestedTmux)
+  if (shouldFenceAutomationHook(automationHook, requestedTmux)) {
+    log('ignored hook from stopped automation', ev, String(sid).slice(0, 8), automationHook.externalKey)
+    return
+  }
   const targetClaim = transitionForTarget(state, provider, tmux)
   if (targetClaim?.transition.target.sid && targetClaim.transition.target.sid !== sid) {
     log('rejected switch target session mismatch', String(sid).slice(0, 8), 'expected', targetClaim.transition.target.sid.slice(0, 8))
@@ -1125,6 +1147,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     const src = body.source
     if (src === 'resume') await post(ch, '▶️ *Resumed*')
     else if (src === 'clear') await post(ch, '🧹 *Context cleared* — same channel, fresh session')
+    automationLifecycle.correlateSessionStart(session)
     // flush messages queued during resurrection: paste into the fresh terminal
     const queued = pendingBySid.get(sid) || []
     if (queued.length && session.tmux) {
@@ -1143,15 +1166,17 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     return
   }
   if (ev === 'UserPromptSubmit') {
+    const p = (body.prompt || '').trim()
+    const automationEcho = automationLifecycle.consumeInitialPromptEcho(sid, p)
     if (targetClaim || internalTurns.has(session.id)) {
-      consumeInjected(sid, (body.prompt || '').trim())
+      consumeInjected(sid, p)
       return
     }
     const ch = session.channel || (await ensureChannel(session))
-    const p = (body.prompt || '').trim()
+    const injected = consumeInjected(sid, p)
     // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
     // system-injected content (task notifications, reminders, local-command echoes).
-    if (p && !consumeInjected(sid, p) && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
+    if (p && !automationEcho && !injected && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
@@ -2198,12 +2223,9 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
   }
   if (provider !== 'claude' && account) return post(channel, '❌ `--account` is only available for Claude Code sessions.')
   if (!extraFlags.length) extraFlags = defaultNewFlags(provider) // provider-specific operator default
-  const flags = []
-  for (const f of extraFlags) {
-    const norm = normalizeLaunchFlag(provider, f)
-    if (norm) flags.push(norm)
-    else return post(channel, `❌ Flag not allowed: \`${f}\``)
-  }
+  let flags
+  try { flags = normalizeRemoteLaunchFlags(provider, extraFlags) }
+  catch (error) { return post(channel, `❌ ${String(error?.message || error)}`) }
   const tmuxName = `ccs-new-${Date.now().toString(36)}`
   if (provider === 'pi') {
     pendingSpawnChannels.set(tmuxName, channel)
@@ -2992,9 +3014,136 @@ async function dispatch(name, rest, channel, commandProvider = 'claude', request
   return post(channel, `Unknown command: \`${name}\`. Try \`${cmd('help')}\`.`)
 }
 
+// ---- durable script-facing automation lifecycle ---------------------------
+// An automation owns one deterministic tmux identity. Journal transitions are
+// synchronous; Slack/tmux effects happen only after the preceding state is on
+// disk, so a daemon restart can reconcile without launching or prompting twice.
+async function launchAutomation(record) {
+  if (record.provider === 'pi' && state.control) {
+    pendingSpawnChannels.set(record.tmux, state.control)
+    const timer = setTimeout(() => pendingSpawnChannels.delete(record.tmux), 10 * 60000)
+    timer.unref?.()
+  }
+  await reapGhosttyZombies()
+  await ghosttySpawn({
+    cwd: record.cwd,
+    args: record.flags,
+    title: `sab automation ${path.basename(record.cwd)}`,
+    tmuxName: record.tmux,
+    autoConsent: record.provider === 'claude',
+    account: null,
+    provider: record.provider,
+  })
+  let up = false
+  for (let i = 0; i < AUTOMATION_TMUX_LAUNCH_ATTEMPTS && !up; i++) {
+    await sleep(AUTOMATION_TMUX_POLL_INTERVAL_MS)
+    up = await tmuxAlive(record.tmux)
+  }
+  if (!up) throw new Error(`automation tmux did not materialize: ${record.tmux}`)
+  log('automation launch accepted', record.provider, record.externalKey, record.tmux)
+}
+
+async function waitForAutomationInput(session) {
+  await waitForProviderInput(session, {
+    isProcessAlive: pidAlive,
+    isTmuxAlive: tmuxAlive,
+    piStream: pid => streams.get(pid),
+    sleep,
+  })
+}
+
+async function injectAutomationPrompt(session, prompt) {
+  if (!(session.pid && pidAlive(session.pid))) throw new Error('the correlated provider process is not alive')
+  if (providerOf(session) === 'pi') {
+    if (!injectQueuedPiPrompt(session.pid, prompt)) throw new Error('the Pi input stream is not connected')
+    rememberInjected(session.id, prompt)
+    return
+  }
+  if (!session.tmux || !(await tmuxAlive(session.tmux))) throw new Error('the correlated tmux session is not alive')
+  rememberInjected(session.id, prompt)
+  await tmuxPaste(session.tmux, prompt)
+}
+
+async function terminateAutomation(record) {
+  const session = validateAutomationStopTarget(state, record)
+
+  if (session && providerOf(session) === 'pi' && session.pid && pidAlive(session.pid) && session.managed?.status === 'active') {
+    try { await sendPiControl(session, 'managed-cancel') } catch {}
+  }
+  if (record.tmux) {
+    await terminateAutomationTmux(record.tmux, {
+      isAlive: tmuxAlive,
+      terminate: tmuxKill,
+      sleep,
+    })
+  }
+  if (session?.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
+  if (session) {
+    stopPoller(session)
+    await clearStatus(session).catch(() => {})
+    clearPermissionsForPid(session.pid, 'automation stopped')
+    qforms.delete(session.id)
+    pendingBySid.delete(session.id)
+    restarting.delete(session.id)
+    switchingSids.delete(session.id)
+    internalTurns.delete(session.id)
+  }
+  if (record.sessionId || record.channelId) {
+    artifactGrants.revoke({
+      ...(record.sessionId ? { sessionId: record.sessionId } : {}),
+      ...(record.channelId ? { channelId: record.channelId } : {}),
+      provider: record.provider,
+    })
+  }
+
+  const channel = record.channelId
+  detachAutomationState(state, record)
+  if (channel) {
+    deleteHandoffs(CONFIG_DIR, channel)
+  }
+  pendingSpawnChannels.delete(record.tmux)
+  saveStateNow(state)
+}
+
+async function archiveAutomationChannel(channel, record) {
+  if (!record.channelId || channel !== record.channelId) throw new Error('refusing to archive a non-correlated channel')
+  try { await web.conversations.archive({ channel }) }
+  catch (error) {
+    if (error?.data?.error !== 'already_archived') throw error
+  }
+}
+
+const automationLifecycle = createAutomationLifecycle({
+  state,
+  persist: () => saveStateNow(state),
+  launch: launchAutomation,
+  invite: inviteSlackCollaborator,
+  inject: injectAutomationPrompt,
+  waitForInputReady: waitForAutomationInput,
+  terminate: terminateAutomation,
+  archive: archiveAutomationChannel,
+  isTmuxAlive: tmuxAlive,
+  notifyFailure: async (record, failure) => {
+    log('automation failure', record.externalKey, failure.code, failure.message)
+    if (record.channelId) {
+      await post(record.channelId, `❌ *Automation failed* — ${failure.message}\n*Action:* ${failure.action}`).catch(() => {})
+    }
+  },
+  log,
+})
+let automationReconciler = null
+function startAutomationReconciler() {
+  if (automationReconciler) return
+  automationReconciler = setInterval(() => {
+    automationLifecycle.reconcile().catch(error => log('automation reconciliation failed', String(error?.message || error)))
+  }, 30000)
+  automationReconciler.unref?.()
+}
+
 // ---- HTTP (hooks in, SSE out) ----------------------------------------------
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
+  if (await handleAutomationHttp(req, res, url, automationLifecycle)) return
   if (url.pathname === '/hook' && req.method === 'POST') {
     let body = ''
     for await (const c of req) body += c
@@ -3321,13 +3470,9 @@ http.createServer(async (req, res) => {
       if (!provider) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'unknown provider' })) }
       const cwd = path.resolve(String(j.cwd || '').replace(/^~/, process.env.HOME))
       if (!isPathWithin(process.env.HOME, cwd) || !fs.existsSync(cwd)) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'cwd not allowed or missing' })) }
-      const flags = []
-      for (const f of j.flags || []) {
-        const norm = normalizeLaunchFlag(provider, f) ||
-          (provider === 'claude' && /^(fable|opus|sonnet|haiku|low|medium|high|max)$/.test(f) ? f : null)
-        if (!norm) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: `flag not allowed: ${f}` })) }
-        flags.push(norm)
-      }
+      let flags
+      try { flags = normalizeRemoteLaunchFlags(provider, j.flags || []) }
+      catch (error) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: String(error?.message || error) })) }
       const account = provider === 'claude' && j.account ? safeAccount(j.account) : null
       if (j.account && !account) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'invalid account name' })) }
       const tmuxName = `ccs-new-${Date.now().toString(36)}`
@@ -3484,12 +3629,22 @@ sm.on('interactive', async ({ body, ack }) => {
     if (action.action_id === 'collab_add') {
       const uid = action.selected_user, channel = body.channel?.id
       if (uid && channel && uid !== USER) {
-        const name = await resolveUserName(uid)
-        state.whitelist[channel] = { ...collaborators(channel), [uid]: name }
-        saveState(state)
-        log('collab add', uid, JSON.stringify(name), '→', channel)
-        await refreshCollabPanel(body)
-        await post(channel, `✅ <@${uid}> can now send prompts here — labelled *[Slack collaborator ${name}]* in the transcript.`)
+        try {
+          const result = await inviteAndWhitelistCollaborator({
+            state,
+            channel,
+            userId: uid,
+            invite: (target, user) => web.conversations.invite({ channel: target, users: user }),
+            resolveUserName,
+            persist: () => saveStateNow(state),
+          })
+          log('collab add', uid, JSON.stringify(result.name), result.invitation, '→', channel)
+          await refreshCollabPanel(body)
+          await post(channel, `✅ <@${uid}> can now send prompts here — labelled *[Slack collaborator ${result.name}]* in the transcript.`)
+        } catch (error) {
+          log('collab invitation failed', uid, '→', channel, error?.code || error?.data?.error || String(error))
+          await post(channel, `❌ Could not invite <@${uid}> to this private channel, so they were *not* added to the prompt whitelist. ${String(error?.message || error).slice(0, 800)}`)
+        }
       }
       return
     }
@@ -3688,6 +3843,8 @@ setInterval(async () => {
   await sm.start()
   log('socket mode connected — bridge ready')
   await recoverProviderSwitches()
+  automationLifecycle.recover()
+  startAutomationReconciler()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   selfUpdate('boot').catch(e => log('self-update error', String(e)))
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })

@@ -5,6 +5,14 @@ import { createStatusMessages } from '../daemon/status.mjs'
 
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 
+test('automation prompt echoes suppress mirroring without bypassing turn tracking', () => {
+  const block = /if \(ev === 'UserPromptSubmit'\) \{([\s\S]*?)\n  \}\n  if \(ev === 'PreToolUse'\)/.exec(daemon)?.[1] || ''
+  assert.match(block, /const automationEcho = automationLifecycle\.consumeInitialPromptEcho/)
+  assert.doesNotMatch(block, /consumeInitialPromptEcho\([^\n]+\)\) return/)
+  assert.match(block, /if \(provider === 'claude'\) startPoller\(session\)/)
+  assert.match(block, /else if \(provider === 'codex'\) beginCodexTurn\(session\)/)
+})
+
 function fakeSlack() {
   let next = 10
   const calls = []
