@@ -252,7 +252,10 @@ surface while preserving the local-account trust model for scripts.
   daemon waits for either `Stop` or the visible idle input surface before
   clearing status, and leaves tracking active with a warning when neither is
   observed. Startup uses the same idle check to discard orphaned interrupt
-  status without reading Codex transcripts.
+  status without reading Codex transcripts. Active-surface detection includes
+  the bridge's configured F12 interrupt hint; if an older deployment lost the
+  turn timestamp, recovery reconstructs it from a current frozen Slack timer or
+  the latest accepted human prompt before restarting the status poller.
 - Pi capabilities depend on its installed version and selected model. Native
   image delivery is rejected visibly for text-only models; Pi has no Chrome
   flag counterpart.
