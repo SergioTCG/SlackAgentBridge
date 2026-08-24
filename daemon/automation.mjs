@@ -91,6 +91,26 @@ function errorMessage(error) {
 
 const promptDigest = value => crypto.createHash('sha256').update(String(value || '').trim()).digest('hex')
 
+export async function waitForProviderInput(session, {
+  isProcessAlive,
+  isTmuxAlive,
+  piStream,
+  sleep,
+  attempts = 60,
+  intervalMs = 500,
+}) {
+  if (!(session?.pid && isProcessAlive(session.pid))) throw new Error('the correlated provider process is not alive')
+  if (!session.tmux || !(await isTmuxAlive(session.tmux))) throw new Error('the correlated tmux session is not alive')
+  if (providerOf(session) !== 'pi') return
+  for (let i = 0; i < attempts; i++) {
+    const stream = piStream(session.pid)
+    if (stream?.provider === 'pi' && !stream.res.writableEnded && !stream.res.destroyed) return
+    if (!isProcessAlive(session.pid)) throw new Error('the correlated Pi process exited before its input stream connected')
+    await sleep(intervalMs)
+  }
+  throw new Error('the authenticated Pi input stream did not connect before the readiness deadline')
+}
+
 function publicStatus(record) {
   if (!record) return null
   return {
@@ -149,6 +169,7 @@ export function createAutomationLifecycle({
   const records = () => state.automations || {}
   const recordFor = externalKey => Object.hasOwn(records(), externalKey) ? records()[externalKey] : null
   const touch = record => { record.updatedAt = now(); persist() }
+  const stopRequested = record => Boolean(record?.stop?.requestedAt)
 
   function setFailure(record, code, message, action) {
     if (!record || TERMINAL_STATUSES.has(record.status)) return
@@ -199,7 +220,7 @@ export function createAutomationLifecycle({
 
   async function configure(externalKey) {
     const record = recordFor(externalKey)
-    if (!record || !['configuring_collaborators', 'ready_to_prompt'].includes(record.status)) return
+    if (!record || stopRequested(record) || !['configuring_collaborators', 'ready_to_prompt'].includes(record.status)) return
     const session = exactSession(record)
     if (!session) {
       setFailure(record, 'session_correlation_lost', 'The correlated provider session is no longer bound to the expected tmux and Slack channel.', 'Inspect the automation status, then stop it before retrying with a new externalKey.')
@@ -215,7 +236,7 @@ export function createAutomationLifecycle({
       let result
       try { result = await invite(record.channelId, collaborator.userId) }
       catch (error) {
-        if (record.status === 'stopping' || record.status === 'stopped') return
+        if (stopRequested(record)) return
         collaborator.status = 'failed'
         collaborator.error = { code: errorCode(error), message: errorMessage(error) }
         setFailure(
@@ -227,7 +248,7 @@ export function createAutomationLifecycle({
         await notifyFailure(record, record.failure).catch(() => {})
         return
       }
-      if (record.status === 'stopping' || record.status === 'stopped') return
+      if (stopRequested(record)) return
       const name = String(result?.name || collaborator.userId).slice(0, 256)
       if (!state.whitelist) state.whitelist = {}
       state.whitelist[record.channelId] = { ...(state.whitelist[record.channelId] || {}), [collaborator.userId]: name }
@@ -238,7 +259,7 @@ export function createAutomationLifecycle({
       touch(record) // invitation result and whitelist become durable together
     }
 
-    if (record.status !== 'configuring_collaborators') return
+    if (stopRequested(record) || record.status !== 'configuring_collaborators') return
     record.status = 'ready_to_prompt'
     touch(record)
     if (record.prompt.status === 'delivered') {
@@ -258,12 +279,12 @@ export function createAutomationLifecycle({
 
     try { await waitForInputReady(session) }
     catch (error) {
-      if (record.status === 'stopping' || record.status === 'stopped') return
+      if (stopRequested(record)) return
       setFailure(record, 'input_not_ready', errorMessage(error), 'Fix the provider input transport, then stop this automation and retry with a new externalKey.')
       await notifyFailure(record, record.failure).catch(() => {})
       return
     }
-    if (record.status === 'stopping' || record.status === 'stopped') return
+    if (stopRequested(record)) return
 
     // tmux/SSE input and the JSON state file cannot share a transaction. Claim
     // first and never retry an ambiguous claim: this guarantees at-most-once
@@ -279,12 +300,13 @@ export function createAutomationLifecycle({
     try {
       await inject(session, initialPrompt)
     } catch (error) {
+      if (stopRequested(record)) return
       record.prompt.status = 'failed'
       setFailure(record, 'prompt_delivery_failed', errorMessage(error), 'Inspect the terminal before deciding whether to continue manually; the bridge will not retry this prompt.')
       await notifyFailure(record, record.failure).catch(() => {})
       return
     }
-    if (record.status === 'stopping' || record.status === 'stopped') return
+    if (stopRequested(record)) return
     record.prompt.status = 'delivered'
     record.prompt.deliveredAt = now()
     record.status = 'active'
@@ -326,7 +348,7 @@ export function createAutomationLifecycle({
     if (!session?.id || !session?.tmux || !session?.channel) return false
     const provider = providerOf(session)
     const record = Object.values(records()).find(item =>
-      item.tmux === session.tmux && item.provider === provider && !['stopping', 'stopped'].includes(item.status))
+      item.tmux === session.tmux && item.provider === provider && !stopRequested(item) && !['stopping', 'stopped'].includes(item.status))
     if (!record) return false
     if (path.resolve(session.cwd || record.cwd) !== record.cwd) {
       setFailure(record, 'session_cwd_mismatch', 'The tmux session registered from a different working directory.', 'Stop the automation and investigate the launcher before retrying.')
@@ -394,6 +416,13 @@ export function createAutomationLifecycle({
       if (now() - record.launchRequestedAt < launchTimeoutMs) continue
       let alive = false
       try { alive = await isTmuxAlive(record.tmux) } catch {}
+      if (record.sessionId || !['launching', 'awaiting_session'].includes(record.status)) continue
+      const lateCorrelation = Object.values(state.sessions || {}).find(session =>
+        session.tmux === record.tmux && providerOf(session) === record.provider && session.channel)
+      if (lateCorrelation) {
+        correlateSessionStart(lateCorrelation)
+        continue
+      }
       const code = alive ? 'session_start_timeout' : 'launch_interrupted'
       const message = alive
         ? 'The automation tmux exists but its provider did not register SessionStart before the launch deadline.'

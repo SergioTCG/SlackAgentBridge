@@ -67,9 +67,13 @@ test('automation HTTP rejects malformed JSON, oversized bodies, bad stop options
     stop: async () => assert.fail('invalid stop must not reach lifecycle'),
   }
   await withServer(lifecycle, async base => {
-    const malformed = await fetch(`${base}/automation/sessions`, { method: 'POST', body: '{' })
+    const malformed = await fetch(`${base}/automation/sessions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{',
+    })
     assert.equal(malformed.status, 400)
-    const oversized = await fetch(`${base}/automation/sessions`, { method: 'POST', body: 'x'.repeat(400_000) })
+    const oversized = await fetch(`${base}/automation/sessions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: 'x'.repeat(400_000),
+    })
     assert.equal(oversized.status, 413)
     const invalidStop = await fetch(`${base}/automation/sessions/${encodeURIComponent('missing')}/stop`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ archive: 'yes' }),
@@ -77,6 +81,29 @@ test('automation HTTP rejects malformed JSON, oversized bodies, bad stop options
     assert.equal(invalidStop.status, 400)
     const missing = await fetch(`${base}/automation/sessions/${encodeURIComponent('missing')}`)
     assert.equal(missing.status, 404)
+  })
+})
+
+test('automation mutations reject browser-originated and simple no-CORS requests', async () => {
+  const lifecycle = {
+    create: () => assert.fail('browser request must not reach lifecycle'),
+    status: () => null,
+    stop: async () => assert.fail('browser request must not reach lifecycle'),
+  }
+  await withServer(lifecycle, async base => {
+    const simple = await fetch(`${base}/automation/sessions`, {
+      method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}',
+    })
+    assert.equal(simple.status, 415)
+    assert.equal((await simple.json()).code, 'unsupported_media_type')
+
+    const browser = await fetch(`${base}/automation/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
+      body: '{}',
+    })
+    assert.equal(browser.status, 403)
+    assert.equal((await browser.json()).code, 'browser_request_rejected')
   })
 })
 

@@ -235,6 +235,11 @@ but a prompt already marked `claimed` is failed as ambiguous rather than sent
 again. Synthetic automation prompts bypass the Slack-message ingress and
 therefore never mint an artifact grant.
 
+The automation routes accept only loopback Host identities. POST operations
+also require `application/json` and reject browser Origin/fetch metadata, which
+keeps a hostile webpage or DNS-rebinding hostname from invoking the local RCE
+surface while preserving the local-account trust model for scripts.
+
 ## Known limitations
 
 - Consent dialog on every launch (research preview) — one keypress locally, auto-keyed for remote spawns. Goes away if the plugin ever reaches an allowlist.

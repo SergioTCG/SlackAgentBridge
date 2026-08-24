@@ -19,12 +19,17 @@ Notable changes to this project. Format based on
 - The manual collaborator picker now invites the selected user to the private
   Slack channel before whitelisting them and reports actionable invitation
   failures without granting prompt access.
+- Automation lifecycle races now preserve late `SessionStart` correlation,
+  fence prompt injection after every stop request, verify provider input before
+  claiming a prompt, and serialize exact stop against launch completion.
 
 ### Security
 - Automation working directories and provider flags use the existing remote
   launch boundaries; Claude automations cannot adopt an unrelated conversation
   with `--continue`. Exact stop refuses rebound tmux/session/channel identities,
   and synthetic initial prompts never receive artifact-upload grants.
+- Browser-originated, simple-content-type, and non-loopback-Host automation
+  requests are rejected before they can reach the local RCE lifecycle.
 
 ## [1.5.0-rc.8] — 2026-08-21
 

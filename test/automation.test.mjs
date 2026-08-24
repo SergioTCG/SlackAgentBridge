@@ -8,6 +8,7 @@ import {
   AutomationRequestError,
   createAutomationLifecycle,
   validateAutomationRequest,
+  waitForProviderInput,
 } from '../daemon/automation.mjs'
 
 function fixture(overrides = {}) {
@@ -318,6 +319,29 @@ test('reconcile correlates a persisted SessionStart before applying launch timeo
   assert.equal(f.lifecycle.status(f.request.externalKey).failure, null)
 })
 
+test('reconcile cannot overwrite correlation that completes during its liveness check', async t => {
+  let finishLiveness
+  const liveness = new Promise(resolve => { finishLiveness = resolve })
+  const f = fixture({ dependencies: { isTmuxAlive: () => liveness, launchTimeoutMs: 1, now: () => 100 } })
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  const { automation } = f.lifecycle.create(f.request)
+  f.queue.length = 0
+  const record = f.state.automations[f.request.externalKey]
+  record.status = 'awaiting_session'
+  record.launchRequestedAt = 1
+
+  const reconciling = f.lifecycle.reconcile()
+  const session = { id: 'session-123', tmux: automation.tmux, channel: 'CAUTO', cwd: f.cwd }
+  f.state.sessions[session.id] = session
+  f.lifecycle.correlateSessionStart(session)
+  finishLiveness(true)
+  await reconciling
+  await f.drain()
+
+  assert.equal(f.lifecycle.status(f.request.externalKey).status, 'active')
+  assert.equal(f.lifecycle.status(f.request.externalKey).failure, null)
+})
+
 test('input readiness is established before the one-way prompt claim', async t => {
   const order = []
   const f = fixture({
@@ -353,6 +377,50 @@ test('input readiness failure leaves the prompt unclaimed and reports an actiona
   assert.equal(status.status, 'failed')
   assert.equal(status.failure.code, 'input_not_ready')
   assert.equal(status.prompt.status, 'pending')
+})
+
+test('provider input readiness checks process and tmux before the prompt claim', async () => {
+  const base = {
+    id: 'session-123', pid: 123, tmux: 'sab-auto-1', provider: 'claude',
+  }
+  await assert.rejects(() => waitForProviderInput(base, {
+    isProcessAlive: () => false, isTmuxAlive: async () => true,
+    piStream: () => null, sleep: async () => {},
+  }), /process is not alive/)
+  await assert.rejects(() => waitForProviderInput(base, {
+    isProcessAlive: () => true, isTmuxAlive: async () => false,
+    piStream: () => null, sleep: async () => {},
+  }), /tmux session is not alive/)
+  await assert.doesNotReject(() => waitForProviderInput(base, {
+    isProcessAlive: () => true, isTmuxAlive: async () => true,
+    piStream: () => null, sleep: async () => {},
+  }))
+})
+
+test('a failed stop remains authoritative over in-flight configuration', async t => {
+  let ready
+  const readiness = new Promise(resolve => { ready = resolve })
+  const f = fixture({
+    dependencies: {
+      waitForInputReady: () => readiness,
+      inject: async () => assert.fail('a requested stop must fence prompt injection'),
+      terminate: async () => { throw new Error('exact termination refused') },
+    },
+  })
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  f.lifecycle.correlateSessionStart({ id: 'session-123', tmux: automation.tmux, channel: 'CAUTO', cwd: f.cwd })
+  const configuring = f.queue.shift()()
+  await new Promise(resolve => setImmediate(resolve))
+
+  const stopped = await f.lifecycle.stop(f.request.externalKey)
+  assert.equal(stopped.failure.code, 'stop_failed')
+  ready()
+  await configuring
+
+  assert.equal(f.lifecycle.status(f.request.externalKey).failure.code, 'stop_failed')
+  assert.equal(f.lifecycle.status(f.request.externalKey).prompt.status, 'pending')
 })
 
 test('legacy state and manual spawn state remain untouched until automation is used', t => {

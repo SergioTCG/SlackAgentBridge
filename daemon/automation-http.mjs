@@ -1,10 +1,27 @@
 import { AutomationRequestError } from './automation.mjs'
 
 const MAX_REQUEST_BODY = 320 * 1024
+const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i
 
 function sendJson(res, status, value) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(value))
+}
+
+function requireScriptClient(req, { json = false } = {}) {
+  const host = String(req.headers.host || '')
+  if (!LOOPBACK_HOST.test(host)) {
+    throw new AutomationRequestError('invalid_host', 'automation requests must use a loopback host', 403)
+  }
+  // Binding to 127.0.0.1 does not stop a hostile webpage from submitting a
+  // no-CORS request (or using DNS rebinding). Script clients have neither
+  // browser fetch metadata nor an Origin header; reject both before mutation.
+  if (req.headers.origin || req.headers['sec-fetch-site']) {
+    throw new AutomationRequestError('browser_request_rejected', 'browser-originated automation requests are not allowed', 403)
+  }
+  if (json && String(req.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+    throw new AutomationRequestError('unsupported_media_type', 'automation POST requests require application/json', 415)
+  }
 }
 
 export async function readAutomationJson(req) {
@@ -32,6 +49,7 @@ function decodedKey(segment) {
 export async function handleAutomationHttp(req, res, url, lifecycle) {
   if (url.pathname === '/automation/sessions' && req.method === 'POST') {
     try {
+      requireScriptClient(req, { json: true })
       const { automation, created } = lifecycle.create(await readAutomationJson(req))
       sendJson(res, 202, {
         ok: true,
@@ -54,6 +72,7 @@ export async function handleAutomationHttp(req, res, url, lifecycle) {
   const match = /^\/automation\/sessions\/([^/]+?)(\/stop)?$/.exec(url.pathname)
   if (!match) return false
   try {
+    requireScriptClient(req, { json: req.method === 'POST' })
     const externalKey = decodedKey(match[1])
     if (!match[2] && req.method === 'GET') {
       const status = lifecycle.status(externalKey)

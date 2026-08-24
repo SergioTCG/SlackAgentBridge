@@ -57,7 +57,7 @@ import {
   readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionPatch, validateInstructionResult,
   writeInstructionProposal,
 } from './instructions.mjs'
-import { createAutomationLifecycle } from './automation.mjs'
+import { createAutomationLifecycle, waitForProviderInput } from './automation.mjs'
 import { handleAutomationHttp } from './automation-http.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { detachAutomationState, validateAutomationStopTarget } from './automation-stop.mjs'
@@ -891,7 +891,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   const sid = body.session_id
   if (!sid) return
   const automationHook = automationLifecycle.findForHook(provider, sid, tmux)
-  if (automationHook && (['stopping', 'stopped'].includes(automationHook.status) || automationHook.stop?.terminated)) {
+  if (automationHook && (automationHook.stop?.requestedAt || ['stopping', 'stopped'].includes(automationHook.status) || automationHook.stop?.terminated)) {
     log('ignored hook from stopped automation', ev, String(sid).slice(0, 8), automationHook.externalKey)
     return
   }
@@ -3036,14 +3036,12 @@ async function launchAutomation(record) {
 }
 
 async function waitForAutomationInput(session) {
-  if (providerOf(session) !== 'pi') return
-  for (let i = 0; i < 60; i++) {
-    const stream = streams.get(session.pid)
-    if (stream?.provider === 'pi' && !stream.res.writableEnded && !stream.res.destroyed) return
-    if (!(session.pid && pidAlive(session.pid))) throw new Error('the correlated Pi process exited before its input stream connected')
-    await sleep(500)
-  }
-  throw new Error('the authenticated Pi input stream did not connect within 30 seconds')
+  await waitForProviderInput(session, {
+    isProcessAlive: pidAlive,
+    isTmuxAlive: tmuxAlive,
+    piStream: pid => streams.get(pid),
+    sleep,
+  })
 }
 
 async function injectAutomationPrompt(session, prompt) {

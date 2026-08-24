@@ -48,8 +48,10 @@ accounts, and the Mac user running the daemon.
 - **Restricted spawning:** Slack-created working directories must resolve under
   `$HOME`. Claude, Codex, and Pi use separate remote-flag allowlists.
 - **Loopback automation ownership:** the automation lifecycle API listens only
-  on `127.0.0.1:8877` and has no application-level bearer token; possession of
-  the local macOS account is its trust boundary. It canonicalizes an existing
+  on `127.0.0.1:8877`; possession of the local macOS account is its trust
+  boundary. It rejects non-loopback Host values, browser Origin/fetch metadata,
+  and simple non-JSON mutation requests so an untrusted webpage cannot drive
+  the local RCE surface. It canonicalizes an existing
   working directory under `$HOME`, applies the provider flag allowlist, rejects
   Claude `--continue`, journals an exact tmux identity before launch, and
   refuses stop/archive if the provider, native session, tmux, or channel has

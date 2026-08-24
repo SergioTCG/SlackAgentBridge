@@ -278,7 +278,9 @@ sab-automation stop 'github:twenty-five-seven-doo/barrique#123' --archive
 `POST /automation/sessions` and returns the daemon's JSON response; status and
 stop call `GET /automation/sessions/:externalKey` and
 `POST /automation/sessions/:externalKey/stop`. The HTTP service remains bound
-to `127.0.0.1:8877` and must not be exposed through a proxy.
+to `127.0.0.1:8877` and must not be exposed through a proxy. Mutating requests
+must use `application/json`; non-loopback Host values and browser Origin/fetch
+metadata are rejected to prevent webpages from driving the local RCE surface.
 
 `externalKey` is the durable idempotency key. Repeating create returns the
 existing automation, even if the later payload differs. Before launching, the
