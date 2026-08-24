@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [1.5.0-rc.9] — 2026-08-24
+
 ### Added
 - A loopback-only, persisted automation lifecycle API creates, queries, and
   exactly stops sessions by caller-supplied idempotency key. Native
@@ -35,6 +37,8 @@ Notable changes to this project. Format based on
   and synthetic initial prompts never receive artifact-upload grants.
 - Browser-originated, simple-content-type, and non-loopback-Host automation
   requests are rejected before they can reach the local RCE lifecycle.
+
+[1.5.0-rc.9]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.9
 
 ## [1.5.0-rc.8] — 2026-08-21
 
