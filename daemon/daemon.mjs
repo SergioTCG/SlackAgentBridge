@@ -27,7 +27,7 @@ import {
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createSessionChannelGate, pruneSessionChannelAliases } from './channel-binding.mjs'
 import { createTopicSync } from './topic.mjs'
-import { createStatusMessages } from './status.mjs'
+import { createStatusMessages, recoverCodexTurnStartedAt } from './status.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
   slackArtifactUploadOptions,
@@ -700,19 +700,27 @@ function recordPiUsage(session, body) {
 // the daemon can neither update it nor, on Stop, clear it. On boot we re-adopt:
 // if a live session still shows a spinner, find its frozen status message and
 // resume the poller on it; if the turn already ended, delete the stale message.
-async function findStatusMessage(channel) {
-  if (!channel) return null
+async function findStatusContext(channel) {
+  if (!channel) return { statusMessage: null, latestPromptTs: null }
   try {
     const r = await web.conversations.history({ channel, limit: 15 })
     // Slack returns the emoji as its :gear: shortcode in `text`, not the literal ⚙️.
-    return r.messages?.find(m => typeof m.text === 'string' && /^(:gear:|⚙️)/.test(m.text))?.ts || null
-  } catch (e) { log('findStatusMessage error', e?.data?.error || String(e)); return null }
+    const messages = r.messages || []
+    const statusMessage = messages.find(m => typeof m.text === 'string' && /^(:gear:|⚙️)/.test(m.text)) || null
+    const latestPrompt = messages.find(m => !m.subtype && m.user &&
+      (m.user === USER || whitelistedName(channel, m.user)))
+    return { statusMessage, latestPromptTs: latestPrompt?.ts || null }
+  } catch (e) {
+    log('findStatusContext error', e?.data?.error || String(e))
+    return { statusMessage: null, latestPromptTs: null }
+  }
 }
 async function readoptStatus() {
   for (const s of Object.values(state.sessions)) {
     if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) continue
     if (providerOf(s) === 'pi') {
-      const ts = await findStatusMessage(s.channel)
+      const { statusMessage } = await findStatusContext(s.channel)
+      const ts = statusMessage?.ts || null
       if (s.piTurnStartedAt) {
         if (ts) liveStatuses.adopt(s.id, ts)
         startPiPoller(s)
@@ -723,21 +731,28 @@ async function readoptStatus() {
       continue
     }
     if (providerOf(s) === 'codex') {
-      const ts = await findStatusMessage(s.channel)
-      if (s.codexTurnStartedAt) {
-        const recovery = codexStatusRecoveryDecision(s, await tmuxCapture(s.tmux))
-        if (recovery === 'clear') {
-          if (ts) liveStatuses.adopt(s.id, ts)
-          stopPoller(s)
-          await clearStatus(s)
-          log('cleared stale Codex turn status', s.id.slice(0, 8))
-        } else {
-          if (ts) liveStatuses.adopt(s.id, ts)
-          startCodexPoller(s)
-          log('re-adopted live Codex turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
+      const context = await findStatusContext(s.channel)
+      const ts = context.statusMessage?.ts || null
+      const recovery = codexStatusRecoveryDecision(s, await tmuxCapture(s.tmux))
+      if (recovery === 'resume') {
+        if (!s.codexTurnStartedAt) {
+          s.codexTurnStartedAt = recoverCodexTurnStartedAt({
+            persistedStartedAt: s.codexTurnStartedAt,
+            statusMessage: context.statusMessage,
+            latestPromptTs: context.latestPromptTs,
+          })
+          saveState(state)
+          log('reconstructed live Codex turn start', s.id.slice(0, 8), new Date(s.codexTurnStartedAt).toISOString())
         }
-      } else if (ts) {
-        try { await web.chat.delete({ channel: s.channel, ts }) } catch {}
+        if (ts) liveStatuses.adopt(s.id, ts)
+        startCodexPoller(s)
+        log('re-adopted live Codex turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
+      } else {
+        const hadTurnState = !!s.codexTurnStartedAt
+        if (ts) liveStatuses.adopt(s.id, ts)
+        stopPoller(s)
+        await clearStatus(s)
+        if (ts || hadTurnState) log('cleared stale Codex turn status', s.id.slice(0, 8))
       }
       continue
     }
@@ -746,7 +761,8 @@ async function readoptStatus() {
     const pane = await tmuxCapture(s.tmux)
     const spinning = !!extractSpinner(pane)
     const waitingForm = !spinning && !!extractQuestionForm(pane)
-    const ts = await findStatusMessage(s.channel)
+    const { statusMessage } = await findStatusContext(s.channel)
+    const ts = statusMessage?.ts || null
     if (waitingForm) {
       startPoller(s) // poller relays the form and manages the answer
       log('re-adopted session waiting at a question form', s.id.slice(0, 8))

@@ -9,6 +9,43 @@ const isNewerOrEqual = (left, right) => {
   return Number.isFinite(a) && Number.isFinite(b) && a >= b
 }
 
+const slackTimestampMs = value => {
+  const milliseconds = Number(value) * 1000
+  return Number.isFinite(milliseconds) && milliseconds > 0 ? milliseconds : null
+}
+
+function codexStatusElapsedMs(text) {
+  const match = String(text || '').match(
+    /Codex is working(?:…|\.\.\.)\s*\(\s*(?:(\d+)h\s+)?(?:(\d+)m\s+)?(\d+)s\b/i,
+  )
+  if (!match) return null
+  return ((Number(match[1] || 0) * 3600) + (Number(match[2] || 0) * 60) + Number(match[3])) * 1000
+}
+
+// Older bridge versions could lose the persisted turn timestamp while leaving
+// a live Codex process untouched. Prefer the durable timestamp, then reconstruct
+// it from the last edited Slack timer. If that timer belongs to an older turn,
+// the latest accepted human prompt is the safest lower-bound fallback.
+export function recoverCodexTurnStartedAt({
+  persistedStartedAt = null,
+  statusMessage = null,
+  latestPromptTs = null,
+  now = Date.now(),
+} = {}) {
+  const persisted = Number(persistedStartedAt)
+  if (Number.isFinite(persisted) && persisted > 0) return persisted
+
+  const promptAt = slackTimestampMs(latestPromptTs)
+  const elapsed = codexStatusElapsedMs(statusMessage?.text)
+  const statusObservedAt = slackTimestampMs(statusMessage?.edited?.ts || statusMessage?.ts)
+  if (elapsed !== null && statusObservedAt && (!promptAt || statusObservedAt >= promptAt)) {
+    const inferred = statusObservedAt - elapsed
+    if (inferred > 0) return Math.min(inferred, now)
+  }
+  if (promptAt) return Math.min(promptAt, now)
+  return now
+}
+
 export function createStatusMessages(web, {
   log = () => {},
   postMessage = (channel, text) => web.chat.postMessage({ channel, text }),

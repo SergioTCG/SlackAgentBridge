@@ -228,12 +228,15 @@ test('Codex status recovery clears an orphaned turn once the TUI is idle', () =>
     `› Improve documentation in @filename\n` +
     `  gpt-5.6-sol xhigh · ~/Code/Barrique`
   const working = `› queued input\n` +
-    `• Working (8s · esc to interrupt)\n` +
+    `• Waiting for background terminal (8s · f12 to interrupt)\n` +
     `  gpt-5.6-sol xhigh · ~/Code/Barrique`
 
+  assert.equal(targetStartupState('codex', working), 'starting')
   assert.equal(codexStatusRecoveryDecision({ codexTurnStartedAt: 100 }, idle), 'clear')
   assert.equal(codexStatusRecoveryDecision({ codexTurnStartedAt: 100 }, working), 'resume')
+  assert.equal(codexStatusRecoveryDecision({}, working), 'resume')
   assert.equal(codexStatusRecoveryDecision({}, idle), 'clear')
+  assert.equal(codexStatusRecoveryDecision({}, 'Starting OpenAI Codex…'), 'clear')
 })
 
 test('Pi target readiness never trusts terminal text in place of its native stream', () => {

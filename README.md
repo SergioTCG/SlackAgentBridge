@@ -54,6 +54,9 @@ for each one it has used.
 While a turn is active, its live status remains the newest channel item: newer
 messages, bridge output, artifact deliveries, and topic notices re-anchor the
 timer without resetting its elapsed-time or token state.
+Daemon restarts re-adopt an active provider turn and continue its original
+elapsed time; legacy Codex turns with missing restart metadata recover from the
+frozen Slack timer or latest accepted prompt instead of silently losing status.
 
 Codex output uses stable hook fields and the bridge never parses its unstable
 transcript JSONL directly; usage telemetry is delegated to `ccusage`'s public

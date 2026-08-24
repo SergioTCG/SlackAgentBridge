@@ -283,7 +283,7 @@ export function targetStartupState(provider, pane) {
   if (provider === 'codex') {
     const prompt = lines.some(line => /^\s*[›❯>]\s/.test(line))
     const footer = lines.some(line => /[·•].*(?:~\/|\/)[^\s]*/.test(line))
-    if (prompt && footer && !/esc to interrupt|ctrl-c to interrupt/i.test(visible)) return 'ready'
+    if (prompt && footer && !/(?:esc|ctrl-c|f12) to interrupt/i.test(visible)) return 'ready'
     if (/do you trust|trust the (?:contents|directory|folder|workspace|project)|(?:review|trust|approve|enable).{0,80}hooks?/i.test(visible)) return 'trust'
     return 'starting'
   }
@@ -297,8 +297,11 @@ export function targetStartupState(provider, pane) {
 }
 
 export function codexStatusRecoveryDecision(session, pane) {
-  if (!session?.codexTurnStartedAt) return 'clear'
-  return targetStartupState('codex', pane) === 'ready' ? 'clear' : 'resume'
+  if (targetStartupState('codex', pane) === 'ready') return 'clear'
+  if (session?.codexTurnStartedAt) return 'resume'
+  // An explicit interrupt hint is the only safe way to revive a legacy turn
+  // whose timestamp was lost. Generic startup/trust screens are not work.
+  return /(?:esc|ctrl-c|f12) to interrupt/i.test(stripTerminalControls(pane)) ? 'resume' : 'clear'
 }
 
 // Codex normally emits Stop when a turn finishes, but an operator interrupt can

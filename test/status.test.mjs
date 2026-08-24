@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { createStatusMessages } from '../daemon/status.mjs'
+import { createStatusMessages, recoverCodexTurnStartedAt } from '../daemon/status.mjs'
 
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 
@@ -132,10 +132,39 @@ test('daemon re-anchors status after posts, topic changes, and channel messages'
   assert.match(daemon, /liveStatuses\.adopt\(s\.id, ts\)/)
 })
 
+test('Codex restart recovery preserves or reconstructs the active turn duration', () => {
+  const now = Date.parse('2026-08-24T16:30:00Z')
+  const promptAt = Date.parse('2026-08-24T07:43:27.316Z')
+  const frozenAt = Date.parse('2026-08-24T16:20:00Z')
+
+  assert.equal(recoverCodexTurnStartedAt({ persistedStartedAt: 1234, now }), 1234)
+  assert.equal(recoverCodexTurnStartedAt({
+    statusMessage: {
+      ts: String((frozenAt - 1_000) / 1000),
+      edited: { ts: String(frozenAt / 1000) },
+      text: ':gear: Codex is working… (8h 36m 32s · 2.1M tokens this turn)',
+    },
+    latestPromptTs: String(promptAt / 1000),
+    now,
+  }), frozenAt - ((8 * 3600 + 36 * 60 + 32) * 1000))
+  assert.equal(recoverCodexTurnStartedAt({
+    statusMessage: {
+      ts: String(Date.parse('2026-08-20T07:15:35Z') / 1000),
+      edited: { ts: String(Date.parse('2026-08-20T07:50:00Z') / 1000) },
+      text: ':gear: Codex is working… (34m 25s)',
+    },
+    latestPromptTs: String(promptAt / 1000),
+    now,
+  }), promptAt)
+  assert.equal(recoverCodexTurnStartedAt({ latestPromptTs: String(promptAt / 1000), now }), promptAt)
+  assert.equal(recoverCodexTurnStartedAt({ now }), now)
+})
+
 test('Codex stop waits for confirmation and clears only the interrupted turn', () => {
   assert.match(daemon, /waitForCodexInterrupt\(session/)
   assert.match(daemon, /interruptedTurnStartedAt = session\.codexTurnStartedAt/)
   assert.match(daemon, /outcome === 'idle'[\s\S]*stopPoller\(session\)[\s\S]*clearStatus\(session\)/)
   assert.match(daemon, /Codex did not return to idle[\s\S]*working status remains active/)
   assert.match(daemon, /codexStatusRecoveryDecision\(s,[\s\S]*cleared stale Codex turn status/)
+  assert.match(daemon, /recoverCodexTurnStartedAt\([\s\S]*startCodexPoller\(s\)/)
 })

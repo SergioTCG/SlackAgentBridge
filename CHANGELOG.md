@@ -6,6 +6,17 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [1.5.0-rc.10] — 2026-08-24
+
+### Fixed
+- Daemon restart now recognizes Codex's bridge-configured `f12 to interrupt`
+  surface as active work, preserving the original long-running turn timer and
+  restoring its Slack status instead of clearing both as apparently idle.
+  Already-affected live turns safely reconstruct a missing start time from the
+  frozen Slack timer or latest accepted prompt without parsing Codex JSONL.
+
+[1.5.0-rc.10]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.10
+
 ## [1.5.0-rc.9] — 2026-08-24
 
 ### Added
