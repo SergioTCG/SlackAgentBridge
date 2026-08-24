@@ -3026,7 +3026,24 @@ async function launchAutomation(record) {
     account: null,
     provider: record.provider,
   })
+  let up = false
+  for (let i = 0; i < 24 && !up; i++) {
+    await sleep(500)
+    up = await tmuxAlive(record.tmux)
+  }
+  if (!up) throw new Error(`automation tmux did not materialize: ${record.tmux}`)
   log('automation launch accepted', record.provider, record.externalKey, record.tmux)
+}
+
+async function waitForAutomationInput(session) {
+  if (providerOf(session) !== 'pi') return
+  for (let i = 0; i < 60; i++) {
+    const stream = streams.get(session.pid)
+    if (stream?.provider === 'pi' && !stream.res.writableEnded && !stream.res.destroyed) return
+    if (!(session.pid && pidAlive(session.pid))) throw new Error('the correlated Pi process exited before its input stream connected')
+    await sleep(500)
+  }
+  throw new Error('the authenticated Pi input stream did not connect within 30 seconds')
 }
 
 async function injectAutomationPrompt(session, prompt) {
@@ -3047,7 +3064,20 @@ async function terminateAutomation(record) {
   if (session && providerOf(session) === 'pi' && session.pid && pidAlive(session.pid) && session.managed?.status === 'active') {
     try { await sendPiControl(session, 'managed-cancel') } catch {}
   }
-  if (record.tmux) await tmuxKill(record.tmux)
+  if (record.tmux) {
+    // `open -na Ghostty` returns before the window command necessarily creates
+    // tmux. Keep reaping this one deterministic identity for a short grace
+    // period so a delayed launch cannot appear after stop reported success.
+    let sawTmux = false
+    for (let i = 0; i < 20; i++) {
+      if (await tmuxAlive(record.tmux)) {
+        sawTmux = true
+        await tmuxKill(record.tmux)
+      } else if (sawTmux) break
+      await sleep(250)
+    }
+    if (await tmuxAlive(record.tmux)) throw new Error('the exact automation tmux could not be terminated')
+  }
   if (session?.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
   if (session) {
     stopPoller(session)
@@ -3090,6 +3120,7 @@ const automationLifecycle = createAutomationLifecycle({
   launch: launchAutomation,
   invite: inviteSlackCollaborator,
   inject: injectAutomationPrompt,
+  waitForInputReady: waitForAutomationInput,
   terminate: terminateAutomation,
   archive: archiveAutomationChannel,
   isTmuxAlive: tmuxAlive,
@@ -3101,10 +3132,14 @@ const automationLifecycle = createAutomationLifecycle({
   },
   log,
 })
-const automationReconciler = setInterval(() => {
-  automationLifecycle.reconcile().catch(error => log('automation reconciliation failed', String(error?.message || error)))
-}, 30000)
-automationReconciler.unref?.()
+let automationReconciler = null
+function startAutomationReconciler() {
+  if (automationReconciler) return
+  automationReconciler = setInterval(() => {
+    automationLifecycle.reconcile().catch(error => log('automation reconciliation failed', String(error?.message || error)))
+  }, 30000)
+  automationReconciler.unref?.()
+}
 
 // ---- HTTP (hooks in, SSE out) ----------------------------------------------
 http.createServer(async (req, res) => {
@@ -3810,6 +3845,7 @@ setInterval(async () => {
   log('socket mode connected — bridge ready')
   await recoverProviderSwitches()
   automationLifecycle.recover()
+  startAutomationReconciler()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   selfUpdate('boot').catch(e => log('self-update error', String(e)))
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })

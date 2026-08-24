@@ -22,7 +22,7 @@ function fixture(overrides = {}) {
     whitelist: { COTHER: { UOTHER000: 'Other' } },
   }
   const queue = []
-  const calls = { launch: [], invite: [], inject: [], terminate: [], archive: [], notify: [], persist: [] }
+  const calls = { launch: [], invite: [], ready: [], inject: [], terminate: [], archive: [], notify: [], persist: [] }
   const lifecycle = createAutomationLifecycle({
     state,
     home: root,
@@ -33,9 +33,10 @@ function fixture(overrides = {}) {
       calls.invite.push([channel, userId])
       return { name: userId === 'U098WAUUX5M' ? 'Rade' : userId, invitation: 'invited' }
     },
+    waitForInputReady: async session => { calls.ready.push(session.id) },
     inject: async (session, prompt) => { calls.inject.push([session.id, prompt]) },
     terminate: async automation => { calls.terminate.push(automation.externalKey) },
-    archive: async channel => { calls.archive.push(channel) },
+    archive: async (channel, automation) => { calls.archive.push([channel, automation.externalKey]) },
     notifyFailure: async (automation, failure) => { calls.notify.push([automation.externalKey, failure.code]) },
     now: (() => { let value = 1_000; return () => ++value })(),
     ...overrides.dependencies,
@@ -149,6 +150,7 @@ test('SessionStart correlation completes invitations and injects the initial pro
   assert.deepEqual(f.calls.invite, [['CAUTO', 'U098WAUUX5M']])
   assert.deepEqual(f.state.whitelist.CAUTO, { U098WAUUX5M: 'Rade' })
   assert.deepEqual(f.calls.inject, [['session-123', f.request.initialPrompt]])
+  assert.deepEqual(f.calls.ready, ['session-123'])
   assert.equal(f.lifecycle.status(f.request.externalKey).status, 'active')
   assert.equal(f.lifecycle.status(f.request.externalKey).prompt.status, 'delivered')
 
@@ -221,6 +223,8 @@ test('provider-specific flags and request fields use the remote launch allowlist
   )
   assert.throws(() => validateAutomationRequest({ ...f.request, collaborators: ['not-a-slack-id'] }, { home: f.root }), /collaborator/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--continue'] }, { home: f.root }), /independently owned/i)
+  assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--continue=true'] }, { home: f.root }), /independently owned/i)
+  assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--continue=false'] }, { home: f.root }), /independently owned/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--effort', 'xhigh'] }, { home: f.root }), /effort/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--effort=xhigh'] }, { home: f.root }), /effort/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, provider: undefined }, { home: f.root }), /provider/i)
@@ -260,13 +264,95 @@ test('stop and archive are exact and idempotent without touching unrelated state
   await f.lifecycle.stop(f.request.externalKey, { archive: true })
   await f.lifecycle.stop(f.request.externalKey, { archive: true })
   assert.deepEqual(f.calls.terminate, [f.request.externalKey])
-  assert.deepEqual(f.calls.archive, ['CAUTO'])
+  assert.deepEqual(f.calls.archive, [['CAUTO', f.request.externalKey]])
   assert.equal(f.lifecycle.status(f.request.externalKey).status, 'stopped')
   assert.deepEqual({
     session: f.state.sessions.unrelated,
     channel: f.state.channels.COTHER,
     whitelist: f.state.whitelist.COTHER,
   }, unrelatedBefore)
+})
+
+test('stop waits for an in-flight launch before terminating its exact tmux', async t => {
+  let acceptLaunch
+  const launchGate = new Promise(resolve => { acceptLaunch = resolve })
+  const f = fixture({
+    dependencies: {
+      launch: async automation => {
+        f.calls.launch.push(automation.externalKey)
+        await launchGate
+      },
+    },
+  })
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  f.lifecycle.create(f.request)
+  const launchTask = f.queue.shift()()
+  await new Promise(resolve => setImmediate(resolve))
+
+  const stopping = f.lifecycle.stop(f.request.externalKey)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(f.calls.terminate, [], 'termination must not race ahead of launch completion')
+
+  acceptLaunch()
+  await launchTask
+  const stopped = await stopping
+  assert.deepEqual(f.calls.terminate, [f.request.externalKey])
+  assert.equal(stopped.status, 'stopped')
+})
+
+test('reconcile correlates a persisted SessionStart before applying launch timeout', async t => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  const { automation } = f.lifecycle.create(f.request)
+  f.queue.length = 0
+  const record = f.state.automations[f.request.externalKey]
+  record.status = 'awaiting_session'
+  record.launchRequestedAt = 1
+  f.state.sessions['session-123'] = {
+    id: 'session-123', tmux: automation.tmux, channel: 'CAUTO', cwd: f.cwd,
+  }
+
+  await f.lifecycle.reconcile()
+  await f.drain()
+  assert.equal(f.lifecycle.status(f.request.externalKey).status, 'active')
+  assert.equal(f.lifecycle.status(f.request.externalKey).failure, null)
+})
+
+test('input readiness is established before the one-way prompt claim', async t => {
+  const order = []
+  const f = fixture({
+    dependencies: {
+      waitForInputReady: async () => { order.push('ready') },
+      inject: async () => { order.push('inject') },
+    },
+  })
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  f.lifecycle.correlateSessionStart({ id: 'session-123', tmux: automation.tmux, channel: 'CAUTO', cwd: f.cwd })
+  await f.drain()
+
+  assert.deepEqual(order, ['ready', 'inject'])
+  assert.equal(f.lifecycle.status(f.request.externalKey).prompt.status, 'delivered')
+})
+
+test('input readiness failure leaves the prompt unclaimed and reports an actionable failure', async t => {
+  const f = fixture({
+    dependencies: {
+      waitForInputReady: async () => { throw new Error('Pi stream unavailable') },
+      inject: async () => assert.fail('must not inject without a ready input transport'),
+    },
+  })
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  f.lifecycle.correlateSessionStart({ id: 'session-123', tmux: automation.tmux, channel: 'CAUTO', cwd: f.cwd })
+  await f.drain()
+
+  const status = f.lifecycle.status(f.request.externalKey)
+  assert.equal(status.status, 'failed')
+  assert.equal(status.failure.code, 'input_not_ready')
+  assert.equal(status.prompt.status, 'pending')
 })
 
 test('legacy state and manual spawn state remain untouched until automation is used', t => {

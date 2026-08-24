@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 
-import { handleAutomationHttp } from '../daemon/automation-http.mjs'
+import { handleAutomationHttp, readAutomationJson } from '../daemon/automation-http.mjs'
 
 async function withServer(lifecycle, run) {
   const server = http.createServer(async (req, res) => {
@@ -78,4 +78,15 @@ test('automation HTTP rejects malformed JSON, oversized bodies, bad stop options
     const missing = await fetch(`${base}/automation/sessions/${encodeURIComponent('missing')}`)
     assert.equal(missing.status, 404)
   })
+})
+
+test('automation JSON decoding preserves UTF-8 split across transport chunks', async () => {
+  const encoded = Buffer.from(JSON.stringify({ initialPrompt: 'Plan this carefully: 🧠 東京' }))
+  const emoji = encoded.indexOf(Buffer.from('🧠'))
+  async function* splitRequest() {
+    yield encoded.subarray(0, emoji + 1)
+    yield encoded.subarray(emoji + 1, emoji + 3)
+    yield encoded.subarray(emoji + 3)
+  }
+  assert.deepEqual(await readAutomationJson(splitRequest()), { initialPrompt: 'Plan this carefully: 🧠 東京' })
 })

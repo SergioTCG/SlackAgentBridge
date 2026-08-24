@@ -7,15 +7,19 @@ function sendJson(res, status, value) {
   res.end(JSON.stringify(value))
 }
 
-async function readJson(req) {
-  let raw = ''
+export async function readAutomationJson(req) {
+  const chunks = []
+  let length = 0
   let tooLarge = false
   for await (const chunk of req) {
     if (tooLarge) continue // drain the socket so keep-alive clients are not reset
-    raw += chunk
-    if (Buffer.byteLength(raw) > MAX_REQUEST_BODY) { raw = ''; tooLarge = true }
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    length += buffer.length
+    if (length > MAX_REQUEST_BODY) { chunks.length = 0; tooLarge = true; continue }
+    chunks.push(buffer)
   }
   if (tooLarge) throw new AutomationRequestError('request_too_large', 'automation request body is too large', 413)
+  const raw = Buffer.concat(chunks, length).toString('utf8')
   try { return JSON.parse(raw || '{}') }
   catch { throw new AutomationRequestError('invalid_json', 'request body is not valid JSON') }
 }
@@ -28,7 +32,7 @@ function decodedKey(segment) {
 export async function handleAutomationHttp(req, res, url, lifecycle) {
   if (url.pathname === '/automation/sessions' && req.method === 'POST') {
     try {
-      const { automation, created } = lifecycle.create(await readJson(req))
+      const { automation, created } = lifecycle.create(await readAutomationJson(req))
       sendJson(res, 202, {
         ok: true,
         created,
@@ -58,7 +62,7 @@ export async function handleAutomationHttp(req, res, url, lifecycle) {
       return true
     }
     if (match[2] && req.method === 'POST') {
-      const body = await readJson(req)
+      const body = await readAutomationJson(req)
       if (body.archive !== undefined && typeof body.archive !== 'boolean') {
         throw new AutomationRequestError('invalid_archive', 'archive must be a boolean')
       }

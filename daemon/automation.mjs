@@ -56,7 +56,7 @@ export function validateAutomationRequest(input, { home = process.env.HOME } = {
   let flags
   try { flags = normalizeRemoteLaunchFlags(provider, input.flags ?? []) }
   catch (error) { requestError('invalid_flags', String(error?.message || error)) }
-  if (provider === 'claude' && flags.includes('--continue')) {
+  if (provider === 'claude' && flags.some(flag => flag.split('=', 1)[0] === '--continue')) {
     requestError('invalid_flags', '--continue cannot create an independently owned automation session')
   }
 
@@ -130,6 +130,7 @@ export function createAutomationLifecycle({
   launch,
   invite,
   inject,
+  waitForInputReady = async () => {},
   terminate,
   archive,
   isTmuxAlive = async () => true,
@@ -142,7 +143,7 @@ export function createAutomationLifecycle({
   for (const [name, fn] of Object.entries({ persist, launch, invite, inject, terminate, archive })) {
     if (typeof fn !== 'function') throw new TypeError(`automation lifecycle requires ${name}()`)
   }
-  const running = new Set()
+  const running = new Map()
   const sessionRefs = new Map()
 
   const records = () => state.automations || {}
@@ -158,13 +159,16 @@ export function createAutomationLifecycle({
 
   function runOnce(key, operation, task) {
     const marker = `${key}:${operation}`
-    if (running.has(marker)) return
-    running.add(marker)
+    if (running.has(marker)) return running.get(marker)
+    let finish
+    const completion = new Promise(resolve => { finish = resolve })
+    running.set(marker, completion)
     schedule(async () => {
       try { await task() }
       catch (error) { log('automation task failed', key, operation, errorMessage(error)) }
-      finally { running.delete(marker) }
+      finally { running.delete(marker); finish() }
     })
+    return completion
   }
 
   async function launchPending(externalKey) {
@@ -251,6 +255,15 @@ export function createAutomationLifecycle({
       touch(record)
       return
     }
+
+    try { await waitForInputReady(session) }
+    catch (error) {
+      if (record.status === 'stopping' || record.status === 'stopped') return
+      setFailure(record, 'input_not_ready', errorMessage(error), 'Fix the provider input transport, then stop this automation and retry with a new externalKey.')
+      await notifyFailure(record, record.failure).catch(() => {})
+      return
+    }
+    if (record.status === 'stopping' || record.status === 'stopped') return
 
     // tmux/SSE input and the JSON state file cannot share a transaction. Claim
     // first and never retry an ambiguous claim: this guarantees at-most-once
@@ -372,6 +385,12 @@ export function createAutomationLifecycle({
   async function reconcile() {
     for (const record of Object.values(records())) {
       if (!['launching', 'awaiting_session'].includes(record.status) || record.sessionId || !record.launchRequestedAt) continue
+      const correlated = Object.values(state.sessions || {}).find(session =>
+        session.tmux === record.tmux && providerOf(session) === record.provider && session.channel)
+      if (correlated) {
+        correlateSessionStart(correlated)
+        continue
+      }
       if (now() - record.launchRequestedAt < launchTimeoutMs) continue
       let alive = false
       try { alive = await isTmuxAlive(record.tmux) } catch {}
@@ -397,13 +416,17 @@ export function createAutomationLifecycle({
     record.stop.requestedAt ||= now()
     touch(record)
     try {
+      // A standard Ghostty launch may return before the tmux session appears.
+      // Let that exact, journaled launch settle before attempting termination,
+      // otherwise a stopped automation could materialize after the kill check.
+      await (running.get(`${externalKey}:launch`) || Promise.resolve())
       if (!record.stop.terminated) {
         await terminate(record)
         record.stop.terminated = true
         touch(record)
       }
       if (record.stop.archiveRequested && record.channelId && !record.stop.channelArchived) {
-        await archive(record.channelId)
+        await archive(record.channelId, record)
         record.stop.channelArchived = true
         touch(record)
       }
