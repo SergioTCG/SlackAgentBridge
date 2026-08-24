@@ -15,8 +15,8 @@ Slack (private channels, Socket Mode)
    │▼
 ┌────────────────────────── Mac Studio ──────────────────────────┐
 │  daemon/daemon.mjs  ← launchd, owns the ONE Socket Mode conn   │
-│    • HTTP 127.0.0.1:8877  (hooks, permissions, uploads, SSE)   │
-│    • state.json  (channel lineage ↔ active/standby legs)       │
+│    • HTTP 127.0.0.1:8877  (hooks, automation, uploads, SSE)    │
+│    • state.json  (sessions, lineages, automation journals)     │
 │    • handoffs/   (private summaries + reviewed patches, 0600)  │
 │    • lifecycle, mirroring, status, resurrection, ./commands    │
 │    ▲ POST /hook       ▲ /channel/stream       ▲ /pi/*         │
@@ -62,6 +62,10 @@ Slack (private channels, Socket Mode)
   file paths to the loopback daemon with the session's provider/tmux identity
   and a one-use grant supplied only by an accepted Slack prompt. It cannot
   choose a channel or user.
+- **`bin/sab-automation`** — a JSON-safe loopback client for durable
+  create/status/stop automation. Prompts come from a file or stdin rather than
+  shell interpolation; the daemon still owns validation, launch, correlation,
+  Slack membership, and termination.
 - **`hooks/hook.sh`** — registered globally for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`. Exits instantly unless `CCS_BRIDGE=1` (non-bridged sessions pay zero cost). Otherwise POSTs the hook JSON + `ppid` + `tmux` name to the daemon (curl, ≤2s cap, always exit 0 — hooks are synchronous).
 - **`hooks/codex-hook.sh`** — separately registered and gated by `CCS_PROVIDER=codex`. Lifecycle events post to the daemon; `PermissionRequest` waits for a Slack verdict and emits the documented Codex decision JSON. Failure returns no decision, preserving the local approval flow.
 - **Codex resurrection bootstrap** — `codex resume` receives the first queued
@@ -80,11 +84,13 @@ Slack (private channels, Socket Mode)
    `codex`, or `pi`. Claude and Pi inbound streams also join by PID. Persisted
    identity remains the raw native session ID, with missing provider fields
    interpreted as Claude for backward compatibility.
-4. **No archiving, ever** (design v2). Ended sessions → channel gets "💤 write
-   here to resume". A dormant-channel message makes the daemon spawn
+4. **No implicit archiving** (design v2). Ended interactive sessions → channel
+   gets "💤 write here to resume". A dormant-channel message makes the daemon spawn
    Ghostty+tmux with the provider's native resume form (`sab-cc --resume`,
    `sab-codex resume`, or `sab-pi --session`), queue the message, and deliver it
-   after reconnection.
+   after reconnection. The sole lifecycle exception is an explicit
+   `POST /automation/sessions/:externalKey/stop` with `{"archive":true}`; it
+   archives only the automation's immutable, exact channel ID.
 5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **in-session commands** — `/cc-model sonnet` in Slack becomes `tmux send-keys "/model sonnet" Enter`, and `/cc-stop` sends `Escape` to interrupt.
 6. **Private channels only; single trusted sender.** The workspace has 35 people. Only messages from `SLACK_USER_ID` are processed; everyone else is silently ignored (and can't see the channels anyway).
 7. **Mirroring is provider-event-driven and token-free.** Claude keeps its byte-offset
@@ -153,6 +159,18 @@ Slack (private channels, Socket Mode)
     bridge-owned terminating submission extension; malformed legacy output gets
     at most one no-tools repair attempt. Read-only review is reserved in the
     subagent budget and must pass before the final response is mirrored.
+15. **Automation is a journaled ownership protocol, not `/spawn` plus polling.**
+    `POST /automation/sessions` persists a unique external key and deterministic
+    tmux name synchronously before launch. Repeated keys return that same
+    journal. A matching provider `SessionStart` supplies the native session ID
+    and channel; collaborators are invited and display-name-resolved one at a
+    time, and each allowlist update shares an atomic state checkpoint with its
+    setup status. The prompt is claimed and its plaintext removed before the
+    one native input side effect. An ambiguous crash is reported and never
+    retried. Exact stop validates provider/session/tmux/channel ownership,
+    revokes grants, removes only that binding and its relevant lineage/handoff,
+    and optionally archives only its recorded channel. It never calls bulk
+    cleanup.
 
 ## Command grammar (Slack)
 
@@ -202,6 +220,20 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
   topic change, or a newer channel message re-anchors any active working status
   below the new timeline item.
 - You may rename channels freely — mapping is by immutable channel id.
+
+### Automation lifecycle
+
+`pending → launching → awaiting_session → configuring_collaborators →
+ready_to_prompt → injecting_prompt → active` is persisted in
+`state.automations[externalKey]`. `failed`, `stopping`, and `stopped` are durable
+terminal/control states with actionable failure metadata. A restart may issue a
+launch only from `pending`; it never repeats `launching` or
+`awaiting_session`. A five-minute reconciliation deadline turns a missing tmux
+or missing `SessionStart` into an actionable failure without relaunching. It
+resumes collaborator setup from its per-user checkpoints,
+but a prompt already marked `claimed` is failed as ambiguous rather than sent
+again. Synthetic automation prompts bypass the Slack-message ingress and
+therefore never mint an artifact grant.
 
 ## Known limitations
 

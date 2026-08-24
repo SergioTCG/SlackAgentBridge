@@ -4,6 +4,28 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- A loopback-only, persisted automation lifecycle API creates, queries, and
+  exactly stops sessions by caller-supplied idempotency key. Native
+  `SessionStart` correlation, per-collaborator invitation/name/allowlist state,
+  at-most-once initial-prompt claims, exact channel archiving, grant revocation,
+  and restart recovery are journaled atomically.
+- `sab-automation` provides JSON-safe create/status/stop commands with prompt
+  input from a file or stdin.
+
+### Fixed
+- The manual collaborator picker now invites the selected user to the private
+  Slack channel before whitelisting them and reports actionable invitation
+  failures without granting prompt access.
+
+### Security
+- Automation working directories and provider flags use the existing remote
+  launch boundaries; Claude automations cannot adopt an unrelated conversation
+  with `--continue`. Exact stop refuses rebound tmux/session/channel identities,
+  and synthetic initial prompts never receive artifact-upload grants.
+
 ## [1.5.0-rc.8] — 2026-08-21
 
 ### Fixed

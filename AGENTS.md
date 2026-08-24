@@ -19,6 +19,9 @@ These public interfaces are compatibility-sensitive:
 - `sab-cc`, `sab-codex`, and `sab-pi` are the canonical provider launchers.
   `sab-upload` is the shared artifact-return helper. `ccs` and `ccs-codex` remain
   compatibility aliases throughout 1.x.
+- `sab-automation` is the JSON-safe client for the loopback
+  `/automation/sessions` create/status/stop lifecycle. External keys are durable
+  idempotency identities and must never be reused to launch or prompt twice.
 - `ccs-account`, `ccs-spawn`, internal `ccs-*` tmux names, and `CCS_*` remain
   stable until a separately designed migration justifies changing them.
 - Configuration and state remain in `~/.config/ccs`; the local HTTP port remains
@@ -84,6 +87,11 @@ generated MCP configuration. Do not print secrets during diagnostics.
   API error must not crash the long-running daemon.
 - State writes remain atomic. Replacement processes must not be overwritten or
   marked dormant by stale hooks from the process they superseded.
+- Automation creation journals its tmux identity before launch. Collaborators
+  are invited before whitelisting, and the synthetic initial prompt is claimed
+  only after native session/channel correlation and complete collaborator
+  setup. It never receives an artifact grant. Exact automation stop must not
+  delegate to bulk cleanup or mutate a rebound/unrelated session or channel.
 - Provider-switch phase changes require immediate atomic persistence. Private
   handoff/alignment turns must not mirror into Slack, and a target must not
   receive the channel until its read-only readiness turn validates.
@@ -135,7 +143,7 @@ npm ci
 npm run audit
 npm test
 npm run check
-for file in daemon/*.mjs channel/*.mjs scripts/*.mjs bin/sab-upload; do node --check "$file"; done
+for file in daemon/*.mjs channel/*.mjs scripts/*.mjs bin/sab-upload bin/sab-automation; do node --check "$file"; done
 PI_OFFLINE=1 pi --extension ./pi/sab-extension.ts --list-models
 shellcheck -S warning bin/sab-cc bin/sab-codex bin/sab-pi \
   bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \

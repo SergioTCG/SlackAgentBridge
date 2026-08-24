@@ -91,6 +91,48 @@ export function normalizeLaunchFlag(provider, flag) {
     : null
 }
 
+// Validate an argv vector coming from a local HTTP client. Keep this in the
+// provider adapter so /spawn and durable automation cannot slowly diverge into
+// different remote-launch allowlists. Claude historically accepts model and
+// effort as two argv items; the other providers deliberately require inline
+// values so a value can never be reinterpreted as another option.
+export function normalizeRemoteLaunchFlags(provider, input) {
+  if (!Array.isArray(input)) throw new Error('flags must be an array')
+  if (input.length > 64) throw new Error('too many launch flags')
+  const flags = []
+  for (let i = 0; i < input.length; i++) {
+    if (typeof input[i] !== 'string' || !input[i] || input[i].includes('\0')) {
+      throw new Error('every launch flag must be a non-empty string')
+    }
+    const raw = input[i]
+    const normalized = normalizeLaunchFlag(provider, raw)
+    if (!normalized) throw new Error(`flag not allowed: ${raw}`)
+    if (provider === 'claude' && normalized.startsWith('--effort=')) {
+      const value = normalized.slice('--effort='.length)
+      if (!['low', 'medium', 'high', 'max'].includes(value)) throw new Error(`invalid Claude effort: ${value}`)
+    }
+    if (provider === 'claude' && normalized.startsWith('--model=')) {
+      const value = normalized.slice('--model='.length)
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) throw new Error(`invalid Claude model: ${value}`)
+    }
+    flags.push(normalized)
+    if (provider === 'claude' && (normalized === '--model' || normalized === '--effort')) {
+      const value = input[++i]
+      if (typeof value !== 'string' || !value || value.startsWith('-') || value.includes('\0') || value.length > 128) {
+        throw new Error(`missing or invalid value for ${normalized}`)
+      }
+      if (normalized === '--effort' && !['low', 'medium', 'high', 'max'].includes(value)) {
+        throw new Error(`invalid Claude effort: ${value}`)
+      }
+      if (normalized === '--model' && !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) {
+        throw new Error(`invalid Claude model: ${value}`)
+      }
+      flags.push(value)
+    }
+  }
+  return flags
+}
+
 export function defaultNewFlagsFor(provider, env = process.env) {
   const configured = provider === 'codex'
     ? env.CCS_CODEX_NEW_FLAGS || CODEX_DANGEROUS_FLAG
