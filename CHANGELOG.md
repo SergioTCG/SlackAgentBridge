@@ -6,6 +6,12 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex interim commentary now correlates npm's persistent App Server launcher
+  with its native child PID, so exact-process fencing no longer suppresses
+  semantic progress after a native lifecycle hook or hookless resume adoption.
+
 ## [2.0.0] — 2026-08-26
 
 ### Added

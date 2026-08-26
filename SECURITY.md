@@ -103,9 +103,11 @@ accounts, and the Mac user running the daemon.
   event proxy bind only to random loopback ports. The proxy forwards every frame
   unchanged to the TUI but submits only completed `agentMessage` events
   explicitly marked `commentary` to port `8877`. The daemon independently
-  requires the exact Codex process, tmux, native session, active channel, and
-  lineage state before posting. Command lines, command output, diffs, plans,
-  reasoning, partial deltas, and final answers never enter this endpoint.
+  canonicalizes a retained npm App Server launcher only to its direct matching
+  native child, then requires that exact Codex process, tmux, native session,
+  active channel, and lineage state before posting. Command lines, command
+  output, diffs, plans, reasoning, partial deltas, and final answers never enter
+  this endpoint.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
   `sab new pi` from the checked-out release and is not installed globally or into a
   project. Its inbound stream and permission endpoints require matching Pi

@@ -69,7 +69,8 @@ import {
   bulkUpdateBlockReason, planBulkSessionUpdate, runBulkSessionUpdate,
 } from './session-update.mjs'
 import {
-  applyHooklessCodexClaim, hooklessAuthoritativeCodexSessions, tmuxCodexProcessPid, waitForCodexResumeClaim,
+  applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
+  tmuxCodexProcessPid, waitForCodexResumeClaim,
 } from './codex-resume.mjs'
 import {
   AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
@@ -3429,7 +3430,8 @@ http.createServer(async (req, res) => {
         },
       })
       if (!commentary) { res.writeHead(400); res.end('invalid commentary'); return }
-      const pid = await resolveAgentPid(url.searchParams.get('ppid'), 'codex')
+      const reportedPid = await resolveAgentPid(url.searchParams.get('ppid'), 'codex')
+      const pid = await codexAppServerProcessPid(reportedPid, { execFile })
       const tmux = url.searchParams.get('tmux') || ''
       const session = state.sessions[commentary.threadId]
       const targetClaim = transitionForTarget(state, 'codex', tmux)

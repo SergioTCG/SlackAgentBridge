@@ -24,6 +24,44 @@ function codexProcess(row) {
   return /(?:^|\s)[^\s"']*\/codex(?=\s|$)/.test(String(row.args || ''))
 }
 
+function appServerProcess(row) {
+  return codexProcess(row) && /(?:^|\s)app-server(?=\s|$)/.test(String(row.args || ''))
+}
+
+// npm's `codex app-server` process is a Node launcher which keeps running
+// after it starts the native App Server binary. Native lifecycle hooks identify
+// the child, so commentary originating from the launcher must use that same
+// canonical PID or the exact-process fence will correctly reject it.
+export function canonicalCodexAppServerPid(rows, launcherPid) {
+  const processes = Array.isArray(rows) ? rows : []
+  let currentPid = Number(launcherPid)
+  if (!Number.isSafeInteger(currentPid) || currentPid < 2) return null
+
+  for (let hop = 0; hop < 4; hop++) {
+    const current = processes.find(row => Number(row.pid) === currentPid)
+    if (!current || !appServerProcess(current)) break
+    const child = processes
+      .filter(row => Number(row.ppid) === currentPid && appServerProcess(row))
+      .sort((a, b) => Number(a.pid) - Number(b.pid))[0]
+    if (!child) break
+    currentPid = Number(child.pid)
+  }
+  return currentPid
+}
+
+export async function codexAppServerProcessPid(launcherPid, { execFile }) {
+  const fallback = Number(launcherPid)
+  if (!Number.isSafeInteger(fallback) || fallback < 2) return null
+  try {
+    const table = await execFile('ps', ['-axww', '-o', 'pid=,ppid=,comm=,args='], { maxBuffer: 8 << 20 })
+    return canonicalCodexAppServerPid(parseProcessTable(table.stdout), fallback)
+  } catch {
+    // Retain the supplied identity on lookup failure. The caller's existing
+    // PID/tmux/session checks still fail closed if it is only a launcher.
+    return fallback
+  }
+}
+
 export function selectCodexProcessPid(rows, panePids) {
   const processes = Array.isArray(rows) ? rows : []
   const roots = [...new Set((panePids || []).map(Number).filter(pid => Number.isSafeInteger(pid) && pid > 1))]
@@ -57,7 +95,8 @@ export function selectCodexProcessPid(rows, panePids) {
     // its ancestor merely because its argv also says `codex app-server`.
     return depth.get(a.pid) - depth.get(b.pid) || aServer - bServer || a.pid - b.pid
   })
-  return candidates[0]?.pid || null
+  const selected = candidates[0]
+  return selected ? canonicalCodexAppServerPid(processes, selected.pid) : null
 }
 
 export async function tmuxCodexProcessPid(tmux, { execFile }) {

@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  applyHooklessCodexClaim, hooklessAuthoritativeCodexSessions,
+  applyHooklessCodexClaim, canonicalCodexAppServerPid, codexAppServerProcessPid,
+  hooklessAuthoritativeCodexSessions,
   parseProcessTable,
   selectCodexProcessPid,
   tmuxCodexProcessPid,
@@ -28,6 +29,30 @@ test('Codex PID selection is confined to the exact tmux tree and prefers App Ser
   assert.equal(selectCodexProcessPid(processRows, [100]), 110)
   assert.equal(selectCodexProcessPid(processRows, [200]), 210)
   assert.equal(selectCodexProcessPid(processRows, [999]), null)
+})
+
+test('Codex App Server identity follows its npm launcher to the matching native child', async () => {
+  const rows = [
+    ...processRows,
+    { pid: 111, ppid: 110, comm: '/opt/homebrew/lib/codex', args: '/opt/homebrew/lib/vendor/codex app-server --listen ws://127.0.0.1:0' },
+    { pid: 112, ppid: 110, comm: '/bin/sh', args: '/bin/sh unrelated-helper' },
+    { pid: 211, ppid: 210, comm: '/opt/homebrew/lib/codex', args: '/opt/homebrew/lib/vendor/codex app-server --listen ws://127.0.0.1:2' },
+  ]
+  assert.equal(canonicalCodexAppServerPid(rows, 110), 111)
+  assert.equal(canonicalCodexAppServerPid(rows, 111), 111)
+  assert.equal(canonicalCodexAppServerPid(rows, 120), 120)
+  assert.equal(selectCodexProcessPid(rows, [100]), 111)
+  assert.equal(selectCodexProcessPid(rows, [200]), 211)
+
+  assert.equal(await codexAppServerProcessPid(110, {
+    execFile: async command => {
+      assert.equal(command, 'ps')
+      return { stdout: rows.map(row => `${row.pid} ${row.ppid} ${row.comm} ${row.args}`).join('\n') }
+    },
+  }), 111)
+  assert.equal(await codexAppServerProcessPid(110, {
+    execFile: async () => { throw new Error('ps unavailable') },
+  }), 110)
 })
 
 test('Codex PID selection supports the direct native TUI fallback', () => {

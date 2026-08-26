@@ -176,10 +176,13 @@ final assistant text, turn boundaries, and permission decisions. The App Server
 proxy is a bounded supplementary egress path: it forwards every protocol frame
 unchanged but submits only completed `agentMessage` values explicitly marked
 `commentary`. It never emits commands, command output, diffs, plans, reasoning,
-deltas, or final answers. If either sidecar cannot start, the runner falls back
-to the direct TUI. Transcript JSONL is never parsed; `ccusage` is the public
-usage adapter. Remote flagless sessions default to Codex's canonical dangerous
-flag (`--yolo`).
+deltas, or final answers. Before applying the exact-process fence, the daemon
+canonicalizes npm's persistent App Server launcher to its direct matching
+native child—the identity emitted by lifecycle hooks—and then revalidates that
+child against the exact tmux. If either sidecar cannot start, the runner falls
+back to the direct TUI. Transcript JSONL is never parsed; `ccusage` is the
+public usage adapter. Remote flagless sessions default to Codex's canonical
+dangerous flag (`--yolo`).
 
 ### Pi
 
