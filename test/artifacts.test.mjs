@@ -196,7 +196,7 @@ test('artifact validation enforces file-count and aggregate-size limits', () => 
 test('delivery instruction is explicit, provider-neutral, and keeps the destination daemon-controlled', () => {
   const instruction = artifactDeliveryInstruction('grant-123')
   assert.match(instruction, /if and only if/i)
-  assert.match(instruction, /sab-upload --grant grant-123 -- FILE_PATH/)
+  assert.match(instruction, /sab upload --grant grant-123 -- FILE_PATH/)
   assert.match(instruction, /current workspace/i)
   assert.doesNotMatch(instruction, /channel[_ -]?id/i)
 })

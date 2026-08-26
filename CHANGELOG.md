@@ -6,6 +6,59 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.0.0-rc.1] — 2026-08-26
+
+### Added
+
+- One `sab` CLI now launches Claude, Codex, and Pi and exposes terminal,
+  account, artifact, and automation subcommands.
+- Headless tmux lifecycle decouples active providers from Ghostty. Local and
+  Slack terminal controls list, open/focus, close, open all, or close all
+  optional viewports without stopping sessions.
+- Loopback terminal endpoints use the same authoritative-session resolver as
+  Slack and reject browser-originated or non-JSON mutations.
+- A 2.0 migration guide and release canary cover command replacement, manifest
+  migration, headless adoption, and rollback.
+- `/sab-update all` performs a guarded quiet-period sweep of every idle
+  authoritative session, updates each represented provider CLI once, resumes
+  native identities with their existing settings, queues messages during the
+  relaunch, and reports every skip or failure.
+
+### Changed
+
+- **Breaking:** Slack now exposes only the unified `/sab-*` namespace. Session
+  channels infer their authoritative provider; `/sab-new` and `/sab-switch`
+  require an explicit provider.
+- Daemon-created, resumed, switched, and automated sessions start in detached
+  tmux. Ghostty is opened only as an inspectable viewport or for an unavoidable
+  provider-local trust gate.
+- The canonical Slack manifest, installer, architecture, security contract,
+  provider notes, contributor instructions, and README now describe the 2.0
+  interface. Upgrading requires applying the manifest to the existing Slack app.
+- New tmux names use `sab-*`; historical names already stored in state remain
+  valid. Configuration, `CCS_*`, port `8877`, channels, checkout migration, and
+  the historical LaunchAgent label remain compatible.
+
+### Removed
+
+- Removed every 1.x public launcher/helper executable: `ccs*`, `sab-cc`,
+  `sab-codex`, `sab-pi`, `sab-upload`, and `sab-automation`. The installer
+  removes only matching legacy symlinks and publishes `sab` alone.
+- Removed the terminal-close watcher that previously killed a provider and
+  converted its channel to dormant state.
+
+### Security
+
+- Terminal bulk actions derive targets only from exact active channel/session
+  mappings and exclude standby, provisional, stale, and rebound records.
+- Session update sweeps fail closed around active turns, questions,
+  permissions, switches, managed Pi work, automation ownership, and concurrent
+  wakes/restarts, with a second authority/PID/tmux check before each stop.
+- Closing a terminal detaches only its tmux client and cannot send provider
+  input or terminate the correlated process.
+
+[2.0.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.0.0-rc.1
+
 ## [1.5.0-rc.11] — 2026-08-26
 
 ### Added

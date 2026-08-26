@@ -1,0 +1,71 @@
+#!/bin/bash
+# sab — the single Slack Agent Bridge command-line interface.
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [ "${SOURCE:0:1}" != "/" ] && SOURCE="$DIR/$SOURCE"
+done
+BRIDGE="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  sab new <claude|codex|pi> [--cwd DIR] [PROVIDER_FLAGS...]
+  sab terminal list [--json]
+  sab terminal open <session|tmux|here>
+  sab terminal close <session|tmux|here>
+  sab terminal open-all|show-all|close-all
+  sab account <list|add|set|remove> [name]
+  sab upload --grant TOKEN -- FILE_PATH [FILE_PATH ...]
+  sab automation <create|status|stop> ...
+EOF
+}
+
+command_name="${1:-help}"
+[ "$#" -eq 0 ] || shift
+
+case "$command_name" in
+  new)
+    provider="${1:-}"
+    case "$provider" in claude|codex|pi) shift ;; *) echo "sab: new requires claude, codex, or pi" >&2; exit 2 ;; esac
+    cwd="$PWD"
+    if [ "${1:-}" = "--cwd" ]; then
+      [ "$#" -ge 2 ] || { echo "sab: --cwd requires a directory" >&2; exit 2; }
+      cwd="$2"; shift 2
+    elif [[ "${1:-}" == --cwd=* ]]; then
+      cwd="${1#--cwd=}"; shift
+    fi
+    [ -d "$cwd" ] || { echo "sab: directory not found: $cwd" >&2; exit 2; }
+    cd "$cwd"
+    exec "$BRIDGE/scripts/run-session.sh" "$provider" "$@"
+    ;;
+  terminal)
+    exec node "$BRIDGE/scripts/sab-terminal.mjs" "$@"
+    ;;
+  account)
+    exec "$BRIDGE/scripts/sab-account.sh" "$@"
+    ;;
+  upload)
+    exec node "$BRIDGE/scripts/sab-upload.mjs" "$@"
+    ;;
+  automation)
+    exec node "$BRIDGE/scripts/sab-automation.mjs" "$@"
+    ;;
+  __run)
+    # Private daemon/tmux entry point. It is intentionally absent from help.
+    provider="${1:-}"
+    case "$provider" in claude|codex|pi) shift ;; *) echo "sab: invalid internal provider" >&2; exit 2 ;; esac
+    exec "$BRIDGE/scripts/run-session.sh" "$provider" "$@"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "sab: unknown command: $command_name" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

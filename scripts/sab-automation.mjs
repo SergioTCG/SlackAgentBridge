@@ -4,12 +4,12 @@ import fs from 'node:fs'
 const BASE = String(process.env.SAB_AUTOMATION_URL || 'http://127.0.0.1:8877').replace(/\/$/, '')
 
 function usage(message = '') {
-  if (message) process.stderr.write(`sab-automation: ${message}\n`)
+  if (message) process.stderr.write(`sab automation: ${message}\n`)
   process.stderr.write(`Usage:
-  sab-automation create --external-key KEY --cwd DIR --provider claude|codex|pi \\
+  sab automation create --external-key KEY --cwd DIR --provider claude|codex|pi \\
     [--collaborator USER_ID ...] --prompt-file FILE|- -- [PROVIDER_FLAGS...]
-  sab-automation status EXTERNAL_KEY
-  sab-automation stop EXTERNAL_KEY [--archive]
+  sab automation status EXTERNAL_KEY
+  sab automation stop EXTERNAL_KEY [--archive]
 
 The prompt is read from a file (or stdin with -), then encoded as JSON without
 shell interpolation. SAB_AUTOMATION_URL may override the loopback base URL.\n`)
@@ -26,7 +26,7 @@ async function request(pathname, { method = 'GET', body } = {}) {
       signal: AbortSignal.timeout(30_000),
     })
   } catch (error) {
-    process.stderr.write(`sab-automation: bridge daemon unreachable (${error?.message || error})\n`)
+    process.stderr.write(`sab automation: bridge daemon unreachable (${error?.message || error})\n`)
     process.exit(1)
   }
   const raw = await response.text()

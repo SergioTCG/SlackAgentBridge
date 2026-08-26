@@ -22,11 +22,8 @@ test('installer preserves installed runtime identities', () => {
   assert.match(installer, /SergioTCG\/SlackAgentBridge/)
   assert.match(installer, /slack\/app-manifest\.json/)
   assert.match(installer, /Node >= 20 required/)
-  assert.match(installer, /bin\/sab-cc/)
-  assert.match(installer, /bin\/sab-codex/)
-  assert.match(installer, /bin\/sab-pi/)
-  assert.match(installer, /bin\/sab-upload/)
-  assert.match(installer, /bin\/sab-automation/)
+  assert.match(installer, /bin\/sab/)
+  assert.match(installer, /if \[ "\$RELOAD_DAEMON" = 1 \]; then[\s\S]*for legacy in ccs .*sab-cc sab-codex sab-pi sab-upload sab-automation/)
 })
 
 test('legacy Codex activation remains a no-restart operation', () => {
@@ -53,6 +50,8 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     const codexHome = path.join(temp, 'codex')
     fs.mkdirSync(fakeBin, { recursive: true })
     fs.mkdirSync(config, { recursive: true })
+    fs.mkdirSync(linkedBin, { recursive: true })
+    fs.symlinkSync('/legacy/sab-cc', path.join(linkedBin, 'sab-cc'))
     for (const command of ['claude', 'codex', 'pi', 'tmux']) {
       const executable = path.join(fakeBin, command)
       fs.writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
@@ -89,18 +88,12 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     for (const event of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'PermissionRequest']) {
       assert.equal(codex.hooks[event].length, 1, `duplicate Codex ${event} hook`)
     }
-    assert.ok(fs.lstatSync(path.join(linkedBin, 'ccs')).isSymbolicLink())
-    assert.ok(fs.lstatSync(path.join(linkedBin, 'ccs-codex')).isSymbolicLink())
-    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-cc')).isSymbolicLink())
-    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-codex')).isSymbolicLink())
-    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-pi')).isSymbolicLink())
-    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-upload')).isSymbolicLink())
-    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-automation')).isSymbolicLink())
-    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-cc')), path.resolve('bin/sab-cc'))
-    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-codex')), path.resolve('bin/sab-codex'))
-    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-pi')), path.resolve('bin/sab-pi'))
-    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-upload')), path.resolve('bin/sab-upload'))
-    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-automation')), path.resolve('bin/sab-automation'))
+    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab')).isSymbolicLink())
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab')), path.resolve('bin/sab'))
+    for (const legacy of ['ccs', 'ccs-codex', 'ccs-spawn', 'ccs-window', 'sab-codex', 'sab-pi', 'sab-upload', 'sab-automation']) {
+      assert.equal(fs.existsSync(path.join(linkedBin, legacy)), false, `${legacy} should not be installed`)
+    }
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-cc')), '/legacy/sab-cc', 'staged install must preserve live 1.x launchers')
     assert.equal(fs.existsSync(path.join(temp, '.pi')), false, 'installer must not modify Pi global configuration')
     assert.equal(fs.existsSync(path.join(temp, 'Library/LaunchAgents')), false)
   } finally {

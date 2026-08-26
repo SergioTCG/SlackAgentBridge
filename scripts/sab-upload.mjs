@@ -2,11 +2,11 @@
 import path from 'node:path'
 
 function usage(stream = process.stdout) {
-  stream.write('Usage: sab-upload --grant TOKEN -- FILE_PATH [FILE_PATH ...]\n')
+  stream.write('Usage: sab upload --grant TOKEN -- FILE_PATH [FILE_PATH ...]\n')
 }
 
 function fail(message, status = 2) {
-  process.stderr.write(`sab-upload: ${message}\n`)
+  process.stderr.write(`sab upload: ${message}\n`)
   process.exit(status)
 }
 

@@ -1,294 +1,272 @@
-# Slack Agent Bridge — Architecture
+# Architecture
 
-*The original design was decided on 2026-07-21 after the
-[Claude feasibility study](docs/claude-feasibility.md) and empirical spike.
-Codex was added as a provider adapter on 2026-08-14, transactional
-cross-provider handoff on 2026-08-17, and Pi on 2026-08-19. The daemon is modern
-JavaScript (ESM, Node 20+, no build step); Pi loads one native TypeScript
-extension through its own runtime.*
+Slack Agent Bridge is one macOS daemon connecting one trusted Slack owner to
+local Claude Code, Codex, and Pi sessions. Providers have separate adapters and
+native conversation identities; Slack, state, tmux, terminal viewports,
+artifacts, and lifecycle coordination are shared.
+
+## System shape
+
+```text
+Slack Socket Mode
+       │
+       ▼
+daemon/daemon.mjs ─────────────── ~/.config/ccs/state.json
+       │                           atomic durable state
+       ├── provider adapters ───── daemon/providers.mjs
+       ├── automation API ──────── daemon/automation*.mjs
+       ├── artifact API ────────── daemon/artifacts.mjs
+       ├── terminal API ────────── daemon/terminal-{http,control}.mjs
+       │
+       ▼
+detached-capable tmux session ─── bin/sab __run <provider>
+       │                           scripts/run-session.sh
+       ├── Claude + MCP Channel + hooks
+       ├── Codex TUI + App Server commentary proxy + hooks
+       └── Pi + explicitly loaded SAB extension
+
+optional Ghostty process ──────── tmux attach-session
+```
+
+The daemon is the sole owner of the Slack Socket Mode token. Never run two
+daemon processes against the same Slack app: Slack events will race between
+them.
 
 ## Components
 
+- `bin/sab` is the only public local executable. It dispatches `new`,
+  `terminal`, `account`, `upload`, and `automation`. Its private `__run`
+  subcommand is used only inside tmux.
+- `scripts/run-session.sh` is the provider runner. A local `sab new` creates and
+  attaches to tmux; daemon-created sessions start tmux detached. It configures
+  the Claude MCP Channel, Codex event proxy/fallback, or Pi extension before
+  executing the provider CLI.
+- `daemon/daemon.mjs` owns Slack ingress/egress, hooks, state adoption,
+  session/channel correlation, resurrection, settings, permission decisions,
+  switching, and managed Pi coordination.
+- `daemon/providers.mjs` is the provider boundary: labels, command parsing,
+  provider-specific flag allowlists, defaults, resume arguments, model/effort
+  validation, and update behavior.
+- `channel/server.mjs` implements the Claude Channels path. Claude hooks provide
+  lifecycle and stable transcript/status integration.
+- `scripts/codex-event-proxy.mjs` transparently forwards the loopback App Server
+  WebSocket to the Codex TUI while extracting completed semantic commentary.
+  Codex hooks remain authoritative for lifecycle, permissions, and final text.
+- `pi/sab-extension.ts` provides Pi lifecycle, inbound text, model/thinking
+  settings, image support, usage, project trust, safe-mode permissions, and
+  managed-run coordination. It is loaded explicitly and never installed into a
+  project or global Pi configuration.
+- `daemon/terminal-control.mjs` resolves authoritative active sessions and
+  serializes terminal operations per tmux name. `daemon/terminal-http.mjs` and
+  `scripts/sab-terminal.mjs` expose the same operations to local scripts.
+- `scripts/sab-upload.mjs`, `scripts/sab-automation.mjs`, and
+  `scripts/sab-account.sh` are private implementations reached through `sab`.
+
+## Session identity and durable state
+
+`state.sessions[nativeSessionId]` stores the native provider identity, cwd,
+provider, pid, tmux name, channel, flags, model, effort, and provider-specific
+metadata. A missing `provider` is deliberately interpreted as Claude so old
+state remains resumable without a bulk migration.
+
+`state.channels[channelId]` is the authoritative active mapping. The mapped
+session must point back to the same immutable channel ID. A channel name may be
+changed freely in Slack and is never an identity key.
+
+A switched channel may own one Claude, one Codex, and one Pi native leg through
+lineage state. Exactly one leg is active. Standby legs preserve resumable IDs
+and settings but have no channel authority or live provider process.
+
+State writes are atomic. Replacement and restart paths fence stale hooks by
+native ID, provider, process ancestry, tmux claim, channel mapping, and lineage
+phase. An old process may not overwrite or mark dormant the session that
+superseded it.
+
+## Process and terminal lifecycle
+
+tmux, not Ghostty, owns the interactive process lifetime:
+
+1. The daemon validates cwd and flags.
+2. `spawnSession` creates a named detached tmux session running
+   `sab __run <provider>`.
+3. A provider-native start event claims that tmux and binds or adopts the
+   session/channel state.
+4. Slack messages use the provider's inbound transport or a bounded tmux paste.
+5. The provider may run indefinitely with zero attached terminal clients.
+
+Ghostty is an optional viewport. Opening a viewport checks that the exact tmux
+and provider are still alive. If a client is already attached, the bridge finds
+that Ghostty process through the tmux client ancestry and focuses it. Otherwise
+it starts one Ghostty process whose only job is `tmux attach-session`.
+
+Closing a viewport calls `tmux detach-client`; it does not send input, kill
+tmux, change session state, or stop the provider. `open-all` and `close-all`
+derive their targets only from valid `state.channels` mappings and exclude
+standby, provisional, stale, and rebound records. Operations on the same tmux
+name are serialized.
+
+A dormant native session is different from a closed terminal. If its provider
+process is gone, an owner Slack message runs the provider-native resume form in
+a new detached tmux session and queues the message until the start event safely
+rebinds it. No terminal needs to be visible.
+
+`/sab-update all` derives its candidates from the same exact authoritative
+channel/session mapping. Before each stop it revalidates the PID, tmux, and
+authority and rejects active turns, question forms, permission decisions,
+provider transitions, private maintenance turns, managed Pi activity,
+automation ownership, and concurrent wake/restart work. Eligible sessions are
+grouped by provider: all selected sessions in a group stop, that provider's CLI
+updates once, and every stopped session resumes even when the update check
+fails. Incoming prompts during this bounded relaunch are held in the existing
+per-session queue. Standby, provisional, stale, dormant, and rebound records are
+never bulk-restarted.
+
+The only exception is a provider-local trust surface that cannot be decided
+remotely. The bridge opens the provisional target's terminal automatically and
+reports the required local action in Slack.
+
+## Slack command routing
+
+The canonical manifest exposes one namespace:
+
+```text
+/sab-new  /sab-model  /sab-effort  /sab-flags  /sab-update
+/sab-stop /sab-switch /sab-kill    /sab-status /sab-usage
+/sab-run  /sab-account /sab-terminal
+/sab-health /sab-cleanup /sab-claim /sab-help
 ```
-Slack (private channels, Socket Mode)
-   ▲│
-   │▼
-┌────────────────────────── Mac Studio ──────────────────────────┐
-│  daemon/daemon.mjs  ← launchd, owns the ONE Socket Mode conn   │
-│    • HTTP 127.0.0.1:8877  (hooks, automation, uploads, SSE)    │
-│    • state.json  (sessions, lineages, automation journals)     │
-│    • handoffs/   (private summaries + reviewed patches, 0600)  │
-│    • lifecycle, mirroring, status, resurrection, ./commands    │
-│    ▲ POST /hook       ▲ /channel/stream       ▲ /pi/*         │
-│  Claude/Codex hooks   Claude MCP Channel       Pi extension     │
-│         │                    │                      │           │
-│  Ghostty → tmux ─┬→ bin/sab-cc → Claude + MCP Channel          │
-│                  ├→ bin/sab-codex → event proxy → Codex TUI    │
-│                  │                    ↕ App Server + hooks      │
-│                  └→ bin/sab-pi → Pi + explicit SAB extension   │
-│                         └→ bin/sab-upload → authorized artifact │
-└────────────────────────────────────────────────────────────────┘
-```
 
-- **`bin/sab-cc`** — the Claude launcher. Always wraps the session in **tmux
-  inside the terminal window**, exports `CCS_BRIDGE=1` + `CCS_TMUX=<name>`, then
-  execs `claude --mcp-config <generated>
-  --dangerously-load-development-channels server:slack-bridge [args]`. The MCP
-  config is generated at launch into `~/.config/ccs/mcp.json` with the resolved
-  install path, so nothing is hardcoded. `bin/ccs` forwards to this launcher.
-- **`bin/sab-codex`** — the Codex launcher. It uses the same tmux invariant,
-  exports `CCS_PROVIDER=codex`, and binds F12 to Codex `interrupt_turn`. It does
-  not load Claude's MCP server or consent watcher. It starts a per-session
-  loopback App Server and places a transparent WebSocket proxy between it and
-  the visible TUI. Sidecar startup failure falls back to the legacy direct TUI.
-  `bin/ccs-codex` forwards to it.
-- **`scripts/codex-event-proxy.mjs`** — a transparent loopback WebSocket proxy.
-  Every protocol frame still reaches the TUI unchanged; the observer selects
-  only completed `agentMessage` items whose phase is `commentary` and posts
-  those bounded events to the daemon with the owning App Server PID and tmux
-  identity. It ignores deltas, tool calls/output, diffs, plans, reasoning, and
-  final answers.
-- **`bin/sab-pi`** — the Pi launcher. It exports `CCS_PROVIDER=pi`, preserves
-  the shared tmux/Ghostty invariant, consumes bridge-only `--safe`, and loads
-  `pi/sab-extension.ts` explicitly with Pi's `--extension`. It never installs
-  or discovers a global bridge extension.
-- **`pi/sab-extension.ts`** — Pi's native control plane. It opens an
-  authenticated-by-local-process SSE stream to the loopback daemon, injects
-  prompts and supported images with `sendUserMessage`, posts lifecycle/final
-  text and native usage, controls model/thinking/abort, and optionally blocks
-  tool calls pending Slack approval. Ordinary owner input is also intercepted
-  for adaptive routing; extension-reinjected native prompts bypass the router
-  exactly once. Pi session files are not parsed.
-- **`pi/managed-run.ts`** — adaptive local-model orchestration controlled by
-  `/pi-run`. It persists routing policy/pending decisions and a bounded
-  goal/plan state through Pi's extension API,
-  drives the parent worker across multiple turns, launches isolated child Pi
-  planners/scouts/reviewers, and requires independent review before the final
-  response. Planner/reviewer children explicitly load only
-  `pi/managed-child-output.ts`, whose typed terminating tools return validated
-  plan/review data without an extra prose turn. `pi/managed-core.mjs` contains
-  the daemon-safe parser/state model.
-- **`bin/sab-upload`** — a provider-neutral agent helper. It submits generated
-  file paths to the loopback daemon with the session's provider/tmux identity
-  and a one-use grant supplied only by an accepted Slack prompt. It cannot
-  choose a channel or user.
-- **`bin/sab-automation`** — a JSON-safe loopback client for durable
-  create/status/stop automation. Prompts come from a file or stdin rather than
-  shell interpolation; the daemon still owns validation, launch, correlation,
-  Slack membership, and termination.
-- **`hooks/hook.sh`** — registered globally for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`. Exits instantly unless `CCS_BRIDGE=1` (non-bridged sessions pay zero cost). Otherwise POSTs the hook JSON + `ppid` + `tmux` name to the daemon (curl, ≤2s cap, always exit 0 — hooks are synchronous).
-- **`hooks/codex-hook.sh`** — separately registered and gated by `CCS_PROVIDER=codex`. Lifecycle events post to the daemon; `PermissionRequest` waits for a Slack verdict and emits the documented Codex decision JSON. Failure returns no decision, preserving the local approval flow.
-- **Codex resurrection bootstrap** — `codex resume` receives the first queued
-  Slack message through its optional `PROMPT` argument. This starts the first
-  turn even when an idle resumed TUI has not emitted `SessionStart`; later
-  messages remain queued and flush through the normal hook path.
-- **`channel/server.mjs`** — MCP channel server, spawned per session by Claude Code. Declares `claude/channel`, connects outward to the daemon's SSE endpoint keyed by its claude PID, and forwards each pushed Slack message into the session as a channel event. No reply tool: outbound mirroring is done by hooks, so responses are verbatim and cost no extra model turns.
-- **`daemon/daemon.mjs`** (+ `slackout.mjs`, `util.mjs`) — everything else.
+`/sab-new` requires the provider. In a session channel, the authoritative
+session selects provider-specific behavior for every other provider operation.
+From the control channel, `/sab-status` and `/sab-usage` may take a provider
+filter. `/sab-update all` is bridge-wide and may be run from the control channel
+or a session channel. `/sab-run` rejects non-Pi sessions and `/sab-account`
+rejects non-Claude sessions before mutation.
 
-## Key decisions
+The parser accepts old provider-prefixed slash commands only as an unadvertised
+upgrade shim while the owner replaces a 1.x manifest. No old command appears in
+the canonical manifest, help, or public launcher surface.
 
-1. **Message-level bridge, not pty mirroring** — immune to TUI resize bugs (feasibility finding).
-2. **JSON state file, not SQLite** — single-writer daemon, dozens of rows, human-inspectable, atomic tmp+rename. (Revised from the earlier SQLite suggestion; complexity wasn't buying anything.)
-3. **Provider + PID is the live join key.** Hooks/extensions report their
-   process PID; the daemon validates its ancestry and tmux claim for `claude`,
-   `codex`, or `pi`. Claude and Pi inbound streams also join by PID. Persisted
-   identity remains the raw native session ID, with missing provider fields
-   interpreted as Claude for backward compatibility.
-4. **No implicit archiving** (design v2). Ended interactive sessions → channel
-   gets "💤 write here to resume". A dormant-channel message makes the daemon spawn
-   Ghostty+tmux with the provider's native resume form (`sab-cc --resume`,
-   `sab-codex resume`, or `sab-pi --session`), queue the message, and deliver it
-   after reconnection. The sole lifecycle exception is an explicit
-   `POST /automation/sessions/:externalKey/stop` with `{"archive":true}`; it
-   archives only the automation's immutable, exact channel ID.
-5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **in-session commands** — `/cc-model sonnet` in Slack becomes `tmux send-keys "/model sonnet" Enter`, and `/cc-stop` sends `Escape` to interrupt.
-6. **Private channels only; single trusted sender.** The workspace has 35 people. Only messages from `SLACK_USER_ID` are processed; everyone else is silently ignored (and can't see the channels anyway).
-7. **Mirroring is provider-event-driven and token-free.** Claude keeps its byte-offset
-   JSONL reader and TUI status/form parser. Its bounded poller also recognizes
-   new failure-only authentication and overload records, because Claude can
-   return immediately to idle without emitting `Stop`; these failures are
-   delivered promptly and repeated identical failures are time-deduplicated.
-   Codex uses the stable `Stop.last_assistant_message` hook field for the final
-   answer. Its transparent App Server proxy additionally mirrors only semantic,
-   user-facing `commentary` items; the existing status owner re-anchors the live
-   timer below each one. The daemon claims bounded item IDs before Slack delivery
-   and rejects mismatched process/tmux/session/channel identities, private
-   handoff turns, provisional legs, late post-final events, and retries. The
-   bridge never parses Codex's explicitly unstable transcript format. Usage and
-   live token counters enter only through `ccusage`'s maintained Codex JSON
-   adapter. Pi's native extension
-   supplies final text and usage directly; its session JSONL is never read.
-   Slack-injected messages are deduped for all providers. A live status edits
-   in place normally; because Slack cannot reorder an edited timestamp, newer
-   channel activity transactionally replaces it at the bottom and deletes the
-   superseded copy.
-8. **One control channel** — fresh 1.0 installs use
-   `#slack-agent-bridge`; upgrades reuse `#claude-code-bridge`. Its immutable
-   channel ID lives in state, so the public rename never creates a duplicate.
-   It accepts `/cc-new`, `/codex-new`, or `/pi-new`, provider-filtered status,
-   and help.
-   Session channels accept plain messages plus their provider namespace.
-9. **Capability-bound artifact return.** Every accepted owner or per-channel
-   collaborator prompt receives an opaque two-hour grant in the injected agent
-   context. `sab-upload` proves live process/tmux ownership; the daemon binds
-   the grant to the sender, session, provider, channel, message, and canonical
-   workspace. A successful upload consumes the grant. Up to ten regular files
-   totaling 100 MiB may be sent in one call; realpath containment rejects
-   traversal and symlink escapes. Slack failures and path corrections remain
-   retryable until expiry. Grants intentionally do not survive daemon restarts.
-10. **One logical channel, separate native provider legs.** A lineage is created
-    lazily on the first provider switch; legacy sessions are not
-    bulk migrated. `state.channels[channel]` remains the authoritative active
-    session mapping. Only the active leg carries `session.channel`; up to two
-    other provider-native session IDs remain dormant and resumable.
-11. **Journaled two-phase provider handoff.** The source stays authoritative
-    while instruction alignment is reviewed and a private SAB v1 handoff is
-    captured. The bridge then stops it, starts or resumes the exact target leg
-    in a provisional tmux, waits for the visible input surface or Pi extension
-    stream, and
-    intercepts a read-only readiness turn. Trust gates remain local and are
-    never keyed by the daemon. Only a valid response from a hook-claimed target
-    session atomically moves the channel mapping. Crash recovery and failures
-    reap the exact provisional tmux and restore the source.
-12. **Instruction files, not provider memory.** Switch preflight inspects only
-    repository-root `AGENTS.md` and `CLAUDE.md`. Global Claude/Codex memory and
-    `MEMORY.md` never enter automatic consolidation. A credential-scrubbed
-    auxiliary process runs from a private neutral directory and returns bounded
-    document sections; the bridge constructs the Git patch deterministically.
-    Owner review plus fingerprint, path, symlink, binary, mode, apply, and size
-    validation remain mandatory.
-13. **Pi trust has two independent layers.** Pi's `--approve` chooses whether
-    project-local resources may load. SAB `--safe` is an extension-owned,
-    fail-closed per-tool Slack gate. The bridge never describes one as the
-    other, and Pi's unrestricted default does not receive a fictional
-    Claude/Codex flag alias.
-14. **Managed Pi orchestration is adaptive and bounded.** Ordinary owner prompts
-    default to `auto`: an isolated no-tools, low-thinking router chooses native
-    delivery or a persisted planning/execution/review state machine. Ambiguous
-    or failed classifications promote to managed; collaborators stay native.
-    `always` and `native` policies are session-persistent, `/pi-run direct`
-    bypasses once, and `/pi-run <goal>` always forces the managed state machine.
-    Child processes receive the selected model/thinking setting and role-bound
-    tools, but no bridge/session/upload identity, inherited extensions, skills,
-    themes, or project-resource approval. Planner/reviewer output uses one
-    bridge-owned terminating submission extension; malformed legacy output gets
-    at most one no-tools repair attempt. Read-only review is reserved in the
-    subagent budget and must pass before the final response is mirrored.
-15. **Automation is a journaled ownership protocol, not `/spawn` plus polling.**
-    `POST /automation/sessions` persists a unique external key and deterministic
-    tmux name synchronously before launch. Repeated keys return that same
-    journal. A matching provider `SessionStart` supplies the native session ID
-    and channel; collaborators are invited and display-name-resolved one at a
-    time, and each allowlist update shares an atomic state checkpoint with its
-    setup status. The prompt is claimed and its plaintext removed before the
-    one native input side effect. An ambiguous crash is reported and never
-    retried. Exact stop validates provider/session/tmux/channel ownership,
-    revokes grants, removes only that binding and its relevant lineage/handoff,
-    and optionally archives only its recorded channel. It never calls bulk
-    cleanup.
+## Provider adapters
 
-## Command grammar (Slack)
+### Claude Code
 
-Commands are native Slack slash commands (`slash_commands` events over Socket Mode), routed through a shared `dispatch()`. The ingress prefix is authoritative: `/cc-*` selects Claude, `/codex-*` selects Codex, and `/pi-*` selects Pi. A mismatched provider command is rejected before it can affect a session. The old commands were `./`-prefixed messages before v0.2.0.
+Claude inbound messages use the MCP Channel server. Hooks mirror lifecycle and
+outbound final content; its transcript and statusline support live progress,
+question forms, account usage, and topic metadata. Claude keeps consent and
+account-switching paths. Remote flagless sessions default to
+`--dangerously-skip-permissions`; `--dsp` normalizes to that flag. `--chrome`
+is Claude-specific.
 
-| Command | Where | Effect |
-|---|---|---|
-| plain text | session channel | injected into the session (resurrects it first if needed); explicit requests may return generated workspace files |
-| `/cc-new [folder] [flags]`, `/codex-new …`, `/pi-new …` | anywhere | provider-specific project picker or Ghostty+tmux spawn (allowlisted flags, under `$HOME`) |
-| `/cc-model`, `/cc-effort`, `/cc-flags`, `/cc-update` | Claude session | inspect/change Claude settings; restart/resume where required |
-| `/codex-model`, `/codex-effort`, `/codex-flags`, `/codex-update` | Codex session | inspect/change Codex settings; restart/resume where required |
-| `/pi-model`, `/pi-effort`, `/pi-flags`, `/pi-update` | Pi session | inspect/change native Pi model/thinking/launch settings |
-| `/pi-run [plan] <goal> [--minutes=N --turns=N --agents=N --reviews=N]` | live Pi session | start a managed goal; `plan` pauses after planning; no arguments shows status |
-| `/pi-run mode [auto\|always\|native]`, `/pi-run direct <prompt>` | live Pi session | inspect/change persistent adaptive routing or bypass it once |
-| `/pi-run approve\|pause\|continue\|cancel` | live Pi session | control the persisted managed run |
-| `/cc-stop`, `/codex-stop`, `/pi-stop` | matching session | interrupt the running turn through the provider adapter |
-| provider `-switch <target> [new]` | matching active, idle session | preview and transactionally hand the channel to another provider; `new` explicitly replaces missing saved-leg state |
-| `/cc-status`, `/codex-status`, `/pi-status` | anywhere | session info here; provider-filtered table from control |
-| `/cc-kill`, `/codex-kill`, `/pi-kill` | matching session or control | end a session in the selected provider namespace |
-| `/cc-health`, `/cc-cleanup`, `/cc-claim` | anywhere | bridge-wide operations, intentionally singular |
-| `/cc-usage`, `/codex-usage`, `/pi-usage` | matching session/control | provider-filtered usage; Pi uses native events, Claude/Codex use `ccusage` |
-| `/cc-account` | Claude session/control | Claude-only subscription selection |
-| `/cc-help`, `/codex-help`, `/pi-help` | anywhere | provider-specific command list |
+### Codex
 
-## Lifecycle (channel naming: `{repo}-{branch}-{yyyymmdd}-{hhmm}`)
+Codex inbound text and interrupts use tmux. Hooks provide native IDs, stable
+final assistant text, turn boundaries, and permission decisions. The App Server
+proxy is a bounded supplementary egress path: it forwards every protocol frame
+unchanged but submits only completed `agentMessage` values explicitly marked
+`commentary`. It never emits commands, command output, diffs, plans, reasoning,
+deltas, or final answers. If either sidecar cannot start, the runner falls back
+to the direct TUI. Transcript JSONL is never parsed; `ccusage` is the public
+usage adapter. Remote flagless sessions default to Codex's canonical dangerous
+flag (`--yolo`).
 
-- `SessionStart(startup)` → create private channel, invite you, post header, set topic.
-- Concurrent startup hooks share one single-flight channel binding; boot removes
-  stale aliases that disagree with the session's authoritative channel ID.
-- `SessionStart(resume)` → reuse mapped channel, "▶️ resumed".
-- `SessionStart(clear)` → rebind channel to the new session id (same pid), "🧹 cleared".
-- `SessionEnd` / liveness sweep (30s, `kill -0`) → "💤 session ended — write here to resume".
-- Managed Pi run → read-only child plan → optional approval → repeated parent
-  turns and scoped subagents → read-only independent review → fixes/re-review
-  or one final mirrored response. Pause, interruption, process exit, and daemon
-  restart leave a resumable state entry in the native Pi session.
-- Provider switch → preflight → optional reviewed instruction patch → private
-  source handoff → provisional target readiness → atomic channel commit. Owner
-  messages queue by channel in the private transition journal; collaborators
-  are rejected during the transition.
-- Switch failure/restart → kill the exact provisional target, restore the source
-  mapping, and deliver queued owner work to the restored source.
-- A standby leg's late or manual hooks are fenced: it cannot create a duplicate
-  channel or become live without the matching provider-switch transaction.
-- Topic synchronization reads Slack's current value after daemon boot and writes
-  only on a real folder/branch/model/effort change. A real topic write, a manual
-  topic change, or a newer channel message re-anchors any active working status
-  below the new timeline item.
-- You may rename channels freely — mapping is by immutable channel id.
+### Pi
 
-### Automation lifecycle
+The SAB extension owns Pi's bridge-facing lifecycle and streams. Built-in tools
+are unrestricted by default; SAB `--safe` adds a fail-closed Slack decision per
+tool call. Pi `--approve` is separate project-resource trust.
 
-`pending → launching → awaiting_session → configuring_collaborators →
-ready_to_prompt → injecting_prompt → active` is persisted in
-`state.automations[externalKey]`. `failed`, `stopping`, and `stopped` are durable
-terminal/control states with actionable failure metadata. A restart may issue a
-launch only from `pending`; it never repeats `launching` or
-`awaiting_session`. A five-minute reconciliation deadline turns a missing tmux
-or missing `SessionStart` into an actionable failure without relaunching. It
-resumes collaborator setup from its per-user checkpoints,
-but a prompt already marked `claimed` is failed as ambiguous rather than sent
-again. Synthetic automation prompts bypass the Slack-message ingress and
-therefore never mint an artifact grant, but their provider turn still starts
-the normal live-status and terminal-failure tracking. Exact stop watches through
-the launcher's full tmux-materialization window after restart and reports a
-failing HTTP result unless termination and any requested archive both complete.
+Ordinary owner prompts use persisted adaptive routing. A no-tools classifier
+receives only visible prompt text and fails toward managed execution.
+Collaborator prompts remain native. `/sab-run` can force a bounded
+planner/worker/independent-reviewer state machine with wall-clock, parent-turn,
+subagent, and review budgets. Read-only children do not inherit bridge identity,
+Slack/upload capability, session state, extensions, skills, project approval,
+or writable tools.
 
-The automation routes accept only loopback Host identities. POST operations
-also require `application/json` and reject browser Origin/fetch metadata, which
-keeps a hostile webpage or DNS-rebinding hostname from invoking the local RCE
-surface while preserving the local-account trust model for scripts.
+## Working status and output
 
-## Known limitations
+Hooks start provider-specific live pollers. The daemon stores restart metadata
+needed to recover an in-progress turn, finds the frozen Slack status message on
+boot, re-adopts it, and continues the original elapsed duration. New channel
+content re-anchors the status as the latest item without resetting it.
 
-- Consent dialog on every launch (research preview) — one keypress locally, auto-keyed for remote spawns. Goes away if the plugin ever reaches an allowlist.
-- Codex does not expose Claude's whimsical spinner verbs. Its stable working
-  status combines hook timing with bounded `ccusage` token snapshots instead.
-  A requested `/codex-stop` is reconciled against the exact tracked turn: the
-  daemon waits for either `Stop` or the visible idle input surface before
-  clearing status, and leaves tracking active with a warning when neither is
-  observed. Startup uses the same idle check to discard orphaned interrupt
-  status without reading Codex transcripts. Active-surface detection includes
-  the bridge's configured F12 interrupt hint; if an older deployment lost the
-  turn timestamp, recovery reconstructs it from a current frozen Slack timer or
-  the latest accepted human prompt before restarting the status poller.
-- Codex App Server's WebSocket transport is documented as experimental. SAB
-  uses it only as a transparent, loopback-only observer transport: hooks remain
-  authoritative for lifecycle, permission flow, and final delivery, tmux
-  remains the input/control surface, and sidecar startup failure preserves the
-  direct-TUI path. Sessions already running without the proxy must be restarted
-  or resumed before semantic interim commentary becomes available.
-- Pi capabilities depend on its installed version and selected model. Native
-  image delivery is rejected visibly for text-only models; Pi has no Chrome
-  flag counterpart.
-- Managed Pi subagents are sequential and normally use the same configured
-  local model as the parent. The bridge supplies orchestration and budgets; it
-  cannot make a weak model reason like a stronger one or provide hardware-level
-  parallelism on a single inference server.
-- Ghostty on macOS has no reliable IPC for adding windows to one running app
-  instance. Dockless accessory windows are supported; single-icon mode remains
-  best-effort.
-- Streaming response APIs are proven but not wired; long responses are uploaded
-  as Markdown files.
-- Provider switching transfers an explicit summary and repository state, not
-  hidden reasoning or a byte-identical context window. Provider-global memory
-  remains native and intentionally unmerged.
+Final text comes only from provider-stable sources. Claude reads completed
+transcript records, Codex uses the Stop hook's final field, and Pi uses its
+extension event. Deduplication fences hook retries and restart races.
+
+## Provider switching
+
+Switching is a journaled transaction:
+
+1. Validate the source mapping, idle state, target choice, and target flags.
+2. Optionally inspect root `AGENTS.md` and `CLAUDE.md` and produce a bounded,
+   hash-protected instruction proposal for owner review.
+3. Capture a private source-native handoff. It is not mirrored into Slack.
+4. Stop the source process and launch/resume the target in detached tmux.
+5. Wait for the target's native input surface and run a private read-only
+   validation turn.
+6. Atomically commit the target mapping, update the topic, and release queued
+   owner messages.
+
+The source remains authoritative until commit. Any failure rolls back, reaps
+the provisional target, and restores/resumes the source. A daemon restart uses
+the same journal to make the rollback deterministic. Collaborators are rejected
+during a switch; owner messages are bounded and queued. Artifact grants for the
+source are revoked at commit and grants for queued messages are minted only for
+the committed target.
+
+## Collaborators and artifacts
+
+The session status picker calls `conversations.invite` before modifying the
+per-channel prompt allowlist. Invitation failure is shown to the owner and
+leaves the user untrusted. Collaborators may prompt only a live explicitly
+allowed session; they cannot run slash commands, resurrect, or answer
+permissions.
+
+Accepted owner/collaborator prompts may receive an opaque one-use artifact
+grant. It binds sender, message/thread, provider, native session, pid/tmux,
+channel, and canonical workspace. The agent supplies only file paths. The
+daemon fixes the Slack destination and validates realpath containment, regular
+file type, count, aggregate size, expiry, and replay state.
+
+## Loopback APIs
+
+Port `8877` binds only to loopback and carries hooks, status, provider streams,
+permission decisions, artifacts, terminal control, legacy `/spawn`, and the
+automation lifecycle API. It must never be proxied or forwarded. Script-facing
+mutations require JSON and reject browser Origin/fetch metadata and non-loopback
+Host headers.
+
+Terminal endpoints are:
+
+- `GET /terminals`
+- `POST /terminals/open` with `{ "selector": "…" }` or `{ "all": true }`
+- `POST /terminals/close` with the same shape
+
+Automation endpoints are:
+
+- `POST /automation/sessions`
+- `GET /automation/sessions/:externalKey`
+- `POST /automation/sessions/:externalKey/stop`
+
+Automation creation atomically records its external key and deterministic tmux
+identity before launch. Duplicate keys return the existing record. Native
+session/channel correlation precedes collaborator invitation; all invitations
+and name resolution precede whitelisting and initial-prompt injection. The
+prompt is claimed at most once and receives no artifact grant. Exact stop
+revalidates every binding, revokes grants and handoff state, stops only the
+correlated process/tmux, and optionally archives only that immutable channel.
+
+## Installation and updates
+
+`install.sh` maintains one checkout and the historical
+`si.sergej.claudeslackproxy` LaunchAgent label. It installs only the `sab`
+symlink and removes old launcher symlinks. Existing `CCS_*`,
+`~/.config/ccs`, old checkout paths, control channels, state records, and local
+port remain compatible.
+
+Self-update and release rollout must occur from a clean release commit during a
+maintenance window. The prior tag and config backup remain available until
+existing and new sessions for every installed provider pass the release
+canary.

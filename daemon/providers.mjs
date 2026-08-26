@@ -4,9 +4,9 @@ import path from 'node:path'
 export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi'])
 
 const PROVIDER_META = Object.freeze({
-  claude: Object.freeze({ label: 'Claude Code', command: 'claude', slackPrefix: 'cc' }),
-  codex: Object.freeze({ label: 'Codex', command: 'codex', slackPrefix: 'codex' }),
-  pi: Object.freeze({ label: 'Pi', command: 'pi', slackPrefix: 'pi' }),
+  claude: Object.freeze({ label: 'Claude Code', command: 'claude' }),
+  codex: Object.freeze({ label: 'Codex', command: 'codex' }),
+  pi: Object.freeze({ label: 'Pi', command: 'pi' }),
 })
 
 export function normalizeProvider(value, fallback = 'claude') {
@@ -23,14 +23,19 @@ export function providerOf(session) {
 
 export const providerLabel = provider => PROVIDER_META[normalizeProvider(provider)]?.label || 'Claude Code'
 export const providerCommand = provider => PROVIDER_META[normalizeProvider(provider)]?.command || 'claude'
-export const slackCommand = (provider, name) => `/${PROVIDER_META[normalizeProvider(provider)]?.slackPrefix || 'cc'}-${name}`
+export const slackCommand = (_provider, name) => `/sab-${name}`
 
 export function parseSlackCommand(command) {
+  const neutral = /^\/sab-([a-z][a-z0-9-]*)$/.exec(String(command || ''))
+  if (neutral) return { provider: null, name: neutral[1], legacy: false }
+  // Migration-only ingress shim: old manifests remain usable while the owner
+  // installs the canonical v2 manifest. These aliases are not advertised.
   const match = /^\/(cc|codex|pi)-([a-z][a-z0-9-]*)$/.exec(String(command || ''))
   if (!match) return null
   return {
     provider: match[1] === 'cc' ? 'claude' : match[1],
     name: match[2],
+    legacy: true,
   }
 }
 
@@ -59,7 +64,7 @@ const CODEX_VALUE_FLAGS = [
 ]
 
 // Pi's built-in tools are unrestricted by default. `--approve` controls only
-// project-local resources; `--safe` is consumed by sab-pi and enables the SAB
+// project-local resources; `--safe` is consumed by `sab new pi` and enables the SAB
 // extension's Slack permission gate. Remote values remain inline so a value can
 // never be reinterpreted as another option after Slack tokenization.
 const PI_FLAGS = new Set(['--approve', '--no-approve', '--offline', '--safe'])

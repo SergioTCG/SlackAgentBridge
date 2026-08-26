@@ -20,15 +20,16 @@ test('legacy sessions remain Claude without a state migration', () => {
   assert.equal(providerOf({ id: 'unknown', provider: 'other' }), 'claude')
 })
 
-test('Slack command namespace selects exactly one provider', () => {
-  assert.deepEqual(parseSlackCommand('/cc-new'), { provider: 'claude', name: 'new' })
-  assert.deepEqual(parseSlackCommand('/codex-model'), { provider: 'codex', name: 'model' })
-  assert.deepEqual(parseSlackCommand('/pi-effort'), { provider: 'pi', name: 'effort' })
+test('Slack commands use one neutral namespace with migration-only legacy parsing', () => {
+  assert.deepEqual(parseSlackCommand('/sab-new'), { provider: null, name: 'new', legacy: false })
+  assert.deepEqual(parseSlackCommand('/cc-new'), { provider: 'claude', name: 'new', legacy: true })
+  assert.deepEqual(parseSlackCommand('/codex-model'), { provider: 'codex', name: 'model', legacy: true })
+  assert.deepEqual(parseSlackCommand('/pi-effort'), { provider: 'pi', name: 'effort', legacy: true })
   assert.equal(parseSlackCommand('/cc_foo'), null)
   assert.equal(parseSlackCommand('/other-new'), null)
-  assert.equal(slackCommand('claude', 'status'), '/cc-status')
-  assert.equal(slackCommand('codex', 'status'), '/codex-status')
-  assert.equal(slackCommand('pi', 'status'), '/pi-status')
+  assert.equal(slackCommand('claude', 'status'), '/sab-status')
+  assert.equal(slackCommand('codex', 'status'), '/sab-status')
+  assert.equal(slackCommand('pi', 'status'), '/sab-status')
 })
 
 test('Claude flag normalization preserves the existing alias', () => {

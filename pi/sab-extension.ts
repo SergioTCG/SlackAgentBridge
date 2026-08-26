@@ -164,8 +164,8 @@ async function handlePrompt(pi: ExtensionAPI, ctx: ExtensionContext, message: Br
     await post("/pi/event", {
       event: "InputError", managed: managedState, routing: routingState,
       error: routingState?.status === "routing"
-        ? "Pi is already assessing another prompt. Wait for its routing decision or use /pi-stop."
-        : "A managed Pi run owns this session. Use /pi-run controls or cancel it before sending an ordinary prompt.",
+        ? "Pi is already assessing another prompt. Wait for its routing decision or use /sab-stop."
+        : "A managed Pi run owns this session. Use /sab-run controls or cancel it before sending an ordinary prompt.",
       ...sessionState(ctx),
     }).catch(() => {});
     return;

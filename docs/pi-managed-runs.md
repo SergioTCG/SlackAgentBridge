@@ -11,11 +11,11 @@ promotes safely. Collaborator prompts always remain native.
 The policy is stored in the native Pi session and survives resume:
 
 ```text
-/pi-run mode                 # show auto, always, or native
-/pi-run mode auto            # classify each ordinary owner prompt (default)
-/pi-run mode always          # promote every ordinary owner prompt
-/pi-run mode native          # never classify ordinary prompts
-/pi-run direct Explain this  # bypass routing for this prompt only
+/sab-run mode                 # show auto, always, or native
+/sab-run mode auto            # classify each ordinary owner prompt (default)
+/sab-run mode always          # promote every ordinary owner prompt
+/sab-run mode native          # never classify ordinary prompts
+/sab-run direct Explain this  # bypass routing for this prompt only
 ```
 
 The router sees the visible prompt but not its private artifact-upload grant.
@@ -30,19 +30,19 @@ a prompt is promoted.
 Run these commands in a live Pi session channel:
 
 ```text
-/pi-run Implement the requested feature and validate it
-/pi-run plan Investigate the repository and propose the migration
-/pi-run status
-/pi-run approve
-/pi-run pause
-/pi-run continue
-/pi-run cancel
+/sab-run Implement the requested feature and validate it
+/sab-run plan Investigate the repository and propose the migration
+/sab-run status
+/sab-run approve
+/sab-run pause
+/sab-run continue
+/sab-run cancel
 ```
 
 The explicit goal form forces managed execution: it plans and then executes
 automatically. The `plan` form runs
 the same read-only planner but pauses before any implementation; inspect the
-plan in Slack and use `/pi-run approve` to proceed. A normal `/pi-stop` pauses
+plan in Slack and use `/sab-run approve` to proceed. A normal `/sab-stop` pauses
 an active managed run rather than silently abandoning its state.
 
 While routing is pending, or a run is active or paused, it exclusively owns the Pi leg. Ordinary
@@ -93,7 +93,7 @@ Defaults are 120 minutes, 24 parent turns, eight total child legs, and two
 review cycles. Override them per run:
 
 ```text
-/pi-run Implement the migration --minutes=240 --turns=40 --agents=12 --reviews=3
+/sab-run Implement the migration --minutes=240 --turns=40 --agents=12 --reviews=3
 ```
 
 Accepted ranges are 5–1440 minutes, 1–100 parent turns, 2–32 child legs, and

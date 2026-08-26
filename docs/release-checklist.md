@@ -3,18 +3,18 @@
 ## Repository and compatibility
 
 - [ ] Release branch starts at the last known-good tag and is clean.
-- [ ] Version, changelog, repository URLs, GitHub description, and topics agree.
-- [ ] `AGENTS.md`, `CLAUDE.md`, README, architecture, security, and migration
-      guide describe the same provider and safety contracts.
-- [ ] `slack/app-manifest.json` is the sole Slack manifest.
-- [ ] `/cc-*`, `/codex-*`, and `/pi-*` command namespaces match the documented release contract.
-- [ ] The existing Slack app has all commands from the canonical manifest; no
-      second app, token set, or daemon exists.
-- [ ] `sab-cc`, `sab-codex`, `sab-pi`, `sab-upload`, and `sab-automation` work, and `ccs` /
-      `ccs-codex` forward all args.
-- [ ] Legacy state, config, checkout, control-channel, and LaunchAgent identities
-      are covered by tests.
-- [ ] No secrets, local state, logs, or generated files are tracked.
+- [ ] Version, changelog, repository URLs, description, and topics agree.
+- [ ] `AGENTS.md`, `CLAUDE.md`, README, architecture, security, and the 2.0
+      migration guide describe the same command, terminal, and safety contract.
+- [ ] `slack/app-manifest.json` is the sole manifest and contains only the 17
+      documented `/sab-*` commands.
+- [ ] `sab` is the sole public executable; `new`, `terminal`, `account`,
+      `upload`, and `automation` subcommands work.
+- [ ] The installer removes legacy launcher symlinks without deleting unrelated
+      files and never creates a second daemon or LaunchAgent label.
+- [ ] Old state/config/checkout/control-channel identities and missing-provider
+      Claude records are covered by tests.
+- [ ] No secrets, local state, logs, transcripts, or generated config are tracked.
 
 ## Automated validation
 
@@ -22,99 +22,84 @@
 - [ ] `npm run audit` reports zero known production vulnerabilities.
 - [ ] `npm test`
 - [ ] `npm run check`
-- [ ] JavaScript syntax checks pass.
-- [ ] Shellcheck passes at warning severity.
-- [ ] The installed Pi version loads `pi/sab-extension.ts` and lists models in
-      offline mode without changing Pi's global configuration.
-- [ ] `node scripts/smoke-pi-managed.mjs` completes against a disposable Git
-      fixture and mock loopback bridge without registering a child Slack leg.
-- [ ] Installer help and provider selection pass on a clean shell.
+- [ ] `for file in daemon/*.mjs channel/*.mjs scripts/*.mjs; do node --check "$file"; done`
+- [ ] `PI_OFFLINE=1 pi --extension ./pi/sab-extension.ts --list-models`
+- [ ] `node scripts/smoke-pi-managed.mjs` against its disposable fixture.
+- [ ] `shellcheck -S warning bin/sab scripts/run-session.sh scripts/claude-consent.sh scripts/sab-account.sh hooks/hook.sh hooks/codex-hook.sh install.sh install-codex.sh install-pi.sh`
+- [ ] Installer help/provider selection passes in a clean shell.
 - [ ] CI passes on the release commit.
 
 ## Installation matrix
 
-- [ ] Upgrade an existing Claude-only installation.
-- [ ] Upgrade an existing Claude plus Codex installation.
-- [ ] Fresh Claude-only installation.
-- [ ] Fresh Codex-only installation.
-- [ ] Fresh dual-provider installation.
-- [ ] Upgrade an existing Claude plus Codex installation with Pi staged separately.
-- [ ] Fresh Pi-only installation.
-- [ ] Fresh all-provider installation; historical `both` still excludes Pi.
+- [ ] Upgrade an existing Claude-only 1.x installation.
+- [ ] Upgrade existing Claude + Codex and all-provider installations.
+- [ ] Fresh Claude-only, Codex-only, Pi-only, `both`, and `all` installations.
 - [ ] Re-running each installer is idempotent.
-- [ ] `install-codex.sh` does not reload or rewrite the live LaunchAgent.
-- [ ] `install-pi.sh` does not reload or rewrite the live LaunchAgent.
+- [ ] `install-codex.sh` and `install-pi.sh` do not reload or rewrite the live
+      LaunchAgent.
+- [ ] Only `sab` is linked on `PATH`; legacy symlinks are removed.
+- [ ] Historical `both` still means Claude + Codex.
 - [ ] No scenario creates a second daemon, control channel, or hook entry.
+
+## Slack manifest migration
+
+- [ ] Back up/export the currently installed manifest.
+- [ ] Apply the canonical v2 manifest to the existing Slack app.
+- [ ] Reinstall the same app and confirm no token or OAuth-scope change.
+- [ ] Confirm all 17 `/sab-*` commands autocomplete and old provider-prefixed
+      commands are absent.
 
 ## Controlled live canary
 
-- [ ] Back up `~/.config/ccs` locally with restrictive permissions.
+- [ ] Back up `~/.config/ccs` with restrictive permissions.
 - [ ] Record the previous release tag and rollback commands.
-- [ ] Confirm no active turn is in progress before restart.
+- [ ] Confirm no provider switch or automation launch is mid-transaction.
 - [ ] Exactly one daemon connects with the production Socket Mode token.
-- [ ] Existing and fresh Claude sessions send and receive Slack messages.
-- [ ] Claude login-expired and API-overloaded turns surface immediately in
-      Slack even when the CLI emits no `Stop`; repeated identical failures are
-      deduplicated and the live working message is cleared.
-- [ ] Existing and fresh Codex sessions send and receive Slack messages.
-- [ ] A fresh/resumed Codex session mirrors completed interim commentary while
-      excluding commands, output, diffs, reasoning, plans, and the final event;
-      the working timer remains the newest channel item and direct fallback is
-      exercised once.
-- [ ] Existing and fresh Pi sessions send and receive Slack messages.
-- [ ] Claude, Codex, and Pi terminal-close → Slack-prompt → Ghostty-resume works.
-- [ ] Topics include folder, branch, model, and reasoning effort.
-- [ ] Restarting with unchanged metadata does not write channel topics again.
-- [ ] During a Claude, Codex, and Pi turn, a new channel message and a real
-      topic change each re-anchor the live status as the newest item; its timer
-      continues updating and only one status copy remains.
-- [ ] Claude, Codex, and Pi usage reports and live time/token status work; local
-      Pi models retain zero cost and report current context.
-- [ ] File transfer, interrupt, model, effort, flags, and update commands work.
-- [ ] Pi accepts a native image on an image-capable model and rejects it visibly
-      on a text-only model; non-image attachments remain readable by local path.
-- [ ] Pi `--safe` approves and denies tool calls from Slack and fails closed when
-      the relay is interrupted; project-resource trust remains a separate prompt.
-- [ ] `/pi-run` auto and plan/approve modes publish plans, show live
-      phase/step/role/counters, survive pause/resume and terminal resume, enforce
-      each budget, report failures visibly, run independent review, and mirror
-      exactly one final response.
-- [ ] Ordinary owner Pi prompts classify under the default `auto` policy: a
-      simple prompt stays native and a complex write task promotes exactly
-      once. `always`, `native`, and `direct` work and persist as documented;
-      collaborators remain native.
-- [ ] Adaptive classification receives no upload grant or attachment bytes,
-      uses no tools/project resources, fails toward managed execution, reports
-      promotion/cancellation visibly, and resumes one pending route after close.
-- [ ] Managed planner/scout/reviewer children make no writes and never create a
-      Slack channel. `--safe` rejects worker children while the parent remains
-      behind Slack approval; cancel terminates an active child promptly.
-- [ ] Planner/reviewer children terminate through their typed submission tools;
-      malformed prose gets at most one no-tools repair and a bounded diagnostic
-      while the independent-review budget remains reserved.
-- [ ] Claude → Codex and Codex → the original Claude leg preserve one channel,
-      provider-native IDs/settings, queued-message order, and topic metadata.
-- [ ] Claude ↔ Pi, Codex ↔ Pi, and a three-leg round trip preserve one active
-      leg, every native ID/settings set, queued-message order, and topic metadata.
-- [ ] Target-start failure rolls back to the source; daemon restart during
-      target validation reaps the provisional tmux and restores one active leg.
-- [ ] Instruction alignment preview/apply and switch-without-alignment work;
-      stale hashes, traversal, symlink, binary, mode, and oversized proposals fail closed.
-- [ ] Owner and collaborator artifact returns work; expired/replayed grants and
-      workspace/symlink escapes are rejected.
-- [ ] Automation create/status/stop is exercised with a disposable external
-      key: duplicate create launches and prompts once, collaborator invitation
-      precedes whitelisting, restart recovery resumes setup, and exact archive
-      leaves unrelated sessions/channels untouched.
-- [ ] Claude/Codex permission relay and Pi safe-mode relay are exercised in
-      non-destructive test sessions.
+- [ ] Existing active Claude, Codex, and Pi processes are re-adopted without a
+      duplicate channel, process, prompt, or topic write.
+- [ ] An in-progress turn for every provider regains its working line and
+      original elapsed duration after restart.
+- [ ] Existing and fresh sessions send and receive Slack text and attachments.
+- [ ] New sessions are headless; Slack interaction works with no Ghostty window.
+- [ ] `/sab-terminal open` opens or focuses one exact session, `close` detaches
+      without stopping it, and a Slack prompt continues afterward.
+- [ ] `/sab-terminal open-all` and `close-all` affect all and only authoritative
+      active sessions; standby/provisional legs remain untouched.
+- [ ] `sab terminal` list/open/close/all operations match the Slack behavior.
+- [ ] Topics include folder, branch, model, and effort; unchanged topics do not
+      trigger restart notifications.
+- [ ] A new message or real topic change re-anchors the single working status
+      without resetting its timer.
+- [ ] Codex mirrors semantic interim commentary but excludes commands, output,
+      diffs, reasoning, plans, and final events; direct fallback works.
+- [ ] Claude login expiry and overload failures surface promptly and deduplicate.
+- [ ] `/sab-model`, `/sab-effort`, `/sab-flags`, `/sab-update`, `/sab-stop`,
+      `/sab-kill`, `/sab-status`, and `/sab-usage` work for each provider.
+- [ ] `/sab-update all` updates each represented provider binary once, resumes
+      every idle authoritative session with unchanged settings, queues a prompt
+      arriving mid-relaunch, and explicitly skips a busy turn, permission,
+      switch, managed run, automation, standby leg, and stale mapping.
+- [ ] `/sab-account` works only for Claude and `/sab-run` only for Pi.
+- [ ] Claude/Codex permission relay and Pi safe-mode/project-trust decisions work.
+- [ ] Pi image input, adaptive routing, plan/approve, pause/resume, all budgets,
+      failure reporting, independent review, and exactly-one final response work.
+- [ ] Claude ↔ Codex ↔ Pi switching preserves one channel, native identities,
+      settings, queued-message order, rollback, and standby legs.
+- [ ] Switch trust gates open the exact target terminal and explain the required
+      local action in Slack.
+- [ ] Instruction proposal/apply and continue-without-alignment work; stale,
+      traversal, symlink, binary, mode, and oversized proposals fail closed.
+- [ ] Manual collaborator invitation precedes allowlisting; failure is visible.
+- [ ] Owner and collaborator artifact delivery works through `sab upload`;
+      expired/replayed grants and workspace/symlink escapes are rejected.
+- [ ] Automation duplicate create launches/prompts exactly once, survives daemon
+      restart, invites before whitelisting, and exact repeated stop/archive does
+      not mutate any other session or channel.
 - [ ] No duplicate Slack channels appear.
 
 ## Publish
 
-- [ ] Rename the GitHub repository only after old-remote migration is ready.
-- [ ] Set the GitHub description and topics.
 - [ ] Push the release branch and wait for CI.
 - [ ] Publish `vX.Y.Z-rc.N` as a prerelease.
 - [ ] Dogfood the RC before promoting the exact tested commit to `vX.Y.Z`.
-- [ ] Keep the previous release tag and local backup until final acceptance.
+- [ ] Keep the previous tag and config backup until final acceptance.

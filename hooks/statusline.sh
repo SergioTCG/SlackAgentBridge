@@ -1,6 +1,6 @@
 #!/bin/sh
 # Bridge statusline: forwards Claude Code's documented status JSON (model, effort,
-# tokens, cost) to the daemon so /cc-status can show them, then renders the display.
+# tokens, cost) to the daemon so /sab-status can show them, then renders the display.
 # Non-blocking: the daemon POST is backgrounded, so the statusline stays instant
 # even if the daemon is down.
 input=$(cat)

@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process'
 
 function runCli(args, env) {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, ['bin/sab-automation', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('bin/sab', ['automation', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = '', stderr = ''
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
@@ -16,7 +16,7 @@ function runCli(args, env) {
   })
 }
 
-test('sab-automation creates JSON without shell interpolation and encodes status keys', async t => {
+test('sab automation creates JSON without shell interpolation and encodes status keys', async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-automation-cli-'))
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }))
   const prompt = 'Line one\nquotes: "hello"; shell text: $(touch /tmp/must-not-run)\n'

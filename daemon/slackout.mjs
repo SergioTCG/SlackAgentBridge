@@ -30,7 +30,7 @@ export function enqueue(channel, fn) {
 export async function reportSlashFailure(body, { postChannel, postEphemeral }) {
   const rawCommand = String(body?.command || '')
   const command = /^\/[a-z0-9_-]{1,64}$/.test(rawCommand) ? rawCommand : '/bridge-command'
-  const status = command.startsWith('/codex-') ? '/codex-status' : '/cc-status'
+  const status = '/sab-status'
   const text = `❌ \`${command}\` failed inside the bridge. Check \`${status}\` before retrying.`
   if (body?.channel_id) {
     try {

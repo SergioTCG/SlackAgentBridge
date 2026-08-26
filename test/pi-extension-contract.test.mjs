@@ -2,14 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
-const launcher = fs.readFileSync(new URL('../bin/sab-pi', import.meta.url), 'utf8')
+const launcher = fs.readFileSync(new URL('../scripts/run-session.sh', import.meta.url), 'utf8')
 const extension = fs.readFileSync(new URL('../pi/sab-extension.ts', import.meta.url), 'utf8')
 const managed = fs.readFileSync(new URL('../pi/managed-run.ts', import.meta.url), 'utf8')
 const managedChild = fs.readFileSync(new URL('../pi/managed-child-output.ts', import.meta.url), 'utf8')
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 
 test('Pi bridge extension is explicit and bridge safe mode never leaks to the Pi CLI', () => {
-  assert.match(launcher, /pi --extension "\$EXTENSION"/)
+  assert.match(launcher, /exec pi --extension "\$extension"/)
   assert.match(launcher, /if \[ "\$arg" = "--safe" \]/)
   assert.doesNotMatch(launcher, /pi install/)
 })

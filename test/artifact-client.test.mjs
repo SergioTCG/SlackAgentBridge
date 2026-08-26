@@ -6,11 +6,11 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const client = path.join(root, 'bin', 'sab-upload')
+const client = path.join(root, 'bin', 'sab')
 
 function run(args, env = {}) {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, [client, ...args], {
+    const child = spawn(client, ['upload', ...args], {
       env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -21,13 +21,13 @@ function run(args, env = {}) {
   })
 }
 
-test('sab-upload refuses to run outside a bridged tmux session', async () => {
+test('sab upload refuses to run outside a bridged tmux session', async () => {
   const result = await run(['--grant', 'test', 'report.pdf'], { CCS_BRIDGE: '', CCS_TMUX: '' })
   assert.equal(result.status, 2)
   assert.match(result.stderr, /live Slack Agent Bridge session/)
 })
 
-test('sab-upload safely sends absolute paths and provider/session binding to the local daemon', async t => {
+test('sab upload safely sends absolute paths and provider/session binding to the local daemon', async t => {
   const requests = []
   const server = http.createServer(async (req, res) => {
     let body = ''

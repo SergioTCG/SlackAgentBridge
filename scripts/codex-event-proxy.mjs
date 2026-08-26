@@ -3,7 +3,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { commentaryFromAppServerMessage } from '../daemon/codex-commentary.mjs'
 
 function fail(message) {
-  process.stderr.write(`sab-codex event proxy: ${message}\n`)
+  process.stderr.write(`sab Codex event proxy: ${message}\n`)
   process.exit(2)
 }
 
@@ -43,7 +43,7 @@ async function deliver(commentary) {
         if (![409, 429, 503].includes(response.status)) return
       } catch {}
     }
-    process.stderr.write(`sab-codex event proxy: commentary delivery timed out (${commentary.itemId.slice(0, 12)})\n`)
+    process.stderr.write(`sab Codex event proxy: commentary delivery timed out (${commentary.itemId.slice(0, 12)})\n`)
   })().finally(() => deliveries.delete(commentary.itemId))
   deliveries.set(commentary.itemId, pending)
   return pending

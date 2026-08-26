@@ -8,28 +8,30 @@ not copy or contradict this contract.
 
 Slack Agent Bridge connects one trusted Slack owner to local interactive coding
 agent sessions. Claude Code, Codex, and Pi are separate provider adapters over
-shared Slack, state, tmux, Ghostty, and lifecycle infrastructure.
+shared Slack, state, tmux, optional Ghostty viewports, and lifecycle
+infrastructure.
 
 These public interfaces are compatibility-sensitive:
 
-- `/cc-*` always selects Claude Code; `/codex-*` always selects Codex; `/pi-*`
-  always selects Pi.
+- `/sab-*` is the sole public Slack command namespace. Commands in a session
+  channel act on its authoritative provider; `/sab-new` requires an explicit
+  provider. Do not add provider-prefixed command families.
 - Missing `session.provider` means Claude. Never bulk-migrate old state merely
   to make provider fields explicit.
-- `sab-cc`, `sab-codex`, and `sab-pi` are the canonical provider launchers.
-  `sab-upload` is the shared artifact-return helper. `ccs` and `ccs-codex` remain
-  compatibility aliases throughout 1.x.
-- `sab-automation` is the JSON-safe client for the loopback
+- `sab` is the only public local executable. Provider launches, terminal
+  viewports, accounts, artifact returns, and automation are subcommands. Do not
+  restore the pre-2.0 `ccs*` or `sab-*` launcher executables.
+- `sab automation` is the JSON-safe client for the loopback
   `/automation/sessions` create/status/stop lifecycle. External keys are durable
   idempotency identities and must never be reused to launch or prompt twice.
-- `ccs-account`, `ccs-spawn`, internal `ccs-*` tmux names, and `CCS_*` remain
-  stable until a separately designed migration justifies changing them.
+- Historical `CCS_*` environment keys and `ccs-*` tmux names in persisted state
+  remain readable. New tmux names use `sab-*`.
 - Configuration and state remain in `~/.config/ccs`; the local HTTP port remains
   `8877` unless an explicit migration is designed and documented.
 - The historical LaunchAgent label `si.sergej.claudeslackproxy` remains the one
   service identity. Do not load a second label during a rename or upgrade.
 - Existing `~/.claudeslackproxy` checkouts and `#claude-code-bridge` control
-  channels are valid. Fresh 1.0 installs may use their neutral replacements.
+  channels are valid. Fresh installs may use their neutral replacements.
 - The canonical Slack manifest is `slack/app-manifest.json`. There must not be a
   hand-maintained second manifest.
 
@@ -51,9 +53,18 @@ generated MCP configuration. Do not print secrets during diagnostics.
 ## Architecture invariants
 
 - One daemon owns the sole Slack Socket Mode connection and persisted state.
-- Every interactive provider process is wrapped in tmux inside a visible or
-  dockless Ghostty window. tmux remains the terminal and lifecycle control
-  surface; provider-native channel/extension streams may carry inbound text.
+- Every interactive provider process is wrapped in detached-capable tmux. tmux
+  owns process lifetime and remains the terminal/control surface;
+  provider-native channel/extension streams may carry inbound text. Ghostty is
+  an optional viewport: opening, closing, or focusing it must never start,
+  duplicate, interrupt, or stop the provider process.
+- Terminal operations may target only authoritative active sessions. Standby,
+  provisional, stale, and rebound records must not be opened or detached by a
+  bulk terminal action.
+- A bridge-wide provider update may restart only idle authoritative active
+  sessions. It must skip active turns, questions, permissions, switches,
+  managed Pi work, automation ownership, and sessions already waking or
+  restarting; update each represented provider binary at most once per sweep.
 - Slack channels are private and mapped by channel ID, not mutable channel name.
 - A switched channel may own separate Claude, Codex, and Pi native legs, with
   exactly one active. Keep `state.channels[channel]` authoritative; only the active
@@ -75,7 +86,7 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Pi owner prompts use native-session-persistent adaptive routing by default;
   collaborators remain native. The read-only classifier must receive visible
   prompt text only—never artifact grants or attachment bytes—and must fail
-  toward managed execution. Explicit `/pi-run` goals remain force-managed;
+  toward managed execution. Explicit `/sab-run` goals remain force-managed;
   `direct` and `native` remain deliberate bypasses.
 - Managed Pi runs persist only bounded route/goal/plan/counter state in the
   native session. Child Pi processes must not inherit bridge identity,
@@ -85,8 +96,9 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Generated-file delivery is provider-neutral. The daemon, not the agent,
   chooses the Slack destination from a short-lived grant tied to an accepted
   Slack message and its live session.
-- A provider namespace is authoritative. Reject a command or flag that belongs
-  to the other provider before it can mutate a session.
+- A session channel's authoritative provider selects provider-specific command
+  behavior. Reject flags or operations belonging to another provider before
+  they can mutate a session.
 - Hook handlers must remain quick, bounded, and failure-tolerant. A hook or Slack
   API error must not crash the long-running daemon.
 - State writes remain atomic. Replacement processes must not be overwritten or
@@ -147,11 +159,10 @@ npm ci
 npm run audit
 npm test
 npm run check
-for file in daemon/*.mjs channel/*.mjs scripts/*.mjs bin/sab-upload bin/sab-automation; do node --check "$file"; done
+for file in daemon/*.mjs channel/*.mjs scripts/*.mjs; do node --check "$file"; done
 PI_OFFLINE=1 pi --extension ./pi/sab-extension.ts --list-models
-shellcheck -S warning bin/sab-cc bin/sab-codex bin/sab-pi \
-  bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \
-  bin/ccs-spawn bin/ccs-window hooks/hook.sh hooks/codex-hook.sh \
+shellcheck -S warning bin/sab scripts/run-session.sh scripts/claude-consent.sh \
+  scripts/sab-account.sh hooks/hook.sh hooks/codex-hook.sh \
   install.sh install-codex.sh install-pi.sh
 ```
 
