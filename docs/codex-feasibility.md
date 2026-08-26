@@ -6,14 +6,14 @@
 
 **Feasible for the core bridge, without replacing or migrating the Claude path.**
 Codex provides stable lifecycle hooks for session identity, terminal prompts,
-final assistant text, and synchronous permission decisions. The existing tmux
-layer already supplies the missing inbound transport and terminal control.
+final assistant text, and synchronous permission decisions. The tmux layer
+supplies the missing inbound transport and terminal control and, since 2.0,
+owns provider lifetime independently of optional Ghostty viewports.
 
 The safe design is a provider adapter, not a rewrite:
 
 ```text
-Slack → daemon → tmux paste ─┬→ bin/sab-cc    → Claude Code
-                             └→ bin/sab-codex → Codex CLI
+Slack → daemon → detached tmux → sab __run <provider> → provider CLI
 
 Claude → hooks + JSONL transcript + MCP Channel SSE → daemon → Slack
 Codex  → lifecycle hooks (final text included)      → daemon → Slack
@@ -32,14 +32,14 @@ mappings retain their current shape, so activation needs no state migration.
 | Slack prompt → terminal | Existing bracketed tmux paste | Implemented |
 | Final response → Slack | `Stop.last_assistant_message` | Implemented without parsing Codex JSONL |
 | Interim progress → Slack | App Server `item/completed` for `agentMessage.phase=commentary` | Implemented through a transparent loopback proxy; tools, diffs, reasoning, plans, deltas, and final answers are excluded |
-| Dormant-session resume | `codex resume <UUID>` in a new Ghostty/tmux window | Implemented |
+| Dormant-session resume | `codex resume <UUID>` in a new detached tmux session | Implemented |
 | Approve/deny from Slack | Synchronous `PermissionRequest` hook; daemon holds the response until a Slack verdict | Implemented for non-yolo sessions; local prompt is the failure fallback |
 | Interrupt turn | Launcher binds Codex `interrupt_turn` to F12; daemon sends F12, then confirms `Stop` or the idle input surface before clearing live status | Implemented |
 | Model/reasoning control | Restart/resume with `--model` and `model_reasoning_effort` | Implemented |
 | Model discovery | `codex debug models --bundled` | Implemented |
 | File attachments | Existing Slack download + local-path prompt | Implemented |
 | Live working status | Hook timing + bounded `ccusage` snapshots | Implemented with elapsed time and per-turn token deltas; no whimsical verb or TUI scraping |
-| Usage/cost report | `ccusage codex` public JSON output | Implemented through `/codex-usage`, daily, and model reports |
+| Usage/cost report | `ccusage codex` public JSON output | Implemented through `/sab-usage`, daily, and model reports |
 | Per-session subscription switch | Claude OAuth-token mechanism | Not applicable; Codex uses its current machine login |
 
 ## Why hooks + tmux remain authoritative
@@ -50,8 +50,8 @@ does not make App Server its lifecycle or input control plane. Each bridged
 launch keeps hooks authoritative for session identity, permission decisions,
 and final text, and keeps tmux authoritative for input, interrupt, and
 resurrection. A per-session loopback proxy transparently forwards the protocol
-between the visible TUI and App Server while observing only completed,
-user-facing commentary events. If either sidecar cannot start, `sab-codex`
+between the TUI and App Server while observing only completed, user-facing
+commentary events. If either sidecar cannot start, `sab new codex`
 executes the prior direct TUI path instead.
 
 Codex documents its transcript path as a convenience rather than a stable wire
@@ -63,14 +63,12 @@ typed mid-turn prose without terminal scraping.
 
 ## Safety and rollout
 
-- `bin/sab-cc`, `hooks/hook.sh`, Claude MCP Channels, and old state records keep
-  their existing behavior. The historical `ccs` command remains an alias.
-- Codex is selected only by `sab-codex` (or its `ccs-codex` alias),
-  `/codex-new <folder>`, or
-  `POST /spawn` with `provider: "codex"`.
-- Slack ingress is namespaced: `/cc-*` is always Claude and `/codex-*` is
-  always Codex. Provider flags in slash commands are rejected, and a command
-  from the wrong namespace cannot mutate the session in that channel.
+- Claude MCP Channels and old state records keep their existing behavior;
+  records without a provider still mean Claude.
+- Codex is selected by `sab new codex`, `/sab-new codex`, or a validated local
+  API request with `provider: "codex"`.
+- In Slack, the active channel mapping selects Codex behavior. Provider flags
+  and incompatible commands are rejected before mutation.
 - Codex hooks are installed separately by `install-codex.sh`; the main installer
   does not alter `~/.codex`.
 - The Codex installer does not restart the daemon. Activation is a deliberate
@@ -88,10 +86,9 @@ typed mid-turn prose without terminal scraping.
   trusts the exact hook definition with Codex `/hooks`, as the official flow
   requires.
 
-Rollback is similarly narrow: stop starting Codex sessions, remove the
-`sab-codex` and `ccs-codex` symlinks and the exact hook entries from
-`~/.codex/hooks.json`, then restart the daemon during a safe window. Claude
-sessions and state need no conversion.
+Rollback is similarly narrow: stop starting Codex sessions, remove the exact
+hook entries from `~/.codex/hooks.json`, then restore the prior bridge release
+during a safe window. Claude sessions and state need no conversion.
 
 ## Residual risks
 

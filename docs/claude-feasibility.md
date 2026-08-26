@@ -1,5 +1,9 @@
 # Claude Code provider — original feasibility study
 
+> Historical design record. The shipping v2 architecture is documented in
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md): tmux now owns process lifetime,
+> Ghostty is optional, and the public surfaces are `sab` and `/sab-*`.
+
 *Investigated 2026-07-21. Local environment: Claude Code 2.1.216, macOS, Node 24.3.0 (no tmux, no Bun). Slack facts verified against docs.slack.dev; Claude Code facts against code.claude.com/docs.*
 
 ## Verdict

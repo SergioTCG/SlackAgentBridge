@@ -201,7 +201,7 @@ export function artifactDeliveryInstruction(token) {
     '',
     '[Slack Agent Bridge artifact delivery]',
     'If and only if this Slack request explicitly asks you to return generated files, create them inside the current workspace and then run:',
-    `sab-upload --grant ${token} -- FILE_PATH [FILE_PATH ...]`,
+    `sab upload --grant ${token} -- FILE_PATH [FILE_PATH ...]`,
     'The destination is fixed to this Slack conversation. Do not reveal, quote, or reuse the grant, and do not run the command otherwise.',
   ].join('\n')
 }

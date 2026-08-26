@@ -1,6 +1,6 @@
 #!/bin/sh
 # Codex lifecycle hook → bridge daemon. Global registration is safe because the
-# relay is inert unless the session was launched through ccs-codex.
+# relay is inert unless the session was launched through `sab new codex`.
 [ -n "$CCS_BRIDGE" ] && [ "$CCS_PROVIDER" = "codex" ] || exit 0
 
 payload=$(cat)

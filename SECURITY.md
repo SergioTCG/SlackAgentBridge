@@ -60,9 +60,16 @@ accounts, and the Mac user running the daemon.
   status-panel picker call `conversations.invite` before changing the prompt
   allowlist. Invitation failure is visible and leaves that user untrusted;
   successful setup persists the display name with the allowlist entry.
-- **Provider isolation:** `/cc-*` can affect only Claude sessions,
-  `/codex-*` only Codex sessions, and `/pi-*` only Pi sessions. Cross-provider
-  flags are rejected.
+- **Provider isolation:** `/sab-*` resolves provider-specific behavior from the
+  channel's authoritative session. `/sab-new` and `/sab-switch` require an
+  explicit provider, and provider-incompatible commands or flags are rejected
+  before mutation.
+- **Viewport/process separation:** providers live in detached-capable tmux,
+  independently of Ghostty. Terminal list/open/close resolves only authoritative
+  active channel mappings, verifies the exact live tmux/provider, and serializes
+  operations. Closing detaches the exact tmux client; it never sends agent
+  input, kills a process, or changes session authority. Standby and provisional
+  legs are excluded from bulk actions.
 - **Transactional provider switch:** only the owner can confirm a switch. The
   source remains authoritative until a target-native readiness turn succeeds;
   target failure or daemon restart restores the source. Exact tmux/provider
@@ -94,13 +101,13 @@ accounts, and the Mac user running the daemon.
   hook returns no decision and Codex falls back to its local approval policy.
 - **Bounded Codex commentary egress:** the per-session App Server and transparent
   event proxy bind only to random loopback ports. The proxy forwards every frame
-  unchanged to the visible TUI but submits only completed `agentMessage` events
+  unchanged to the TUI but submits only completed `agentMessage` events
   explicitly marked `commentary` to port `8877`. The daemon independently
   requires the exact Codex process, tmux, native session, active channel, and
   lineage state before posting. Command lines, command output, diffs, plans,
   reasoning, partial deltas, and final answers never enter this endpoint.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
-  `sab-pi` from the checked-out release and is not installed globally or into a
+  `sab new pi` from the checked-out release and is not installed globally or into a
   project. Its inbound stream and permission endpoints require matching Pi
   process, tmux, session, provider, and active/provisional lineage claims.
 - **Fail-closed Pi safe mode:** SAB `--safe` blocks a Pi tool call unless the
@@ -115,9 +122,9 @@ accounts, and the Mac user running the daemon.
   withheld. Pi provider credentials may still be required to invoke the
   selected model.
   Classifier failure or ambiguity promotes to managed execution; collaborators
-  never trigger it. `/pi-run mode native` disables classification for the
-  session and `/pi-run direct` bypasses it once.
-- **Bounded managed Pi runs:** automatic promotion and `/pi-run` are owner-only;
+  never trigger it. `/sab-run mode native` disables classification for the
+  session and `/sab-run direct` bypasses it once.
+- **Bounded managed Pi runs:** automatic promotion and `/sab-run` are owner-only;
   managed runs carry explicit
   wall-clock, parent-turn, subagent, and review-cycle limits. Planner, scout,
   and reviewer children receive only read/search tools. Child processes have
@@ -131,6 +138,12 @@ accounts, and the Mac user running the daemon.
 - **Conservative self-update:** the updater fast-forwards only a clean checkout
   with no unpublished local commits. Set `CCS_AUTO_UPDATE=0` to require manual
   review and deployment.
+- **Fail-closed session sweeps:** `/sab-update all` operates only on exact
+  authoritative live mappings and skips interactive, transitional, managed,
+  automation-owned, waking, or restarting sessions. It never touches dormant
+  or standby legs, never runs the bulk cleanup path, and revalidates each target
+  immediately before stopping it. Provider update failure does not prevent a
+  safely stopped session from being resumed.
 
 These measures reduce accidental exposure; they do not sandbox a provider that
 was deliberately launched in dangerous mode.
@@ -153,7 +166,7 @@ Slack when its scope or progress is no longer appropriate.
   `CCS_CODEX_NEW_FLAGS`, `CCS_CODEX_RESUME_FLAGS`, `CCS_PI_NEW_FLAGS`, and
   `CCS_PI_RESUME_FLAGS`. Use SAB `--safe` when Pi tool calls should require
   Slack approval.
-- Review changes to launchers, hooks, the Slack manifest, and dependencies before
+- Review changes to the runner, hooks, the Slack manifest, and dependencies before
   enabling self-update on a security-sensitive host.
 - Regularly inspect private-channel membership and collaborator allowlists.
 - Remember that mirrored prompts, responses, filenames, and attachments are

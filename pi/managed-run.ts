@@ -627,7 +627,7 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
       return { ok: false, error: `Managed run ${run.id.slice(0, 8)} is ${run.status}; cancel it before sending another prompt.` };
     }
     if (routing?.status === "routing") {
-      return { ok: false, error: "Pi is already assessing another prompt. Wait for its routing decision or use /pi-stop." };
+      return { ok: false, error: "Pi is already assessing another prompt. Wait for its routing decision or use /sab-stop." };
     }
     const files = Array.isArray(value.files)
       ? value.files.slice(0, 20).map(file => ({
@@ -688,7 +688,7 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
       childAbort?.abort();
       suppressNextSettled = parentWasBusy;
       if (parentWasBusy) ctx.abort();
-      await terminal("paused", "Managed run paused by the owner. Resume with /pi-run continue.", false);
+      await terminal("paused", "Managed run paused by the owner. Resume with /sab-run continue.", false);
       return { ok: true, managed: snapshot() };
     }
     if (action === "managed-cancel") {
@@ -835,7 +835,7 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
     childAbort?.abort();
     suppressNextSettled = parentWasBusy;
     if (parentWasBusy) ctx.abort();
-    await terminal("paused", "Managed run paused by interrupt. Resume with /pi-run continue.", false);
+    await terminal("paused", "Managed run paused by interrupt. Resume with /sab-run continue.", false);
     return snapshot();
   }
 

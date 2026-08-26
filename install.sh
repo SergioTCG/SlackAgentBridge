@@ -101,7 +101,7 @@ fi
 if wants_pi; then
   if command -v pi >/dev/null 2>&1; then say "  ✓ pi"; else say "  ✗ missing: pi"; missing=1; fi
 fi
-[ -d /Applications/Ghostty.app ] || say "  ! Ghostty not found — remote spawn/resume needs it (https://ghostty.org)"
+[ -d /Applications/Ghostty.app ] || say "  ! Ghostty not found — sessions work headlessly, but terminal viewports need it (https://ghostty.org)"
 if [ "$missing" = 1 ]; then say "Install the missing prerequisites and re-run."; exit 1; fi
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$NODE_MAJOR" -ge 20 ] || { say "Node >= 20 required (have $(node -v))"; exit 1; }
@@ -116,27 +116,18 @@ else
   ( cd "$BRIDGE" && { npm ci --omit=dev >/dev/null 2>&1 || npm install --omit=dev >/dev/null 2>&1; } )
 fi
 mkdir -p "$BIN_DIR"
-ln -sf "$BRIDGE/bin/ccs-spawn" "$BIN_DIR/ccs-spawn"
-ln -sf "$BRIDGE/bin/sab-upload" "$BIN_DIR/sab-upload"
-ln -sf "$BRIDGE/bin/sab-automation" "$BIN_DIR/sab-automation"
-if wants_claude; then
-  ln -sf "$BRIDGE/bin/sab-cc" "$BIN_DIR/sab-cc"
-  ln -sf "$BRIDGE/bin/ccs" "$BIN_DIR/ccs"
-  ln -sf "$BRIDGE/bin/ccs-account" "$BIN_DIR/ccs-account"
-  say "  linked $BIN_DIR/sab-cc (with ccs compatibility alias)"
+if [ "$RELOAD_DAEMON" = 1 ]; then
+  for legacy in ccs ccs-account ccs-codex ccs-spawn ccs-window sab-cc sab-codex sab-pi sab-upload sab-automation; do
+    legacy_path="$BIN_DIR/$legacy"
+    if [ -L "$legacy_path" ]; then rm -f "$legacy_path"; fi
+  done
+else
+  say "  preserving 1.x launcher symlinks until the maintenance rollout"
 fi
-if wants_codex; then
-  ln -sf "$BRIDGE/bin/sab-codex" "$BIN_DIR/sab-codex"
-  ln -sf "$BRIDGE/bin/ccs-codex" "$BIN_DIR/ccs-codex"
-  say "  linked $BIN_DIR/sab-codex (with ccs-codex compatibility alias)"
-fi
-if wants_pi; then
-  ln -sf "$BRIDGE/bin/sab-pi" "$BIN_DIR/sab-pi"
-  say "  linked $BIN_DIR/sab-pi"
-fi
-chmod +x "$BRIDGE"/bin/sab-cc "$BRIDGE"/bin/sab-codex "$BRIDGE"/bin/sab-pi "$BRIDGE"/bin/sab-upload "$BRIDGE"/bin/sab-automation \
-  "$BRIDGE"/bin/ccs "$BRIDGE"/bin/ccs-consent "$BRIDGE"/bin/ccs-codex \
-  "$BRIDGE"/bin/ccs-window "$BRIDGE"/bin/ccs-spawn "$BRIDGE"/bin/ccs-account \
+ln -sf "$BRIDGE/bin/sab" "$BIN_DIR/sab"
+say "  linked the single CLI: $BIN_DIR/sab"
+chmod +x "$BRIDGE"/bin/sab "$BRIDGE"/scripts/run-session.sh "$BRIDGE"/scripts/claude-consent.sh \
+  "$BRIDGE"/scripts/sab-account.sh "$BRIDGE"/scripts/sab-upload.mjs "$BRIDGE"/scripts/sab-automation.mjs "$BRIDGE"/scripts/sab-terminal.mjs \
   "$BRIDGE"/hooks/hook.sh "$BRIDGE"/hooks/codex-hook.sh \
   "$BRIDGE"/daemon/daemon.mjs "$BRIDGE"/channel/server.mjs 2>/dev/null || true
 
@@ -162,7 +153,7 @@ if [ ! -f "$CONFIG_DIR/env" ]; then
     [ "$(printf %s "$CONN" | jq -r .ok)" = true ] || { say "  ✗ app token rejected ($(printf %s "$CONN" | jq -r .error))"; exit 1; }
     umask 177
     printf 'SLACK_BOT_TOKEN=%s\nSLACK_APP_TOKEN=%s\nSLACK_TEAM_ID=%s\n' "$BOT" "$APP" "$STEAM" > "$CONFIG_DIR/env"
-    say "  wrote $CONFIG_DIR/env; ownership is claimed later with /cc-claim"
+    say "  wrote $CONFIG_DIR/env; ownership is claimed later with /sab-claim"
   else
     say "  ! No TTY — create $CONFIG_DIR/env with SLACK_BOT_TOKEN / SLACK_APP_TOKEN, then re-run."
     exit 1
@@ -250,14 +241,14 @@ fi
 
 say ""
 say "✅ Slack Agent Bridge files installed for: $INSTALL_PROVIDER"
-say "   Claim a fresh bridge in Slack with /cc-claim."
-if wants_claude; then say "   Start Claude locally: sab-cc"; fi
+say "   Claim a fresh bridge in Slack with /sab-claim."
+if wants_claude; then say "   Start Claude locally: sab new claude"; fi
 if wants_codex; then
-  say "   Before the first Codex session, run sab-codex and trust the user hook in /hooks."
-  say "   Start Codex locally: sab-codex"
+  say "   Before the first Codex session, run sab new codex and trust the user hook in /hooks."
+  say "   Start Codex locally: sab new codex"
 fi
 if wants_pi; then
-  say "   Start Pi locally: sab-pi"
-  say "   Pi's SAB extension is loaded explicitly by sab-pi; no global Pi extension is installed."
+  say "   Start Pi locally: sab new pi"
+  say "   Pi's SAB extension is loaded explicitly by sab; no global Pi extension is installed."
 fi
 say "   Logs: tail -f $LOG"

@@ -24,37 +24,27 @@ test('Slack command definitions satisfy manifest field constraints', () => {
   assert.equal(manifest.settings.interactivity.is_enabled, true)
 })
 
-test('Slack manifest has provider-neutral 1.0 metadata', () => {
+test('Slack manifest has provider-neutral metadata', () => {
   assert.equal(manifest.display_information.name, 'Slack Agent Bridge')
   assert.match(manifest.display_information.description, /Claude Code, Codex, and Pi/)
   assert.equal(manifest.features.bot_user.display_name, 'Clavdivs')
 })
 
-test('provider-scoped commands have parallel Claude, Codex, and Pi namespaces', () => {
-  const scoped = ['new', 'model', 'effort', 'status', 'usage', 'flags', 'update', 'stop', 'switch', 'kill', 'help']
-  for (const name of scoped) {
-    assert.ok(names.includes(`/cc-${name}`), `missing /cc-${name}`)
-    assert.ok(names.includes(`/codex-${name}`), `missing /codex-${name}`)
-    assert.ok(names.includes(`/pi-${name}`), `missing /pi-${name}`)
-  }
+test('the manifest exposes only the unified SAB namespace', () => {
+  const expected = ['new', 'model', 'effort', 'flags', 'update', 'stop', 'switch', 'kill', 'status', 'usage',
+    'run', 'account', 'terminal', 'health', 'cleanup', 'claim', 'help']
+  assert.deepEqual(names.slice().sort(), expected.map(name => `/sab-${name}`).sort())
+  assert.equal(names.some(name => /^\/(?:cc|codex|pi)-/.test(name)), false)
 })
 
-test('managed-run controls remain a Pi-only command and expose adaptive policy', () => {
-  assert.ok(names.includes('/pi-run'))
-  assert.ok(!names.includes('/cc-run'))
-  assert.ok(!names.includes('/codex-run'))
-  const command = commands.find(item => item.command === '/pi-run')
+test('managed-run and terminal controls are available through SAB', () => {
+  const command = commands.find(item => item.command === '/sab-run')
   assert.match(command.description, /managed/i)
   assert.match(command.usage_hint, /status/)
   assert.match(command.usage_hint, /mode/)
-})
-
-test('bridge-wide and Claude-only commands are not duplicated under Codex or Pi', () => {
-  for (const name of ['claim', 'health', 'cleanup', 'account']) {
-    assert.ok(names.includes(`/cc-${name}`), `missing /cc-${name}`)
-    assert.ok(!names.includes(`/codex-${name}`), `unexpected /codex-${name}`)
-    assert.ok(!names.includes(`/pi-${name}`), `unexpected /pi-${name}`)
-  }
-  const ccNew = commands.find(command => command.command === '/cc-new')
-  assert.doesNotMatch(ccNew.usage_hint, /--codex/)
+  const terminal = commands.find(item => item.command === '/sab-terminal')
+  assert.match(terminal.usage_hint, /open-all/)
+  assert.match(terminal.usage_hint, /close-all/)
+  const update = commands.find(item => item.command === '/sab-update')
+  assert.equal(update.usage_hint, '[all]')
 })
