@@ -23,7 +23,8 @@ Slack (private channels, Socket Mode)
 │  Claude/Codex hooks   Claude MCP Channel       Pi extension     │
 │         │                    │                      │           │
 │  Ghostty → tmux ─┬→ bin/sab-cc → Claude + MCP Channel          │
-│                  ├→ bin/sab-codex → Codex + lifecycle hooks    │
+│                  ├→ bin/sab-codex → event proxy → Codex TUI    │
+│                  │                    ↕ App Server + hooks      │
 │                  └→ bin/sab-pi → Pi + explicit SAB extension   │
 │                         └→ bin/sab-upload → authorized artifact │
 └────────────────────────────────────────────────────────────────┘
@@ -37,7 +38,16 @@ Slack (private channels, Socket Mode)
   install path, so nothing is hardcoded. `bin/ccs` forwards to this launcher.
 - **`bin/sab-codex`** — the Codex launcher. It uses the same tmux invariant,
   exports `CCS_PROVIDER=codex`, and binds F12 to Codex `interrupt_turn`. It does
-  not load Claude's MCP server or consent watcher. `bin/ccs-codex` forwards to it.
+  not load Claude's MCP server or consent watcher. It starts a per-session
+  loopback App Server and places a transparent WebSocket proxy between it and
+  the visible TUI. Sidecar startup failure falls back to the legacy direct TUI.
+  `bin/ccs-codex` forwards to it.
+- **`scripts/codex-event-proxy.mjs`** — a transparent loopback WebSocket proxy.
+  Every protocol frame still reaches the TUI unchanged; the observer selects
+  only completed `agentMessage` items whose phase is `commentary` and posts
+  those bounded events to the daemon with the owning App Server PID and tmux
+  identity. It ignores deltas, tool calls/output, diffs, plans, reasoning, and
+  final answers.
 - **`bin/sab-pi`** — the Pi launcher. It exports `CCS_PROVIDER=pi`, preserves
   the shared tmux/Ghostty invariant, consumes bridge-only `--safe`, and loads
   `pi/sab-extension.ts` explicitly with Pi's `--extension`. It never installs
@@ -98,10 +108,15 @@ Slack (private channels, Socket Mode)
    new failure-only authentication and overload records, because Claude can
    return immediately to idle without emitting `Stop`; these failures are
    delivered promptly and repeated identical failures are time-deduplicated.
-   Codex uses the stable
-   `Stop.last_assistant_message` hook field; the bridge never parses Codex's
-   explicitly unstable transcript format. Usage and live token counters enter
-   only through `ccusage`'s maintained Codex JSON adapter. Pi's native extension
+   Codex uses the stable `Stop.last_assistant_message` hook field for the final
+   answer. Its transparent App Server proxy additionally mirrors only semantic,
+   user-facing `commentary` items; the existing status owner re-anchors the live
+   timer below each one. The daemon claims bounded item IDs before Slack delivery
+   and rejects mismatched process/tmux/session/channel identities, private
+   handoff turns, provisional legs, late post-final events, and retries. The
+   bridge never parses Codex's explicitly unstable transcript format. Usage and
+   live token counters enter only through `ccusage`'s maintained Codex JSON
+   adapter. Pi's native extension
    supplies final text and usage directly; its session JSONL is never read.
    Slack-injected messages are deduped for all providers. A live status edits
    in place normally; because Slack cannot reorder an edited timestamp, newer
@@ -256,6 +271,12 @@ surface while preserving the local-account trust model for scripts.
   the bridge's configured F12 interrupt hint; if an older deployment lost the
   turn timestamp, recovery reconstructs it from a current frozen Slack timer or
   the latest accepted human prompt before restarting the status poller.
+- Codex App Server's WebSocket transport is documented as experimental. SAB
+  uses it only as a transparent, loopback-only observer transport: hooks remain
+  authoritative for lifecycle, permission flow, and final delivery, tmux
+  remains the input/control surface, and sidecar startup failure preserves the
+  direct-TUI path. Sessions already running without the proxy must be restarted
+  or resumed before semantic interim commentary becomes available.
 - Pi capabilities depend on its installed version and selected model. Native
   image delivery is rejected visibly for text-only models; Pi has no Chrome
   flag counterpart.

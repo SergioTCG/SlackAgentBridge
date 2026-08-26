@@ -92,6 +92,13 @@ accounts, and the Mac user running the daemon.
   review. Changed hooks require local review through `/hooks`.
 - **Failure-safe permission relay:** if Codex cannot obtain a Slack verdict, the
   hook returns no decision and Codex falls back to its local approval policy.
+- **Bounded Codex commentary egress:** the per-session App Server and transparent
+  event proxy bind only to random loopback ports. The proxy forwards every frame
+  unchanged to the visible TUI but submits only completed `agentMessage` events
+  explicitly marked `commentary` to port `8877`. The daemon independently
+  requires the exact Codex process, tmux, native session, active channel, and
+  lineage state before posting. Command lines, command output, diffs, plans,
+  reasoning, partial deltas, and final answers never enter this endpoint.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
   `sab-pi` from the checked-out release and is not installed globally or into a
   project. Its inbound stream and permission endpoints require matching Pi
@@ -179,9 +186,11 @@ Claude support uses the Channels research-preview API through
 contract, including its consent or permission behavior. Pin and test Claude Code
 before an unattended production upgrade when stability matters.
 
-Codex support uses lifecycle and permission hooks. The bridge consumes stable
-hook payload fields and deliberately avoids transcript JSONL, but hook behavior
-can still evolve. Re-review hook changes after Codex upgrades.
+Codex support uses lifecycle and permission hooks plus its App Server event
+protocol for interim commentary. Hooks remain authoritative for final delivery
+and the bridge deliberately avoids transcript JSONL. App Server's WebSocket
+transport is documented as experimental, so controlled Codex message, resume,
+permission, commentary, and fallback canaries are required after upgrades.
 
 Pi support uses its native extension API. The bridge deliberately avoids Pi
 session JSONL, but the extension surface and trust semantics may evolve. The

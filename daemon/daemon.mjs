@@ -29,6 +29,9 @@ import { createSessionChannelGate, pruneSessionChannelAliases } from './channel-
 import { createTopicSync } from './topic.mjs'
 import { createStatusMessages, recoverCodexTurnStartedAt } from './status.mjs'
 import {
+  claimCodexCommentary, codexCommentaryDisposition, commentaryFromAppServerMessage, releaseCodexCommentary,
+} from './codex-commentary.mjs'
+import {
   ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
   slackArtifactUploadOptions,
 } from './artifacts.mjs'
@@ -3160,6 +3163,72 @@ function startAutomationReconciler() {
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
   if (await handleAutomationHttp(req, res, url, automationLifecycle)) return
+  if (url.pathname === '/codex/commentary' && req.method === 'POST') {
+    if (req.headers['x-ccs-provider'] !== 'codex' || !String(req.headers['content-type'] || '').startsWith('application/json')) {
+      res.writeHead(403); res.end('forbidden'); return
+    }
+    let raw = ''
+    let rawBytes = 0
+    for await (const chunk of req) {
+      rawBytes += chunk.length
+      raw += chunk
+      if (rawBytes > (64 << 10)) { res.writeHead(413); res.end('too large'); return }
+    }
+    try {
+      const parsed = JSON.parse(raw)
+      const commentary = commentaryFromAppServerMessage({
+        method: 'item/completed',
+        params: {
+          threadId: parsed.threadId,
+          turnId: parsed.turnId,
+          item: {
+            id: parsed.itemId,
+            type: 'agentMessage',
+            phase: 'commentary',
+            text: parsed.text,
+          },
+        },
+      })
+      if (!commentary) { res.writeHead(400); res.end('invalid commentary'); return }
+      const pid = await resolveAgentPid(url.searchParams.get('ppid'), 'codex')
+      const tmux = url.searchParams.get('tmux') || ''
+      const session = state.sessions[commentary.threadId]
+      const targetClaim = transitionForTarget(state, 'codex', tmux)
+      const disposition = codexCommentaryDisposition({
+        session,
+        commentary,
+        pid,
+        tmux,
+        tmuxClaimValid: session ? await validTmuxClaim(pid, tmux) : false,
+        activeSessionId: session?.channel ? state.channels[session.channel] : null,
+        privateTurn: internalTurns.has(commentary.threadId),
+        targetClaim: Boolean(targetClaim),
+      })
+      if (disposition === 'ignore') { res.writeHead(204); res.end(); return }
+      if (disposition === 'not_ready') { res.writeHead(409); res.end('session or channel not ready'); return }
+      if (disposition === 'forbidden') { res.writeHead(403); res.end('identity mismatch'); return }
+      if (!claimCodexCommentary(session, commentary.itemId)) {
+        res.writeHead(200); res.end('duplicate'); return
+      }
+      // Claim before the Slack side effect so proxy retries and daemon restarts
+      // cannot duplicate a progress update. A known Slack failure releases the
+      // claim and asks the local proxy to retry.
+      saveStateNow(state)
+      try {
+        await postMd(session.channel, commentary.text)
+        res.writeHead(202); res.end('accepted')
+      } catch (error) {
+        releaseCodexCommentary(session, commentary.itemId)
+        saveStateNow(state)
+        log('Codex commentary post failed', commentary.itemId.slice(0, 12), error?.data?.error || String(error))
+        res.writeHead(503); res.end('Slack delivery failed')
+      }
+    } catch (error) {
+      log('Codex commentary rejected', String(error?.message || error))
+      res.writeHead(400); res.end('invalid commentary')
+    }
+    return
+  }
   if (url.pathname === '/hook' && req.method === 'POST') {
     let body = ''
     for await (const c of req) body += c

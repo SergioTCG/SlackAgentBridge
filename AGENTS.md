@@ -62,8 +62,12 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Claude inbound messages use its MCP Channel server; hooks mirror lifecycle and
   outbound content. Preserve the channel consent and account-switching paths.
 - Codex inbound messages use tmux; lifecycle hooks provide stable outbound final
-  text and permission decisions. Never parse Codex transcript JSONL directly;
-  usage telemetry may enter only through `ccusage`'s public JSON adapter.
+  text and permission decisions. A transparent loopback App Server proxy may
+  mirror only completed `agentMessage.phase=commentary` events; it must not take
+  over lifecycle/input control or emit tools, output, diffs, plans, reasoning,
+  deltas, or final answers. Preserve direct-TUI fallback. Never parse Codex
+  transcript JSONL directly; usage telemetry may enter only through `ccusage`'s
+  public JSON adapter.
 - Pi inbound messages, lifecycle, usage, settings, and optional safe-mode tool
   decisions use the explicitly loaded `pi/sab-extension.ts`. Do not install it
   globally or parse Pi session files. Pi's native project trust remains a

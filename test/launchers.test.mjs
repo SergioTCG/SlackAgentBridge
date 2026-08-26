@@ -49,6 +49,83 @@ test('canonical launchers export an authoritative provider for shared helpers', 
   assert.match(pi, /--extension/)
 })
 
+test('Codex launcher observes semantic commentary through a loopback App Server proxy', () => {
+  const codex = fs.readFileSync(path.join(root, 'bin', 'sab-codex'), 'utf8')
+  assert.match(codex, /app-server --listen ws:\/\/127\.0\.0\.1:0/)
+  assert.match(codex, /codex-event-proxy\.mjs/)
+  assert.match(codex, /--remote "\$CODEX_PROXY_URL"/)
+  assert.match(codex, /falling back to the direct Codex TUI/)
+})
+
+test('Codex launcher inserts the transparent event proxy without changing user flags', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-proxy-'))
+  try {
+    const log = path.join(temp, 'codex-argv')
+    const fakeCodex = path.join(temp, 'codex')
+    fs.writeFileSync(path.join(temp, 'tmux'), '#!/bin/sh\nprintf "%s\\n" ccs-test\n', { mode: 0o755 })
+    fs.writeFileSync(fakeCodex, `#!/bin/bash
+if [ "$1" = app-server ]; then
+  printf '%s\\n' 'listening on: ws://127.0.0.1:45678'
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
+printf '%s\\n' "$@" > "$CODEX_TEST_LOG"
+`, { mode: 0o755 })
+    const run = spawnSync(path.join(root, 'bin', 'sab-codex'), ['--model', 'gpt-test', '--search'], {
+      encoding: 'utf8', timeout: 10000,
+      env: {
+        ...process.env,
+        PATH: `${temp}:${process.env.PATH}`,
+        TMPDIR: temp,
+        TMUX: 'test-client',
+        CCS_TMUX: 'ccs-test',
+        CODEX_TEST_LOG: log,
+      },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    const args = fs.readFileSync(log, 'utf8').trim().split('\n')
+    assert.equal(args[0], '--remote')
+    assert.match(args[1], /^ws:\/\/127\.0\.0\.1:\d+$/)
+    assert.deepEqual(args.slice(2), [
+      '-c', 'tui.keymap.chat.interrupt_turn="f12"', '--model', 'gpt-test', '--search',
+    ])
+    assert.equal(fs.readdirSync(temp).some(name => name.startsWith('sab-codex-events.')), false)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('Codex launcher fails back to the legacy direct TUI when App Server is unavailable', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-fallback-'))
+  try {
+    const log = path.join(temp, 'codex-argv')
+    const fakeCodex = path.join(temp, 'codex')
+    fs.writeFileSync(path.join(temp, 'tmux'), '#!/bin/sh\nprintf "%s\\n" ccs-test\n', { mode: 0o755 })
+    fs.writeFileSync(fakeCodex, `#!/bin/bash
+if [ "$1" = app-server ]; then exit 1; fi
+printf '%s\\n' "$@" > "$CODEX_TEST_LOG"
+`, { mode: 0o755 })
+    const run = spawnSync(path.join(root, 'bin', 'sab-codex'), ['--search'], {
+      encoding: 'utf8', timeout: 10000,
+      env: {
+        ...process.env,
+        PATH: `${temp}:${process.env.PATH}`,
+        TMPDIR: temp,
+        TMUX: 'test-client',
+        CCS_TMUX: 'ccs-test',
+        CODEX_TEST_LOG: log,
+      },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    assert.match(run.stderr, /falling back to the direct Codex TUI/)
+    assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), [
+      '-c', 'tui.keymap.chat.interrupt_turn="f12"', '--search',
+    ])
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('sab-pi translates validated inline value flags to Pi native argv pairs', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-pi-argv-'))
   try {

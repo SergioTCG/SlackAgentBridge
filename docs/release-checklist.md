@@ -57,6 +57,10 @@
       Slack even when the CLI emits no `Stop`; repeated identical failures are
       deduplicated and the live working message is cleared.
 - [ ] Existing and fresh Codex sessions send and receive Slack messages.
+- [ ] A fresh/resumed Codex session mirrors completed interim commentary while
+      excluding commands, output, diffs, reasoning, plans, and the final event;
+      the working timer remains the newest channel item and direct fallback is
+      exercised once.
 - [ ] Existing and fresh Pi sessions send and receive Slack messages.
 - [ ] Claude, Codex, and Pi terminal-close → Slack-prompt → Ghostty-resume works.
 - [ ] Topics include folder, branch, model, and reasoning effort.

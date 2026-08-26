@@ -6,6 +6,19 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [1.5.0-rc.11] — 2026-08-26
+
+### Added
+- Bridged Codex sessions now mirror completed, user-facing interim commentary
+  while a turn is active. A transparent loopback App Server proxy forwards the
+  TUI protocol unchanged and excludes command lines/output, diffs, plans,
+  reasoning, partial deltas, and final answers. Correlated PID/tmux/session/
+  channel checks, bounded persisted item deduplication, status re-anchoring,
+  retry across brief daemon outages, and direct-TUI fallback preserve existing
+  lifecycle behavior. No Slack command or manifest update is required.
+
+[1.5.0-rc.11]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.11
+
 ## [1.5.0-rc.10] — 2026-08-24
 
 ### Fixed

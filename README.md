@@ -26,8 +26,9 @@ for each one it has used.
 
 > [!NOTE]
 > **macOS only:** the current implementation uses launchd, Ghostty, and `open`.
-> Claude uses the Channels research-preview API; Codex uses lifecycle hooks and
-> tmux; Pi uses an explicitly loaded native extension. Linux support needs a
+> Claude uses the Channels research-preview API; Codex uses lifecycle hooks,
+> tmux, and a loopback App Server event proxy; Pi uses an explicitly loaded
+> native extension. Linux support needs a
 > service and terminal-spawn adapter.
 
 ## What is supported
@@ -44,6 +45,7 @@ for each one it has used.
 | Approve/deny from Slack in permissioned mode | ✓ | ✓ | `--safe` |
 | Default unattended mode | `--dangerously-skip-permissions` | `--yolo` | unrestricted tools |
 | Live working status with time and token counters | ✓ | ✓ | ✓ |
+| User-facing interim progress commentary | ✓ | ✓ | managed runs |
 | Token and cost usage | `ccusage` | `ccusage` | native event ledger |
 | Handoff among providers in one Slack channel | ✓ | ✓ | ✓ |
 | Persistent plan/goal/review orchestration | — | — | adaptive; `/pi-run` controls |
@@ -58,9 +60,14 @@ Daemon restarts re-adopt an active provider turn and continue its original
 elapsed time; legacy Codex turns with missing restart metadata recover from the
 frozen Slack timer or latest accepted prompt instead of silently losing status.
 
-Codex output uses stable hook fields and the bridge never parses its unstable
-transcript JSONL directly; usage telemetry is delegated to `ccusage`'s public
-Codex JSON adapter. Pi uses its native extension API for inbound messages,
+Codex final output uses stable hook fields. New bridged Codex launches also put
+the visible TUI behind a transparent, loopback-only App Server proxy, which
+forwards the protocol unchanged while selecting only completed
+`agentMessage` items explicitly marked `commentary`. Commands, command output,
+diffs, plans, reasoning, and `final_answer` events are not mirrored by that
+path. The bridge never parses Codex's unstable transcript JSONL directly;
+usage telemetry is delegated to `ccusage`'s public Codex JSON adapter. Pi uses
+its native extension API for inbound messages,
 lifecycle, settings, usage, and safe-mode decisions; the bridge does not parse
 Pi session files. Claude retains its MCP Channel and transcript/status
 integration. See [the architecture](ARCHITECTURE.md) and the
@@ -126,6 +133,11 @@ The compatibility installer stages Codex without restarting the live daemon:
 During a safe maintenance window, restart the bridge and launch `sab-codex`.
 In that first Codex session, run `/hooks` and explicitly trust the user hook,
 then exit and launch it again. Hook trust is hash-based and is never bypassed.
+Codex sessions launched or resumed after this update also receive semantic
+interim commentary automatically. No slash command or Slack manifest change is
+required. Set `CCS_CODEX_APP_SERVER=0` only if the experimental App Server
+transport must be disabled; the launcher also falls back to the established
+direct TUI automatically when either local sidecar cannot start.
 
 ### Add Pi to an existing installation
 
