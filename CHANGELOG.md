@@ -6,6 +6,57 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-08-26
+
+### Added
+
+- One `sab` CLI and one `/sab-*` Slack command namespace now control Claude
+  Code, Codex, and Pi through their authoritative session provider.
+- Detached-capable tmux owns provider lifetime while Ghostty windows are
+  optional openable, focusable, and closable viewports.
+- Provider switching preserves separate native Claude, Codex, and Pi legs in
+  one Slack channel through private handoff, validation, rollback, and optional
+  repository-instruction reconciliation.
+- Provider-neutral artifact delivery, collaborator invitation/allowlisting,
+  and an idempotent loopback automation lifecycle API support unattended work
+  without allowing an agent to select a Slack destination.
+- `/sab-update all` safely updates each represented provider CLI once and
+  resumes every eligible idle authoritative session with its existing identity
+  and settings.
+- Pi includes native Slack transport, adaptive managed-run routing, persistent
+  plans and goals, bounded subagents, independent review, safe-mode approval,
+  images, settings, and usage reporting.
+
+### Changed
+
+- **Breaking:** provider-prefixed Slack command families and legacy launcher
+  executables are replaced by `/sab-*` and `sab` subcommands. Existing state,
+  channels, tmux names, `CCS_*` settings, port `8877`, checkout locations,
+  control-channel identity, and historical LaunchAgent label remain compatible.
+- Closing a terminal no longer terminates its provider. Sessions continue
+  headlessly and can be reopened without resuming or duplicating them.
+
+### Fixed
+
+- Daemon restarts preserve working-status order, elapsed duration, and provider
+  bindings without noisy unchanged-topic updates.
+- Codex mirrors selected semantic interim commentary, reports live token usage,
+  reconciles hookless interrupts, and recovers idle update resumes through an
+  exact tmux-ancestry fallback when `SessionStart` is absent.
+- Long Slack responses split at semantic or word boundaries, and provider
+  startup/update failures produce actionable channel feedback.
+
+### Security
+
+- Terminal, update, switching, automation, collaborator, and artifact flows
+  revalidate immutable channel/session authority and exact PID/tmux ancestry
+  before mutation. Standby, provisional, stale, rebound, cross-channel, and
+  unrelated processes fail closed.
+- The daemon remains the sole Socket Mode and persisted-state owner; all local
+  lifecycle APIs remain loopback-only and reject browser-originated mutation.
+
+[2.0.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.0.0
+
 ## [2.0.0-rc.2] — 2026-08-26
 
 ### Fixed
