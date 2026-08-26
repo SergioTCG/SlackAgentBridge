@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-08-26
+
 ### Fixed
 
 - Codex interim commentary now correlates npm's persistent App Server launcher
@@ -61,6 +63,7 @@ Notable changes to this project. Format based on
 - The daemon remains the sole Socket Mode and persisted-state owner; all local
   lifecycle APIs remain loopback-only and reject browser-originated mutation.
 
+[2.0.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.0.1
 [2.0.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.0.0
 
 ## [2.0.0-rc.2] — 2026-08-26
