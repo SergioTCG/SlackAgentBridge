@@ -6,6 +6,21 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.0.0-rc.2] — 2026-08-26
+
+### Fixed
+
+- Idle Codex conversations resumed by `/sab-update` now become fully active
+  even when Codex omits `SessionStart`. After a bounded native-hook grace period,
+  the bridge adopts only the ancestry-validated Codex process inside the exact
+  replacement tmux, atomically repairs its PID/channel transport mapping,
+  flushes queued prompts once, and confirms `Resumed`. Daemon boot performs the
+  same recovery for an update interrupted between process launch and lifecycle
+  adoption, preventing duplicate Codex launches and false `/sab-terminal`
+  failures.
+
+[2.0.0-rc.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.0.0-rc.2
+
 ## [2.0.0-rc.1] — 2026-08-26
 
 ### Added

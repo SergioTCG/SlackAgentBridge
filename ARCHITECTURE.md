@@ -110,6 +110,17 @@ process is gone, an owner Slack message runs the provider-native resume form in
 a new detached tmux session and queues the message until the start event safely
 rebinds it. No terminal needs to be visible.
 
+Codex has one bounded lifecycle exception: an idle `codex resume` may expose a
+ready TUI without emitting `SessionStart`. Update readiness first allows the
+native hook to claim the replacement. If it remains absent, the bridge walks
+only the exact replacement tmux's descendant process tree, prefers its Codex
+App Server identity, repeats the tmux ancestry and channel-authority checks,
+and then performs the same durable PID/channel completion. A racing native hook
+and this fallback share one tmux-keyed completion claim, so announcements and
+queued prompts remain exactly once. Boot recovery applies the same fail-closed
+correlation to an interrupted hookless resume; it never searches for or adopts
+an unrelated Codex process.
+
 `/sab-update all` derives its candidates from the same exact authoritative
 channel/session mapping. Before each stop it revalidates the PID, tmux, and
 authority and rejects active turns, question forms, permission decisions,

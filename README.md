@@ -186,6 +186,12 @@ ownership, or restart already in progress, and reports every skip or failure.
 Each represented provider CLI is updated once; every eligible native session is
 then resumed with its existing cwd, identity, account, model, effort, and launch
 flags. Messages arriving during the relaunch are queued for that same session.
+An idle Codex resume may not emit `SessionStart`; after a bounded hook grace
+period, the bridge recovers it only by finding the Codex process beneath the
+exact replacement tmux and validating that ancestry before repairing the
+PID/channel binding. Daemon restart applies the same check to an interrupted
+hookless resume, so `/sab-terminal open` becomes available again without a
+second Codex process or a synthetic prompt.
 
 Flagless `/sab-new claude` and `/sab-new codex` use the dangerous defaults
 described above. Explicit flags replace those defaults. Operator overrides

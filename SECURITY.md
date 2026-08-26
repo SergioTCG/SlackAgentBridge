@@ -144,6 +144,12 @@ accounts, and the Mac user running the daemon.
   or standby legs, never runs the bulk cleanup path, and revalidates each target
   immediately before stopping it. Provider update failure does not prevent a
   safely stopped session from being resumed.
+- **Hookless Codex resume fencing:** if idle Codex does not emit `SessionStart`
+  after an update, the bridge may restore the PID only from a Codex process
+  descending from the exact recorded replacement tmux. It revalidates the
+  immutable channel/session authority and tmux ancestry immediately before the
+  atomic state repair. Boot recovery uses the same checks and cannot adopt a
+  standby, rebound, cross-channel, or unrelated Codex process.
 
 These measures reduce accidental exposure; they do not sandbox a provider that
 was deliberately launched in dangerous mode.

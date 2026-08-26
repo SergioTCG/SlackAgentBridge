@@ -69,6 +69,9 @@ import {
   bulkUpdateBlockReason, planBulkSessionUpdate, runBulkSessionUpdate,
 } from './session-update.mjs'
 import {
+  applyHooklessCodexClaim, hooklessAuthoritativeCodexSessions, tmuxCodexProcessPid, waitForCodexResumeClaim,
+} from './codex-resume.mjs'
+import {
   AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
   AUTOMATION_TMUX_POLL_INTERVAL_MS,
   detachAutomationState,
@@ -123,6 +126,7 @@ function consumeInjected(sid, prompt) {
 // ---- Claude Code binary: version, update, model list ------------------------
 const restarting = new Set() // session ids intentionally restarting (suppress the "ended" notice)
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
+const completedSessionStartTmux = new Map() // sid → tmux; dedupe native/synthetic start races
 let bulkUpdateRunning = false
 function claudeBin() {
   const local = path.join(process.env.HOME, '.local', 'bin', 'claude') // native-install symlink
@@ -913,6 +917,42 @@ async function validTmuxClaim(pid, tname) {
   return ok
 }
 
+async function completeAuthoritativeSessionStart(session, provider, source) {
+  const sid = session.id
+  const tmux = session.tmux || ''
+  if (completedSessionStartTmux.get(sid) === tmux) return false
+  completedSessionStartTmux.set(sid, tmux)
+  try {
+    pendingSpawnChannels.delete(tmux)
+    const ch = await ensureChannel(session)
+    await updateTopic(session) // existing channels also need fresh SessionStart metadata
+    if (source === 'resume') await post(ch, '▶️ *Resumed*')
+    else if (source === 'clear') await post(ch, '🧹 *Context cleared* — same channel, fresh session')
+    automationLifecycle.correlateSessionStart(session)
+
+    // Flush messages queued during resurrection. The completion claim above is
+    // synchronous, so a native SessionStart racing a process-tree fallback can
+    // never paste these messages twice.
+    const queued = pendingBySid.get(sid) || []
+    if (queued.length && tmux) {
+      pendingBySid.set(sid, [])
+      setTimeout(async () => {
+        for (const m of queued) {
+          rememberInjected(sid, queuedPromptText(m))
+          if (provider === 'pi') {
+            if (!injectQueuedPiPrompt(session.pid, m)) log('Pi flush stream unavailable', sid.slice(0, 8))
+          } else await tmuxPaste(tmux, m).catch(e => log('flush paste failed', String(e)))
+          await sleep(500)
+        }
+      }, 2000)
+    }
+    return true
+  } catch (error) {
+    if (completedSessionStartTmux.get(sid) === tmux) completedSessionStartTmux.delete(sid)
+    throw error
+  }
+}
+
 async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'claude') {
   const provider = normalizeProvider(requestedProvider)
   if (!provider) return
@@ -1168,28 +1208,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     // A switch target is provisional until its private handoff-readiness turn
     // succeeds. Never create/rebind a Slack channel or mirror startup noise yet.
     if (targetClaim) return
-    pendingSpawnChannels.delete(session.tmux)
-    const ch = await ensureChannel(session)
-    await updateTopic(session) // existing channels also need fresh SessionStart metadata
-    const src = body.source
-    if (src === 'resume') await post(ch, '▶️ *Resumed*')
-    else if (src === 'clear') await post(ch, '🧹 *Context cleared* — same channel, fresh session')
-    automationLifecycle.correlateSessionStart(session)
-    // flush messages queued during resurrection: paste into the fresh terminal
-    const queued = pendingBySid.get(sid) || []
-    if (queued.length && session.tmux) {
-      pendingBySid.set(sid, [])
-      const tn = session.tmux
-      setTimeout(async () => {
-        for (const m of queued) {
-          rememberInjected(sid, queuedPromptText(m))
-          if (provider === 'pi') {
-            if (!injectQueuedPiPrompt(session.pid, m)) log('Pi flush stream unavailable', sid.slice(0, 8))
-          } else await tmuxPaste(tn, m).catch(e => log('flush paste failed', String(e)))
-          await sleep(500)
-        }
-      }, 2000)
-    }
+    await completeAuthoritativeSessionStart(session, provider, body.source)
     return
   }
   if (ev === 'UserPromptSubmit') {
@@ -1514,6 +1533,43 @@ async function resurrect(session, text) {
   }
 }
 const pendingBySid = new Map()
+
+async function adoptHooklessCodexResume(session, claim, reason) {
+  if (session.tmux !== claim.tmux || !(await tmuxAlive(claim.tmux))) {
+    throw new Error('replacement Codex tmux changed before adoption')
+  }
+  if (!(claim.pid && pidAlive(claim.pid) && await validTmuxClaim(claim.pid, claim.tmux))) {
+    throw new Error('replacement Codex process failed final ancestry validation')
+  }
+  if (session.pid && pidAlive(session.pid)) return false // native SessionStart won the race
+
+  // This is the same durable identity mutation performed by onHook after a
+  // native SessionStart, but sourced from a verified descendant of the exact
+  // replacement tmux. Codex resume can remain idle without emitting that hook.
+  if (!applyHooklessCodexClaim(state, session, claim)) return false
+  restarting.delete(session.id)
+  updatingSessions.delete(session.id)
+  resurrectInFlight.delete(session.id)
+  clearKillOnClose(claim.tmux)
+  tmuxTitle(claim.tmux, session.cwd || 'sab')
+  saveStateNow(state)
+  log('adopted hookless Codex resume', session.id.slice(0, 8), 'pid', claim.pid, 'tmux', claim.tmux, reason)
+  await completeAuthoritativeSessionStart(session, 'codex', 'resume')
+  return true
+}
+
+async function recoverHooklessCodexResumes() {
+  for (const session of hooklessAuthoritativeCodexSessions(state)) {
+    try {
+      if (!(await tmuxAlive(session.tmux))) continue
+      const pid = await tmuxCodexProcessPid(session.tmux, { execFile })
+      if (!(pid && pidAlive(pid) && await validTmuxClaim(pid, session.tmux))) continue
+      await adoptHooklessCodexResume(session, { source: 'process-tree', pid, tmux: session.tmux }, 'daemon boot')
+    } catch (error) {
+      log('hookless Codex boot recovery failed', session.id.slice(0, 8), String(error?.message || error))
+    }
+  }
+}
 
 function waitForPrivateTurn(map, key, timeoutMs = 5 * 60000) {
   return new Promise((resolve, reject) => {
@@ -2034,6 +2090,16 @@ async function resumeUpdatedSession(session, update, updateError = null) {
     log('update result notice failed', session.id.slice(0, 8), String(error)))
   await resurrect(session)
   if (!session.tmux || !(await tmuxAlive(session.tmux))) throw new Error('replacement tmux session did not become active')
+  if (providerOf(session) === 'codex') {
+    const claim = await waitForCodexResumeClaim(session, {
+      tmuxAlive,
+      pidAlive,
+      findCodexPid: tmux => tmuxCodexProcessPid(tmux, { execFile }),
+      validTmuxClaim,
+      sleep,
+    })
+    if (claim.source === 'process-tree') await adoptHooklessCodexResume(session, claim, 'provider update')
+  }
   scheduleUpdateGuardCleanup(session) // SessionStart normally clears this first
 }
 
@@ -4042,6 +4108,7 @@ setInterval(async () => {
   await recoverProviderSwitches()
   automationLifecycle.recover()
   startAutomationReconciler()
+  await recoverHooklessCodexResumes()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   selfUpdate('boot').catch(e => log('self-update error', String(e)))
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })
