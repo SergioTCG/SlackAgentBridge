@@ -25,7 +25,7 @@ jobs:
         run: npm run audit
       - name: Syntax-check JavaScript
         run: |
-          for file in daemon/*.mjs channel/*.mjs scripts/*.mjs spike/*.mjs bin/sab-upload bin/sab-automation; do
+          for file in daemon/*.mjs channel/*.mjs scripts/*.mjs; do
             node --check "$file"
           done
       - name: Test
@@ -42,7 +42,6 @@ jobs:
       - name: Shellcheck scripts
         run: |
           shellcheck -S warning \
-            bin/sab-cc bin/sab-codex bin/sab-pi \
-            bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \
-            bin/ccs-spawn bin/ccs-window \
-            hooks/hook.sh hooks/codex-hook.sh install.sh install-codex.sh install-pi.sh
+            bin/sab scripts/run-session.sh scripts/claude-consent.sh \
+            scripts/sab-account.sh hooks/hook.sh hooks/codex-hook.sh \
+            install.sh install-codex.sh install-pi.sh
