@@ -99,6 +99,12 @@ accounts, and the Mac user running the daemon.
   review. Changed hooks require local review through `/hooks`.
 - **Failure-safe permission relay:** if Codex cannot obtain a Slack verdict, the
   hook returns no decision and Codex falls back to its local approval policy.
+- **Bounded Claude question relay:** only a Claude `PreToolUse` event whose exact
+  tool name is `AskUserQuestion` may contribute structured question content.
+  Question, option, description, and preview fields are type-checked, escaped,
+  length-capped, and converted to fixed-destination Slack blocks; arbitrary tool
+  inputs are ignored. Answers still travel only to the authoritative session's
+  existing tmux identity.
 - **Bounded Codex commentary egress:** the per-session App Server and transparent
   event proxy bind only to random loopback ports. The proxy forwards every frame
   unchanged to the TUI but submits only completed `agentMessage` events

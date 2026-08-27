@@ -6,6 +6,13 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude interactive questions now render from structured `AskUserQuestion`
+  hook data, preserving the prompt, recommendation, descriptions, and previews
+  while keeping Slack buttons concise. Wide terminal layouts can no longer fold
+  their side-by-side preview panel into option labels or erase the question.
+
 ## [2.0.1] — 2026-08-26
 
 ### Fixed

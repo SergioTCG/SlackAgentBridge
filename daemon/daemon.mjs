@@ -54,6 +54,9 @@ import {
   CLAUDE_FAILURE_DEDUPE_MS, claudePollerDecision, prepareClaudeTerminalDelivery,
 } from './claude-terminal.mjs'
 import {
+  nextStructuredQuestion, questionBlocks, questionFormFromPane, questionFormMatches, questionFormsFromHook,
+} from './claude-question.mjs'
+import {
   buildInstructionDocuments, buildInstructionPatch, deterministicWrapperPatch, fingerprintsMatch,
   inspectInstructions, instructionDocumentsPrompt, instructionProgressText, instructionProposalTimeout,
   parseInstructionDocuments,
@@ -407,40 +410,12 @@ function extractSpinner(pane) {
   return null
 }
 // ---- interactive question forms → Slack --------------------------------------
-// Claude Code can pause a turn on an interactive question (numbered options,
-// sometimes a multi-tab wizard ending in a Submit screen). In the terminal a
-// digit keypress selects AND advances; over Slack the turn just looks stalled.
-// Detect the form in the pane, mirror it as buttons, and map answers back to
-// keystrokes. Every screen — including "Ready to submit?" — is uniformly
-// "question + numbered options", so one mechanism drives the whole wizard.
-const qforms = new Map() // sid → { ts, hash, options: [{n, label}], at }
-function extractQuestionForm(pane) {
-  const lines = pane.split('\n')
-  const opts = [], optIdx = []
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^\s*(❯\s*)?(\d{1,2})\.\s+(.+?)\s*$/)
-    if (m && !opts.some(o => o.n === Number(m[2]))) { opts.push({ n: Number(m[2]), label: m[3] }) ; optIdx.push(i) }
-  }
-  if (opts.length < 2) return null
-  // Real forms (unlike numbered lists in prose) have a select footer, a tab bar,
-  // or a ❯ highlight on an option line.
-  const signature = /Enter to select/i.test(pane) || /[☒☐✔].*[☒☐✔]/.test(pane) || optIdx.some(i => /^\s*❯/.test(lines[i]))
-  if (!signature) return null
-  opts.sort((a, b) => a.n - b.n)
-  // Question: the non-separator lines directly above the first option (keeps
-  // review bullets like "● …" / "→ …"), capped for sanity.
-  const q = []
-  for (let i = optIdx[0] - 1; i >= 0 && q.length < 8; i--) {
-    const t = lines[i].trim()
-    if (/^[─-]{5,}$/.test(t)) { if (q.length) break; continue }
-    if (!t || /^[←→]/.test(t) || /Enter to select/i.test(t)) break
-    q.unshift(t)
-  }
-  const question = q.join('\n').trim() || 'Claude asks:'
-  const planPath = (pane.match(/(~|\/Users\/[^\s]+)\/\.claude\/plans\/[\w.-]+\.md/) || [])[0] || null
-  return { question, options: opts, planPath, hash: question + '|' + opts.map(o => o.n + o.label).join('|') }
-}
-async function relayQuestionForm(session, form) {
+// Structured AskUserQuestion hook input is authoritative for visible question
+// text, labels, descriptions, and previews. Pane parsing remains a bounded
+// fallback for restart recovery and Claude versions without structured input;
+// tmux remains the answer transport in both cases.
+const qforms = new Map() // sid → { ts, form, options, source, sequence, index, ... }
+async function relayQuestionForm(session, form, context = {}) {
   const prev = qforms.get(session.id)
   if (prev && prev.hash === form.hash) return // unchanged screen
   if (form.planPath && prev?.planFor !== form.hash) {
@@ -450,27 +425,45 @@ async function relayQuestionForm(session, form) {
       await postMd(session.channel, `📋 *Claude's plan* (\`${path.basename(pf)}\`):\n\n${md}`)
     } catch (e) { log('plan relay failed', String(e?.message || e)) }
   }
-  const blocks = [
-    { type: 'section', text: { type: 'mrkdwn', text: `❓ *Claude asks:*\n${escapeText(form.question).slice(0, 2800)}` } },
-    { type: 'actions', block_id: `qform_${session.id.slice(0, 8)}`, elements: form.options.slice(0, 10).map(o => ({
-      type: 'button', text: { type: 'plain_text', text: `${o.n}. ${o.label}`.slice(0, 75) }, action_id: `qform_${o.n}`, value: `qform:${session.id}:${o.n}`,
-    })) },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: 'tap an option — or reply with just the number' }] },
-  ]
+  const blocks = questionBlocks(session.id, form)
+  if (!blocks.length) return
   let ts = prev?.ts
   try {
     if (ts) await web.chat.update({ channel: session.channel, ts, text: '❓ Claude asks a question', blocks })
     else ts = (await postSlackMessage(session.channel, { text: '❓ Claude asks a question', blocks }, { waitForBump: false })).ts
   } catch (e) { log('qform relay error', e?.data?.error || String(e)); return }
-  qforms.set(session.id, { ts, hash: form.hash, options: form.options, at: Date.now(), planFor: form.planPath ? form.hash : prev?.planFor })
+  qforms.set(session.id, {
+    ts,
+    hash: form.hash,
+    form,
+    options: form.options,
+    source: context.source || form.source || 'pane',
+    sequence: context.sequence || null,
+    index: Number.isInteger(context.index) ? context.index : 0,
+    at: Date.now(),
+    planFor: form.planPath ? form.hash : prev?.planFor,
+  })
   log('qform relayed', session.id.slice(0, 8), JSON.stringify(form.question.slice(0, 60)))
 }
 async function answerQuestionForm(session, n, label) {
-  await execFile('tmux', ['send-keys', '-t', session.tmux, String(n)]) // digit selects + advances
   const q = qforms.get(session.id)
+  await execFile('tmux', ['send-keys', '-t', session.tmux, String(n)]) // digit selects + advances
   if (q) {
+    if (q.form?.multiSelect) {
+      q.at = Date.now()
+      log('qform option toggled', session.id.slice(0, 8), n, JSON.stringify(label.slice(0, 50)))
+      return
+    }
     q.hash = 'answered:' + Date.now() // next screen (if any) updates the same message
+    q.answeredAt = Date.now()
     try { await web.chat.update({ channel: session.channel, ts: q.ts, text: `✅ ${label}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `❓ → ✅ *${escapeText(label)}*` } }] }) } catch {}
+    const next = nextStructuredQuestion(q)
+    if (next) {
+      await sleep(350)
+      await relayQuestionForm(session, next.form, {
+        source: 'structured', sequence: q.sequence, index: next.index,
+      })
+    }
   }
   log('qform answered', session.id.slice(0, 8), n, JSON.stringify(label.slice(0, 50)))
 }
@@ -489,14 +482,39 @@ function startPoller(session) {
     const pane = await tmuxCapture(session.tmux)
     const line = extractSpinner(pane)
     if (p.stopped) return // Stop fired during the capture — don't re-post
-    const form = line ? null : extractQuestionForm(pane)
+    const paneForm = line ? null : questionFormFromPane(pane)
+    const openForm = qforms.get(session.id)
+    let form = paneForm
+    let formContext = {}
+    let holdAnsweredForm = false
+    if (!line && openForm?.source === 'structured') {
+      if (!openForm.answeredAt) {
+        if (!paneForm || questionFormMatches(openForm.form, paneForm)) {
+          form = openForm.form
+          formContext = { source: 'structured', sequence: openForm.sequence, index: openForm.index }
+        } else if (Array.isArray(openForm.sequence)) {
+          const nextIndex = openForm.sequence.findIndex((candidate, index) =>
+            index > openForm.index && questionFormMatches(candidate, paneForm))
+          if (nextIndex >= 0) {
+            form = openForm.sequence[nextIndex]
+            formContext = { source: 'structured', sequence: openForm.sequence, index: nextIndex }
+          }
+        }
+      } else if (Date.now() - openForm.answeredAt < 4000 &&
+          (!paneForm || questionFormMatches(openForm.form, paneForm))) {
+        // The selected screen can remain painted briefly after tmux receives
+        // the digit. Do not replace the semantic form with that stale pane.
+        form = null
+        holdAnsweredForm = true
+      }
+    }
     // Login expiry and provider overload can finish before the 3-second poller
     // ever observes a spinner, and Claude emits no Stop for either. Inspect only
     // NEW transcript records so stale errors in terminal scrollback cannot end a
     // later healthy turn.
     const newAssistantText = line ? '' : peekNewAssistantText(session)
     const decision = claudePollerDecision({
-      spinner: Boolean(line), newAssistantText, hasForm: Boolean(form),
+      spinner: Boolean(line), newAssistantText, hasForm: Boolean(form) || holdAnsweredForm,
       sawSpinner: p.sawSpinner, idleTicks: p.idle,
       pendingPermission: hasPendingPerm(session),
     })
@@ -508,7 +526,7 @@ function startPoller(session) {
       return
     }
     if (decision.action === 'form') {
-      await relayQuestionForm(session, form)
+      if (form) await relayQuestionForm(session, form, formContext)
       return // waiting on the user, not finished
     }
     if (decision.action === 'failure') {
@@ -666,7 +684,7 @@ async function finalizeTurn(session, { terminalFailure = null } = {}) {
   setTimeout(async () => {
     try {
       if (!(session.pid && pidAlive(session.pid) && session.tmux && (await tmuxAlive(session.tmux)))) return
-      const form = extractQuestionForm(await tmuxCapture(session.tmux))
+      const form = questionFormFromPane(await tmuxCapture(session.tmux))
       if (form) { await relayQuestionForm(session, form); startPoller(session) }
     } catch (e) { log('post-stop form check failed', String(e?.message || e)) }
   }, 5000)
@@ -775,7 +793,7 @@ async function readoptStatus() {
     // uses only persisted hook state and ccusage, not terminal or JSONL parsing.
     const pane = await tmuxCapture(s.tmux)
     const spinning = !!extractSpinner(pane)
-    const waitingForm = !spinning && !!extractQuestionForm(pane)
+    const waitingForm = !spinning && !!questionFormFromPane(pane)
     const { statusMessage } = await findStatusContext(s.channel)
     const ts = statusMessage?.ts || null
     if (waitingForm) {
@@ -1238,6 +1256,14 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     if (targetClaim || internalTurns.has(session.id)) return
     const text = readNewAssistantText(session)
     if (text) { await clearStatus(session); await postMd(session.channel, text) }
+    const structuredForms = questionFormsFromHook(body)
+    if (structuredForms.length) {
+      await clearStatus(session)
+      await relayQuestionForm(session, structuredForms[0], {
+        source: 'structured', sequence: structuredForms, index: 0,
+      })
+      startPoller(session)
+    }
     return
   }
   if (ev === 'Stop') {
