@@ -6,6 +6,23 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- Began the compatibility-preserving multi-node foundation: legacy sessions
+  implicitly remain on the local node, explicit channel/session/node routes fail
+  closed on disagreement, and spawn plus terminal operations now cross an
+  execution-node adapter boundary. Strict control-envelope validation and a
+  registry for pinned Ed25519 node identities, scoped operators, defaults, and
+  revocation establish the next transport boundary. Socket Mode acknowledgement
+  and Slack client ownership now sit behind an explicit sole-coordinator
+  boundary. Added opt-in TLS node enrollment with hashed one-use invitations,
+  node-local Ed25519 keys, signed nonce authentication, durable connection
+  epochs, stale-socket fencing, heartbeats, exact revocation, a loopback-only
+  administrator API, and JSON-safe `sab node` commands. The listener stays off
+  by default and enrolled nodes cannot receive provider sessions yet. The
+  accepted coordinator protocol, roles, recovery, and security design is
+  documented.
+
 ### Fixed
 
 - Claude interactive questions now render from structured `AskUserQuestion`

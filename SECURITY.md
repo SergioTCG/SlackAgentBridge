@@ -23,9 +23,11 @@ accounts, and the Mac user running the daemon.
 
 ## Trust model
 
-- One Slack user claims the bridge and becomes its owner. Slash commands,
-  permission decisions, session resurrection, and configuration remain
-  owner-only.
+- One Slack user currently claims the bridge and becomes its owner. Slash
+  commands, permission decisions, session resurrection, and configuration
+  remain owner-only. The accepted multi-node design will retain that identity
+  as bridge administrator and add explicit node-scoped operators; those roles
+  are not active until the remote transport ships.
 - Session channels are private. The owner may explicitly allow collaborators to
   send labelled prompts to a live session; collaborators cannot run commands,
   answer permissions, or resurrect the session. Their accepted prompts may ask
@@ -64,6 +66,22 @@ accounts, and the Mac user running the daemon.
   channel's authoritative session. `/sab-new` and `/sab-switch` require an
   explicit provider, and provider-incompatible commands or flags are rejected
   before mutation.
+- **Execution-node isolation:** missing node metadata means only the historical
+  implicit local node. Explicit remote metadata must agree across the immutable
+  channel and session binding. Unknown, offline, or mismatched nodes fail closed
+  rather than executing locally. The optional node listener is disabled unless
+  `SAB_NODE_LISTEN` is explicitly configured. A non-loopback bind requires TLS,
+  an explicit WSS public URL, and a mode-0600 private key. This listener is
+  separate from the loopback RCE API on port 8877, which must never be exposed.
+- **One-use node enrollment:** the administrator's loopback-only `sab node`
+  API rejects browser-originated mutation, verifies the intended operator with
+  Slack before minting an invitation, stores only a token hash, and returns the
+  raw secret exactly once. The node reads it only from stdin or a mode-0600
+  regular file, generates a mode-0600 Ed25519 key locally, and sends only the
+  public key. Authentication uses a one-use 30-second signed challenge;
+  persisted connection epochs fence older sockets, heartbeat expiry closes
+  abandoned peers, and revocation closes only that node. Nodes never receive
+  Slack credentials, and the coordinator never receives provider credentials.
 - **Viewport/process separation:** providers live in detached-capable tmux,
   independently of Ghostty. Terminal list/open/close resolves only authoritative
   active channel mappings, verifies the exact live tmux/provider, and serializes

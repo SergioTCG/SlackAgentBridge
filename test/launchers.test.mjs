@@ -18,6 +18,7 @@ test('sab is the only public session launcher', () => {
   const source = fs.readFileSync(sab, 'utf8')
   assert.match(source, /new\).*claude\|codex\|pi/s)
   assert.match(source, /terminal\)/)
+  assert.match(source, /node\)/)
   assert.match(source, /__run\)/)
 })
 
