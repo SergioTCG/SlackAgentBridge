@@ -1,9 +1,16 @@
 # Architecture
 
-Slack Agent Bridge is one macOS daemon connecting one trusted Slack owner to
-local Claude Code, Codex, and Pi sessions. Providers have separate adapters and
-native conversation identities; Slack, state, tmux, terminal viewports,
-artifacts, and lifecycle coordination are shared.
+Slack Agent Bridge currently runs as one macOS daemon connecting one trusted
+Slack owner to local Claude Code, Codex, and Pi sessions. Providers have
+separate adapters and native conversation identities; Slack, state, tmux,
+terminal viewports, artifacts, and lifecycle coordination are shared.
+
+The accepted multi-node direction separates the sole Slack-facing coordinator
+from enrolled execution nodes without changing `/sab-*`. The current runtime is
+the compatible all-in-one deployment: its execution node is implicitly
+`local`. An authenticated node listener is available only when explicitly
+configured, and enrolled nodes cannot receive provider work yet. See
+[Multi-node coordinator architecture](docs/multi-node-architecture.md).
 
 ## System shape
 
@@ -17,6 +24,10 @@ daemon/daemon.mjs ─────────────── ~/.config/ccs/st
        ├── automation API ──────── daemon/automation*.mjs
        ├── artifact API ────────── daemon/artifacts.mjs
        ├── terminal API ────────── daemon/terminal-{http,control}.mjs
+       ├── Slack coordinator ───── daemon/{coordinator,slack-runtime}.mjs
+       ├── execution routing ───── daemon/{nodes,execution-nodes}.mjs
+       ├── node trust/protocol ─── daemon/node-{auth,enrollment,registry,protocol}.mjs
+       ├── optional node WSS ───── daemon/node-{runtime,transport}.mjs
        │
        ▼
 detached-capable tmux session ─── bin/sab __run <provider>
@@ -35,7 +46,7 @@ them.
 ## Components
 
 - `bin/sab` is the only public local executable. It dispatches `new`,
-  `terminal`, `account`, `upload`, and `automation`. Its private `__run`
+  `terminal`, `account`, `upload`, `automation`, and `node`. Its private `__run`
   subcommand is used only inside tmux.
 - `scripts/run-session.sh` is the provider runner. A local `sab new` creates and
   attaches to tmux; daemon-created sessions start tmux detached. It configures
@@ -44,6 +55,11 @@ them.
 - `daemon/daemon.mjs` owns Slack ingress/egress, hooks, state adoption,
   session/channel correlation, resurrection, settings, permission decisions,
   switching, and managed Pi coordination.
+- `daemon/slack-runtime.mjs` constructs the sole direct Slack API and Socket Mode
+  clients for the compatible all-in-one deployment. `daemon/coordinator.mjs`
+  owns prompt acknowledgement and serialized startup of that sole ingress;
+  future node routing happens behind this boundary rather than opening another
+  Socket Mode connection.
 - `daemon/providers.mjs` is the provider boundary: labels, command parsing,
   provider-specific flag allowlists, defaults, resume arguments, model/effort
   validation, and update behavior.
@@ -59,6 +75,25 @@ them.
 - `daemon/terminal-control.mjs` resolves authoritative active sessions and
   serializes terminal operations per tmux name. `daemon/terminal-http.mjs` and
   `scripts/sab-terminal.mjs` expose the same operations to local scripts.
+- `daemon/nodes.mjs` defines compatibility-safe execution-node identity and
+  exact channel/session/node binding. `daemon/execution-nodes.mjs` is the
+  execution boundary; the first adapter wraps existing local spawn and terminal
+  primitives without changing runtime behavior.
+- `daemon/node-registry.mjs` defines the implicit local node, pinned Ed25519
+  enrollment records, node-scoped operators, defaults, revocation, and safe
+  human-name resolution. `daemon/node-protocol.mjs` validates the bounded
+  versioned control envelopes and operation/event allowlists.
+- `daemon/node-auth.mjs`, `daemon/node-enrollment.mjs`, and
+  `daemon/node-keys.mjs` implement one-use hashed invitations, node-local
+  Ed25519 identity, short-lived signed challenges, and coordinator identity
+  pinning. `daemon/node-transport.mjs` adds bounded authenticated WebSockets,
+  persisted connection epochs, stale-connection fencing, heartbeats, and
+  revocation. `daemon/node-runtime.mjs` keeps that listener off by default and
+  requires TLS plus an explicit public WSS URL for non-loopback binds.
+- `daemon/node-http.mjs`, `daemon/node-management.mjs`, and
+  `scripts/sab-node.mjs` expose loopback-only administrator enrollment controls
+  through `sab node`. The invitation secret is accepted by the node CLI only
+  through a private file or stdin and is never stored in plaintext.
 - `scripts/sab-upload.mjs`, `scripts/sab-automation.mjs`, and
   `scripts/sab-account.sh` are private implementations reached through `sab`.
 
@@ -72,6 +107,11 @@ state remains resumable without a bulk migration.
 `state.channels[channelId]` is the authoritative active mapping. The mapped
 session must point back to the same immutable channel ID. A channel name may be
 changed freely in Slack and is never an identity key.
+
+A missing `session.nodeId` and missing `state.channelNodes[channelId]` resolve to
+the implicit local node. Explicit remote metadata must agree on both records;
+an invalid, unknown, or mismatched route has no authority and cannot fall back
+to local execution. This preserves old state without a bulk migration.
 
 A switched channel may own one Claude, one Codex, and one Pi native leg through
 lineage state. Exactly one leg is active. Standby legs preserve resumable IDs
@@ -87,7 +127,8 @@ superseded it.
 tmux, not Ghostty, owns the interactive process lifetime:
 
 1. The daemon validates cwd and flags.
-2. `spawnSession` creates a named detached tmux session running
+2. The execution-node router selects the implicit local adapter, which calls
+   `spawnSession` to create a named detached tmux session running
    `sab __run <provider>`.
 3. A provider-native start event claims that tmux and binds or adopts the
    session/channel state.
@@ -289,3 +330,10 @@ Self-update and release rollout must occur from a clean release commit during a
 maintenance window. The prior tag and config backup remain available until
 existing and new sessions for every installed provider pass the release
 canary.
+
+The multi-node foundation adds no listener by default, Slack scope, manifest
+command, or second Slack daemon. Explicit listener configuration enables only
+one-use enrollment and authenticated heartbeat transport. Remote provider work
+remains unavailable until durable replay, node-local lifecycle, coordinator
+projection, and node-scoped Slack authorization pass the remaining delivery
+gates in the accepted architecture document.

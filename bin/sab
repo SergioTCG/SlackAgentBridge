@@ -21,6 +21,7 @@ Usage:
   sab account <list|add|set|remove> [name]
   sab upload --grant TOKEN -- FILE_PATH [FILE_PATH ...]
   sab automation <create|status|stop> ...
+  sab node <invite|list|revoke|enroll|status> ...
 EOF
 }
 
@@ -53,6 +54,9 @@ case "$command_name" in
     ;;
   automation)
     exec node "$BRIDGE/scripts/sab-automation.mjs" "$@"
+    ;;
+  node)
+    exec node "$BRIDGE/scripts/sab-node.mjs" "$@"
     ;;
   __run)
     # Private daemon/tmux entry point. It is intentionally absent from help.

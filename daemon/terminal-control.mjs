@@ -1,5 +1,7 @@
 import path from 'node:path'
 import { providerOf } from './providers.mjs'
+import { createExecutionNodeRouter, createLocalExecutionNode } from './execution-nodes.mjs'
+import { nodeIdForSession } from './nodes.mjs'
 
 export function activeTerminalSessions(state, { pidAlive }) {
   const sessions = []
@@ -25,7 +27,7 @@ export function resolveTerminalSession(sessions, selector) {
   return { error: `no active session matches: ${value}` }
 }
 
-export async function terminalRows(sessions, { tmuxClientPids }) {
+export async function terminalRows(sessions, { tmuxClientPids, executionNodes }) {
   return Promise.all(sessions.map(async session => ({
     session: session.id.slice(0, 8),
     sessionId: session.id,
@@ -34,17 +36,24 @@ export async function terminalRows(sessions, { tmuxClientPids }) {
     cwd: session.cwd,
     name: path.basename(session.cwd || ''),
     channel: session.channel,
-    attached: (await tmuxClientPids(session.tmux)).length > 0,
+    nodeId: nodeIdForSession(session),
+    attached: (await (executionNodes
+      ? executionNodes.terminalClientPids(session)
+      : tmuxClientPids(session.tmux))).length > 0,
   })))
 }
 
 export function createTerminalControl({
-  state, pidAlive, tmuxAlive, tmuxClientPids, openTmuxTerminal, closeTmuxTerminal,
+  state, executionNodes, pidAlive, tmuxAlive, tmuxClientPids, openTmuxTerminal, closeTmuxTerminal,
 }) {
+  const nodes = executionNodes || createExecutionNodeRouter({ nodes: [createLocalExecutionNode({
+    spawnSession: async () => { throw new Error('terminal control cannot spawn sessions') },
+    pidAlive, tmuxAlive, tmuxClientPids, openTmuxTerminal, closeTmuxTerminal,
+  })] })
   const locks = new Map()
   async function sessions() {
-    const candidates = activeTerminalSessions(state, { pidAlive })
-    const alive = await Promise.all(candidates.map(session => tmuxAlive(session.tmux)))
+    const candidates = activeTerminalSessions(state, { pidAlive: executionNodes ? () => true : pidAlive })
+    const alive = await Promise.all(candidates.map(session => nodes.sessionAlive(session).catch(() => false)))
     return candidates.filter((_, index) => alive[index])
   }
 
@@ -57,15 +66,15 @@ export function createTerminalControl({
 
   async function one(session, action) {
     return locked(session.tmux, async () => {
-      if (!(session.pid && pidAlive(session.pid)) || !(await tmuxAlive(session.tmux))) {
+      if (!(await nodes.sessionAlive(session))) {
         throw new Error(`session ${session.id.slice(0, 8)} is no longer active`)
       }
-      return action === 'open' ? openTmuxTerminal(session.tmux) : closeTmuxTerminal(session.tmux)
+      return action === 'open' ? nodes.openTerminal(session) : nodes.closeTerminal(session)
     })
   }
 
   async function list() {
-    return terminalRows(await sessions(), { tmuxClientPids })
+    return terminalRows(await sessions(), { executionNodes: nodes })
   }
 
   async function act(action, { selector = '', all = false, channel = null } = {}) {

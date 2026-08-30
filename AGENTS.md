@@ -6,10 +6,12 @@ not copy or contradict this contract.
 
 ## Product contract
 
-Slack Agent Bridge connects one trusted Slack owner to local interactive coding
-agent sessions. Claude Code, Codex, and Pi are separate provider adapters over
-shared Slack, state, tmux, optional Ghostty viewports, and lifecycle
-infrastructure.
+Slack Agent Bridge connects trusted Slack operators to interactive coding agent
+sessions on explicitly assigned execution nodes. Claude Code, Codex, and Pi are
+separate provider adapters over shared Slack coordination and node-local state,
+tmux, optional Ghostty viewports, and lifecycle infrastructure. The compatible
+default is one all-in-one coordinator plus its implicit local node; remote-node
+mode must remain gated until its authenticated transport is complete.
 
 These public interfaces are compatibility-sensitive:
 
@@ -18,6 +20,9 @@ These public interfaces are compatibility-sensitive:
   provider. Do not add provider-prefixed command families.
 - Missing `session.provider` means Claude. Never bulk-migrate old state merely
   to make provider fields explicit.
+- Missing `session.nodeId` and a missing channel-node route mean the implicit
+  local execution node. Never bulk-migrate old state merely to make node fields
+  explicit. An explicit remote route must agree on the channel and session.
 - `sab` is the only public local executable. Provider launches, terminal
   viewports, accounts, artifact returns, and automation are subcommands. Do not
   restore the pre-2.0 `ccs*` or `sab-*` launcher executables.
@@ -52,19 +57,27 @@ generated MCP configuration. Do not print secrets during diagnostics.
 
 ## Architecture invariants
 
-- One daemon owns the sole Slack Socket Mode connection and persisted state.
+- One coordinator owns the sole Slack Socket Mode connection, Slack tokens, and
+  coordinator state. Each execution node owns its local provider/tmux state and
+  credentials. The all-in-one deployment may implement both roles in one
+  daemon; two processes must never consume the same Socket Mode token.
+- Route execution through the node adapter. Unknown, offline, stale-epoch, or
+  mismatched channel/session/node claims fail closed and must never fall back to
+  the coordinator's local machine. Follow `docs/multi-node-architecture.md` for
+  the accepted state, authorization, enrollment, and delivery protocol.
 - Every interactive provider process is wrapped in detached-capable tmux. tmux
   owns process lifetime and remains the terminal/control surface;
   provider-native channel/extension streams may carry inbound text. Ghostty is
   an optional viewport: opening, closing, or focusing it must never start,
   duplicate, interrupt, or stop the provider process.
-- Terminal operations may target only authoritative active sessions. Standby,
-  provisional, stale, and rebound records must not be opened or detached by a
-  bulk terminal action.
+- Terminal operations may target only authoritative active sessions on nodes
+  assigned to the caller. Standby, provisional, stale, rebound, and mismatched
+  node records must not be opened or detached by a bulk terminal action.
 - A bridge-wide provider update may restart only idle authoritative active
-  sessions. It must skip active turns, questions, permissions, switches,
-  managed Pi work, automation ownership, and sessions already waking or
-  restarting; update each represented provider binary at most once per sweep.
+  sessions on nodes assigned to the caller. It must skip active turns,
+  questions, permissions, switches, managed Pi work, automation ownership, and
+  sessions already waking or restarting; update each represented provider
+  binary at most once per node per sweep.
 - Slack channels are private and mapped by channel ID, not mutable channel name.
 - A switched channel may own separate Claude, Codex, and Pi native legs, with
   exactly one active. Keep `state.channels[channel]` authoritative; only the active
@@ -124,10 +137,13 @@ unrestricted by default; SAB `--safe` adds fail-closed Slack tool approval,
 while Pi `--approve` controls project resource trust only. Preserve explicit
 operator overrides and document any change to these defaults prominently.
 
-Only the owner may run commands, resurrect sessions, or answer permissions.
-Collaborators may send labelled prompts only to a live, explicitly allowed
-session. Spawned working directories must remain contained under the user's
-home directory, and remote launch flags must use provider-specific allowlists.
+Only the bridge administrator or an explicitly assigned node operator may run
+commands, resurrect sessions, or answer permissions, and a node operator may do
+so only on their assigned nodes. Until node-role state exists, the historical
+owner remains the sole operator. Collaborators may send labelled prompts only
+to a live, explicitly allowed session. Spawned working directories must remain
+contained under the execution node user's home directory, and remote launch
+flags must use provider-specific allowlists.
 
 Artifact uploads must require an owner or per-channel collaborator message,
 live process/tmux proof, and a one-use expiring grant. Resolve every file's real

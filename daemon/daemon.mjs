@@ -4,9 +4,8 @@ import http from 'node:http'
 import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import { WebClient } from '@slack/web-api'
-import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, CONFIG_DIR, log, sleep, loadEnv, loadState, saveState, saveStateNow,
   resolveClaudePid, resolveAgentPid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
@@ -68,6 +67,17 @@ import { handleAutomationHttp } from './automation-http.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { createTerminalControl } from './terminal-control.mjs'
 import { handleTerminalHttp } from './terminal-http.mjs'
+import { createExecutionNodeRouter, createLocalExecutionNode } from './execution-nodes.mjs'
+import { LOCAL_NODE_ID, localSessionByChannel, localSessionByPid, nodeIdForSession } from './nodes.mjs'
+import { createDirectSlackRuntime } from './slack-runtime.mjs'
+import { createSocketModeCoordinator } from './coordinator.mjs'
+import { ensureCoordinatorId } from './node-auth.mjs'
+import { createNodeInvitationStore } from './node-enrollment.mjs'
+import { handleNodeHttp } from './node-http.mjs'
+import { createNodeManagement, NodeManagementError } from './node-management.mjs'
+import { createNodeRegistry } from './node-registry.mjs'
+import { readNodeListenerConfiguration } from './node-runtime.mjs'
+import { createCoordinatorNodeTransport, listenForNodeConnections } from './node-transport.mjs'
 import {
   bulkUpdateBlockReason, planBulkSessionUpdate, runBulkSessionUpdate,
 } from './session-update.mjs'
@@ -86,14 +96,95 @@ import {
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /sab-claim
 const TEAM = process.env.SLACK_TEAM_ID
-const web = new WebClient(process.env.SLACK_BOT_TOKEN)
+const slackRuntime = createDirectSlackRuntime({
+  botToken: process.env.SLACK_BOT_TOKEN,
+  appToken: process.env.SLACK_APP_TOKEN,
+})
+const { web } = slackRuntime
 const syncTopic = createTopicSync(web)
 const artifactGrants = createArtifactGrantStore()
 const state = loadState()
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
 if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
 if (!state.channelTmux) state.channelTmux = {} // channel → tmux name last seen owning it (rebinding aid)
+const executionNodes = createExecutionNodeRouter({ nodes: [createLocalExecutionNode({
+  spawnSession, pidAlive, tmuxAlive, tmuxClientPids, openTmuxTerminal, closeTmuxTerminal,
+})] })
 const BOOT_TS = Date.now()
+
+// Remote-node infrastructure is opt-in. Merely upgrading preserves the exact
+// all-in-one runtime: no node listener, key, invitation, or state migration is
+// created until an administrator uses `sab node` or configures a listener.
+let nodeServices = null
+let nodeListener = null
+let nodeListenerConfiguration = null
+function configuredNodeListener() {
+  if (!nodeListenerConfiguration) nodeListenerConfiguration = readNodeListenerConfiguration(process.env)
+  return nodeListenerConfiguration
+}
+function nodeListenerStatus() {
+  const configuration = configuredNodeListener()
+  return configuration.enabled
+    ? { enabled: true, listening: Boolean(nodeListener), publicUrl: configuration.publicUrl }
+    : { enabled: false, listening: false, publicUrl: null }
+}
+async function resolveNodeOperator(userId) {
+  let response
+  try { response = await web.users.info({ user: userId }) }
+  catch (error) { throw Object.assign(new Error(error?.data?.error || 'users_info_failed'), { code: error?.data?.error || 'users_info_failed' }) }
+  const user = response?.user
+  if (!user || user.deleted || user.is_bot || user.is_app_user) {
+    throw Object.assign(new Error('Slack user is deleted, a bot, or unavailable'), { code: 'operator_unavailable' })
+  }
+  return { id: user.id, name: user.profile?.display_name || user.real_name || user.name || user.id }
+}
+function getNodeServices() {
+  if (nodeServices) return nodeServices
+  if (!USER) throw new NodeManagementError('bridge_unclaimed', 'claim the bridge before managing execution nodes', 409)
+  const coordinatorId = ensureCoordinatorId(state, { persist: () => saveStateNow(state) })
+  let transport = null
+  const registry = createNodeRegistry({
+    state,
+    adminUserId: USER,
+    localName: os.hostname(),
+    persist: () => saveStateNow(state),
+    isConnected: nodeId => Boolean(transport?.connections().some(connection => connection.nodeId === nodeId)),
+  })
+  const invitations = createNodeInvitationStore({ state, persist: () => saveStateNow(state) })
+  transport = createCoordinatorNodeTransport({
+    coordinatorId,
+    registry,
+    invitations,
+    onEnvelope: async envelope => log('ignored unsupported remote node envelope', envelope.nodeId, envelope.kind, envelope.id),
+    log,
+  })
+  const management = createNodeManagement({
+    coordinatorId,
+    adminUserId: USER,
+    registry,
+    invitations,
+    transport,
+    resolveOperator: resolveNodeOperator,
+    listenerStatus: nodeListenerStatus,
+  })
+  nodeServices = Object.freeze({ coordinatorId, invitations, management, registry, transport })
+  return nodeServices
+}
+function getNodeManagement() {
+  return getNodeServices().management
+}
+async function startConfiguredNodeListener() {
+  const configuration = configuredNodeListener()
+  if (!configuration.enabled) return
+  const services = getNodeServices()
+  nodeListener = await listenForNodeConnections({
+    transport: services.transport,
+    host: configuration.host,
+    port: configuration.port,
+    tls: configuration.tls,
+  })
+  log('execution node listener ready', configuration.publicUrl)
+}
 
 // A Codex permission request is a held HTTP response and cannot survive a daemon
 // restart. Claude requests use MCP and remain recoverable only if their PID is
@@ -188,11 +279,10 @@ const PERM_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 // ---- session/channel helpers -----------------------------------------------
 function sessionByPid(pid) {
-  return Object.values(state.sessions).find(s => s.pid === pid)
+  return localSessionByPid(state, pid)
 }
 function sessionByChannel(ch) {
-  const sid = state.channels[ch]
-  return sid ? state.sessions[sid] : null
+  return localSessionByChannel(state, ch)
 }
 const switchingSids = new Set() // suppress lifecycle noise from a leg intentionally being replaced
 const internalTurns = new Map() // sid → private handoff/proposal turn resolver
@@ -1532,7 +1622,8 @@ async function resurrect(session, text) {
       const tmuxName = `sab-res-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`
       session.tmux = tmuxName
       saveState(state)
-      await spawnSession({
+      const nodeId = nodeIdForSession(session)
+      await executionNodes.spawn(nodeId, {
         cwd: session.cwd,
         args,
         title: `sab ${path.basename(session.cwd)} (resumed)`,
@@ -1541,7 +1632,7 @@ async function resurrect(session, text) {
         account: provider === 'claude' ? session.account : null, // Claude-only subscription binding
         provider,
       })
-      for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
+      for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await executionNodes.tmuxAlive(nodeId, tmuxName) }
       if (up) return // SessionStart clears the in-flight guard and flushes the queue
       log('spawn did not materialize', { attempt, tmuxName })
       await execFile('pkill', ['-f', tmuxName]).catch(() => {}) // kill the failed young instance
@@ -1976,7 +2067,8 @@ async function runProviderSwitch(channel, lineage, transition, { applyProposal =
     setTransitionPhase(lineage, 'target_starting')
     saveStateNow(state)
     await post(channel, `🚀 Starting the ${providerLabel(transition.target.provider)} leg for private validation…`)
-    await spawnSession({
+    const nodeId = nodeIdForSession(source)
+    await executionNodes.spawn(nodeId, {
       cwd: source.cwd,
       args: transition.target.args,
       title: `sab ${path.basename(source.cwd)} (${providerCommand(transition.target.provider)})`,
@@ -1986,7 +2078,7 @@ async function runProviderSwitch(channel, lineage, transition, { applyProposal =
       provider: transition.target.provider,
     })
     let up = false
-    for (let i = 0; i < 40 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
+    for (let i = 0; i < 40 && !up; i++) { await sleep(500); up = await executionNodes.tmuxAlive(nodeId, tmuxName) }
     if (!up) throw new Error('target provider did not initialize')
     await waitForTargetInputReady(channel, transition)
     setTransitionPhase(lineage, 'target_validating')
@@ -2492,9 +2584,12 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
     pendingTimer.unref?.()
   }
   await post(channel, `🚀 Spawning \`${providerCommand(provider)} ${flags.join(' ')}\` in \`${cwd}\`${account ? ` under \`${account}\`` : ''}…`)
-  await spawnSession({ cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName, autoConsent: provider === 'claude', account, provider })
+  await executionNodes.spawn(LOCAL_NODE_ID, {
+    cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName,
+    autoConsent: provider === 'claude', account, provider,
+  })
   let up = false
-  for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
+  for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await executionNodes.tmuxAlive(LOCAL_NODE_ID, tmuxName) }
   if (!up) {
     pendingSpawnChannels.delete(tmuxName)
     await post(channel, `⚠️ *The provider process did not initialize.* Inspect the local daemon log and retry \`${slackCommand(provider, 'new')}\`.`)
@@ -3305,7 +3400,7 @@ async function launchAutomation(record) {
     const timer = setTimeout(() => pendingSpawnChannels.delete(record.tmux), 10 * 60000)
     timer.unref?.()
   }
-  await spawnSession({
+  await executionNodes.spawn(LOCAL_NODE_ID, {
     cwd: record.cwd,
     args: record.flags,
     title: `sab automation ${path.basename(record.cwd)}`,
@@ -3317,7 +3412,7 @@ async function launchAutomation(record) {
   let up = false
   for (let i = 0; i < AUTOMATION_TMUX_LAUNCH_ATTEMPTS && !up; i++) {
     await sleep(AUTOMATION_TMUX_POLL_INTERVAL_MS)
-    up = await tmuxAlive(record.tmux)
+    up = await executionNodes.tmuxAlive(LOCAL_NODE_ID, record.tmux)
   }
   if (!up) throw new Error(`automation tmux did not materialize: ${record.tmux}`)
   log('automation launch accepted', record.provider, record.externalKey, record.tmux)
@@ -3421,12 +3516,13 @@ function startAutomationReconciler() {
 }
 
 const terminalControl = createTerminalControl({
-  state, pidAlive, tmuxAlive, tmuxClientPids, openTmuxTerminal, closeTmuxTerminal,
+  state, executionNodes,
 })
 
 // ---- HTTP (hooks in, SSE out) ----------------------------------------------
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
+  if (await handleNodeHttp(req, res, url, getNodeManagement)) return
   if (await handleAutomationHttp(req, res, url, automationLifecycle)) return
   if (await handleTerminalHttp(req, res, url, terminalControl)) return
   if (url.pathname === '/codex/commentary' && req.method === 'POST') {
@@ -3828,7 +3924,10 @@ http.createServer(async (req, res) => {
       const account = provider === 'claude' && j.account ? safeAccount(j.account) : null
       if (j.account && !account) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'invalid account name' })) }
       const tmuxName = `sab-new-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`
-      await spawnSession({ cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName, autoConsent: provider === 'claude', account, provider })
+      await executionNodes.spawn(LOCAL_NODE_ID, {
+        cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName,
+        autoConsent: provider === 'claude', account, provider,
+      })
       log('spawned via /spawn', provider, cwd, JSON.stringify(flags), account ? `account=${account}` : '')
       res.end(JSON.stringify({ ok: true, tmux: tmuxName, provider }))
     } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e?.message || e) })) }
@@ -3855,9 +3954,7 @@ http.createServer(async (req, res) => {
 }).listen(8877, '127.0.0.1', () => log('daemon http on 127.0.0.1:8877'))
 
 // ---- Slack Socket Mode ------------------------------------------------------
-const sm = new SocketModeClient({ appToken: process.env.SLACK_APP_TOKEN })
-sm.on('message', async ({ event, ack }) => {
-  try { await ack() } catch {}
+async function handleSocketMessage({ event }) {
   if (!event) return
   // A Slack topic change is rendered as a channel timeline item. Re-anchor an
   // active status after manual topic changes too; bridge-owned changes also do
@@ -3888,7 +3985,7 @@ sm.on('message', async ({ event, ack }) => {
     if (event.files?.length) await handleAttachments(event.channel, text, event.files, sender, request)
     else await handleSlackMessage(event.channel, text, sender, request)
   } catch (e) { log('slack msg error', String(e)) }
-})
+}
 
 // Native /sab-* slash commands are delivered over Socket Mode. The immutable
 // channel binding—not the command name—is the source of provider truth.
@@ -3917,8 +4014,7 @@ async function respondEphemeral(body, text) {
   } catch { return false }
 }
 
-sm.on('slash_commands', async ({ body, ack }) => {
-  try { await ack() } catch {}
+async function handleSocketSlashCommand({ body }) {
   try {
     const parsed = parseSlackCommand(body.command)
     if (!parsed) return respondEphemeral(body, 'Unknown bridge command.')
@@ -3947,11 +4043,10 @@ sm.on('slash_commands', async ({ body, ack }) => {
     const delivered = await reportSlashFailure(body, { postChannel: post, postEphemeral: respondEphemeral })
     if (delivered === 'none') log('slash feedback failed', body?.command || 'unknown command')
   }
-})
+}
 
 // Interactive components: Approve/Deny buttons and provider folder pickers.
-sm.on('interactive', async ({ body, ack }) => {
-  try { await ack() } catch {}
+async function handleSocketInteractive({ body }) {
   try {
     if (body?.type !== 'block_actions' || body.user?.id !== USER) return
     const action = body.actions?.[0]
@@ -4015,6 +4110,16 @@ sm.on('interactive', async ({ body, ack }) => {
       await applyVerdict(rid, behavior, body.channel?.id, body.message?.ts)
     }
   } catch (e) { log('interactive error', String(e)) }
+}
+
+const socketCoordinator = createSocketModeCoordinator({
+  socket: slackRuntime.socket,
+  handlers: {
+    message: handleSocketMessage,
+    slash_commands: handleSocketSlashCommand,
+    interactive: handleSocketInteractive,
+  },
+  onError: (kind, error) => log(`socket ${kind} error`, error?.stack || String(error)),
 })
 
 // ---- bridge self-update ------------------------------------------------------
@@ -4131,7 +4236,8 @@ setInterval(async () => {
     }
     saveState(state)
   }
-  await sm.start()
+  await startConfiguredNodeListener()
+  await socketCoordinator.start()
   log('socket mode connected — bridge ready')
   await recoverProviderSwitches()
   automationLifecycle.recover()

@@ -30,6 +30,15 @@ duplicating the native conversation.
 > tmux, and a loopback App Server event proxy; Pi uses an explicitly loaded
 > native extension.
 
+> [!NOTE]
+> Multi-machine support is being built around one Slack-facing coordinator and
+> enrolled execution nodes, without duplicating the app or `/sab-*` commands.
+> The current foundation can securely enroll and authenticate a node when an
+> operator explicitly enables its separate WSS listener, but it does not yet
+> route provider sessions to that node. Existing installs open no new listener
+> and remain local-only. See
+> [the accepted multi-node architecture](docs/multi-node-architecture.md).
+
 ## Capabilities
 
 | Capability | Claude Code | Codex CLI | Pi |
@@ -149,7 +158,16 @@ sab upload --grant TOKEN -- FILE_PATH...
 sab automation create ...
 sab automation status EXTERNAL_KEY
 sab automation stop EXTERNAL_KEY --archive
+sab node status
+sab node list
 ```
+
+`sab node invite`, `enroll`, and `revoke` currently support authenticated
+transport validation only. They do not make remote provider sessions available.
+The coordinator listener is off unless `SAB_NODE_LISTEN` is explicitly set; a
+non-loopback bind also requires `SAB_NODE_PUBLIC_URL`, `SAB_NODE_TLS_KEY`, and
+`SAB_NODE_TLS_CERT`. See the multi-node architecture document before enabling
+this preview surface.
 
 There are no public `ccs*`, `sab-cc`, `sab-codex`, `sab-pi`, `sab-upload`, or
 `sab-automation` executables in 2.0.

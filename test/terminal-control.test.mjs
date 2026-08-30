@@ -43,8 +43,8 @@ function fixture() {
 
 test('terminal list contains only authoritative live channel sessions', async () => {
   const { control } = fixture()
-  assert.deepEqual((await control.list()).map(row => [row.sessionId, row.attached]), [
-    ['claude-one', true], ['codex-two', false],
+  assert.deepEqual((await control.list()).map(row => [row.sessionId, row.nodeId, row.attached]), [
+    ['claude-one', 'local', true], ['codex-two', 'local', false],
   ])
 })
 
