@@ -32,7 +32,7 @@ test('Slack manifest has provider-neutral metadata', () => {
 
 test('the manifest exposes only the unified SAB namespace', () => {
   const expected = ['new', 'model', 'effort', 'flags', 'update', 'stop', 'switch', 'kill', 'status', 'usage',
-    'run', 'account', 'terminal', 'health', 'cleanup', 'claim', 'help']
+    'run', 'account', 'terminal', 'team', 'health', 'cleanup', 'claim', 'help']
   assert.deepEqual(names.slice().sort(), expected.map(name => `/sab-${name}`).sort())
   assert.equal(names.some(name => /^\/(?:cc|codex|pi)-/.test(name)), false)
 })
@@ -47,4 +47,6 @@ test('managed-run and terminal controls are available through SAB', () => {
   assert.match(terminal.usage_hint, /close-all/)
   const update = commands.find(item => item.command === '/sab-update')
   assert.equal(update.usage_hint, '[all]')
+  const team = commands.find(item => item.command === '/sab-team')
+  assert.match(team.usage_hint, /permissions/)
 })

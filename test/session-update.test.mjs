@@ -42,6 +42,7 @@ test('bulk update blockers cover interactive, transitional, managed, and restart
   assert.equal(bulkUpdateBlockReason(base, { pendingPermissionChannels: new Set(['C1']) }), 'permission awaiting a decision')
   assert.equal(bulkUpdateBlockReason(base, { transitionChannels: new Set(['C1']) }), 'provider switch in progress')
   assert.equal(bulkUpdateBlockReason(base, { internalSessionIds: new Set(['one']) }), 'private maintenance turn in progress')
+  assert.equal(bulkUpdateBlockReason({ ...base, teamActiveTaskId: 'task_one' }), 'delegated team task in progress')
   assert.equal(bulkUpdateBlockReason({ ...base, managed: { status: 'paused' } }), 'managed Pi work in progress')
   assert.equal(bulkUpdateBlockReason(base, { restartingSessionIds: new Set(['one']) }), 'session already restarting')
 })

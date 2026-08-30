@@ -29,6 +29,9 @@ These public interfaces are compatibility-sensitive:
 - `sab automation` is the JSON-safe client for the loopback
   `/automation/sessions` create/status/stop lifecycle. External keys are durable
   idempotency identities and must never be reused to launch or prompt twice.
+- `sab team` is the only agent-facing cross-session interface. Team membership
+  is administered through owner-only `/sab-team`; agents must never receive
+  Slack credentials, raw destination selection, or arbitrary channel history.
 - Historical `CCS_*` environment keys and `ccs-*` tmux names in persisted state
   remain readable. New tmux names use `sab-*`.
 - Configuration and state remain in `~/.config/ccs`; the local HTTP port remains
@@ -75,8 +78,8 @@ generated MCP configuration. Do not print secrets during diagnostics.
   node records must not be opened or detached by a bulk terminal action.
 - A bridge-wide provider update may restart only idle authoritative active
   sessions on nodes assigned to the caller. It must skip active turns,
-  questions, permissions, switches, managed Pi work, automation ownership, and
-  sessions already waking or restarting; update each represented provider
+  questions, permissions, switches, managed Pi work, automation ownership,
+  delegated team work, and sessions already waking or restarting; update each represented provider
   binary at most once per node per sweep.
 - Slack channels are private and mapped by channel ID, not mutable channel name.
 - A switched channel may own separate Claude, Codex, and Pi native legs, with
@@ -109,6 +112,18 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Generated-file delivery is provider-neutral. The daemon, not the agent,
   chooses the Slack destination from a short-lived grant tied to an accepted
   Slack message and its live session.
+- Session teams are channel-level, owner-created, bounded star graphs. Only a
+  current owner coordinator turn may dispatch to linked workers; collaborators
+  have no lateral authority. Worker replies/finals bind to one exact task and
+  authoritative native session. Journal before Slack/provider side effects,
+  never retry an uncertain dispatch after restart, and keep every transfer
+  visible in both affected channels. Worker-to-worker relay and arbitrary
+  history access remain disabled.
+- Team files use a separate task-bound permission—not artifact grants. Enforce
+  source-workspace realpath containment, private copied bytes, content hashes,
+  fixed linked destinations, explicit per-worker enablement, and bounded
+  cleanup. Until authenticated node file transport ships, team calls and
+  members are local-node only.
 - A session channel's authoritative provider selects provider-specific command
   behavior. Reject flags or operations belonging to another provider before
   they can mutate a session.
@@ -150,6 +165,11 @@ live process/tmux proof, and a one-use expiring grant. Resolve every file's real
 path and keep it inside the workspace captured by that grant; reject missing,
 non-regular, escaped, oversized, or replayed uploads. Agents never select a
 channel ID or arbitrary destination.
+
+Team calls must additionally prove exact provider-process ancestry, PID/tmux,
+native session, active channel, node, current owner turn or delegated task, and
+directed team permission. Aliases are presentation only. Membership alone does
+not authorize a collaborator prompt or stale provider leg to dispatch work.
 
 Provider switching is owner-only. Queue owner prompts by channel during the
 transaction, reject collaborator prompts, revoke source artifact grants on

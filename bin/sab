@@ -20,6 +20,7 @@ Usage:
   sab terminal open-all|show-all|close-all
   sab account <list|add|set|remove> [name]
   sab upload --grant TOKEN -- FILE_PATH [FILE_PATH ...]
+  sab team <context|peers|send|send-file|inbox|wait|reply> ...
   sab automation <create|status|stop> ...
   sab node <invite|list|revoke|enroll|status> ...
 EOF
@@ -51,6 +52,9 @@ case "$command_name" in
     ;;
   upload)
     exec node "$BRIDGE/scripts/sab-upload.mjs" "$@"
+    ;;
+  team)
+    exec node "$BRIDGE/scripts/sab-team.mjs" "$@"
     ;;
   automation)
     exec node "$BRIDGE/scripts/sab-automation.mjs" "$@"

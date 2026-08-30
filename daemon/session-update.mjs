@@ -18,6 +18,7 @@ export function bulkUpdateBlockReason(session, {
   automations = {},
 } = {}) {
   if (transitionChannels.has(session.channel)) return 'provider switch in progress'
+  if (session.teamActiveTaskId) return 'delegated team task in progress'
   if (['active', 'paused'].includes(session.managed?.status) || session.piRouting?.status === 'routing') return 'managed Pi work in progress'
   if (ownsAutomation(session, automations)) return 'automation-owned session'
   if (questionSessionIds.has(session.id)) return 'question awaiting an answer'

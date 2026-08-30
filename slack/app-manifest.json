@@ -23,6 +23,7 @@
       { "command": "/sab-run", "description": "Control adaptive routing or a managed Pi run", "usage_hint": "[plan] <goal> | mode | direct | status|approve|pause|continue|cancel", "should_escape": false },
       { "command": "/sab-account", "description": "Show or change a Claude session's subscription", "usage_hint": "[name | default]", "should_escape": false },
       { "command": "/sab-terminal", "description": "List, open, focus, or close optional terminal viewports", "usage_hint": "[list | open | close | open-all | close-all]", "should_escape": false },
+      { "command": "/sab-team", "description": "Link SAB sessions for secure agent delegation", "usage_hint": "[create | add | status | permissions | remove | close]", "should_escape": false },
       { "command": "/sab-health", "description": "Show bridge daemon health", "should_escape": false },
       { "command": "/sab-cleanup", "description": "Archive dormant session channels", "should_escape": false },
       { "command": "/sab-claim", "description": "Claim this bridge as its owner", "should_escape": false },

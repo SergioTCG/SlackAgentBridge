@@ -62,6 +62,32 @@ accounts, and the Mac user running the daemon.
   status-panel picker call `conversations.invite` before changing the prompt
   allowlist. Invitation failure is visible and leaves that user untrusted;
   successful setup persists the display name with the allowlist entry.
+- **Explicit session-team graph:** only the owner may create or mutate a team,
+  and Slack's picker accepts only an exact authoritative private SAB channel.
+  The default graph permits coordinator-to-worker tasks and exact-task replies
+  back to the coordinator; it has no worker mesh or generic Slack history read.
+  Agents receive neither Slack credentials nor a raw destination selector.
+- **Turn-scoped lateral authority:** persistent team membership is insufficient
+  to dispatch work. `sab team` proves provider-process ancestry, exact PID/tmux,
+  native session, authoritative channel mapping, and the implicit local node on
+  every call. Only a current owner-initiated coordinator turn receives a
+  bounded dispatch budget. Collaborator and unrelated terminal turns fail
+  closed. A worker may reply only while its exact native session owns the exact
+  journaled task. Stop, kill, session death/replacement, switch, removal, close,
+  and expiry revoke or invalidate stale authority.
+- **Journaled, auditable team delivery:** request identities and payload digests
+  deduplicate retries. The daemon persists `queued` before Slack/provider side
+  effects, posts the bounded task and status in both linked channels, and
+  persists an exact target claim before injection. A restart may deliver a
+  queued task but never retries an uncertain dispatch. Stable provider finals
+  can complete only their bound task/session; queue, reply, message, and lifetime
+  limits fail visibly.
+- **Separate team-file boundary:** team transfer never reuses an artifact grant.
+  It requires per-worker file permission, validates paths against the exact
+  source workspace with the existing count/size/realpath rules, hashes content,
+  copies bytes into a mode-restricted private task directory, uploads an audit
+  copy to the fixed linked channel, and injects only the private copy. A retry
+  cannot change content or destination. Cross-node file relay remains disabled.
 - **Provider isolation:** `/sab-*` resolves provider-specific behavior from the
   channel's authoritative session. `/sab-new` and `/sab-switch` require an
   explicit provider, and provider-incompatible commands or flags are rejected
@@ -166,7 +192,7 @@ accounts, and the Mac user running the daemon.
   review and deployment.
 - **Fail-closed session sweeps:** `/sab-update all` operates only on exact
   authoritative live mappings and skips interactive, transitional, managed,
-  automation-owned, waking, or restarting sessions. It never touches dormant
+  automation-owned, delegated-team, waking, or restarting sessions. It never touches dormant
   or standby legs, never runs the bulk cleanup path, and revalidates each target
   immediately before stopping it. Provider update failure does not prevent a
   safely stopped session from being resumed.
@@ -201,6 +227,8 @@ Slack when its scope or progress is no longer appropriate.
 - Review changes to the runner, hooks, the Slack manifest, and dependencies before
   enabling self-update on a security-sensitive host.
 - Regularly inspect private-channel membership and collaborator allowlists.
+- Regularly inspect `/sab-team status` and `/sab-team permissions`; close teams
+  whose coordination work is finished, and leave file relay off unless needed.
 - Remember that mirrored prompts, responses, filenames, and attachments are
   stored under the Slack workspace's retention and administration policies.
 - Treat artifact requests as deliberate data egress. Review collaborator access
@@ -223,6 +251,13 @@ Pending automations also journal their initial prompt in this `0600` state file.
 At the delivery boundary the bridge persists a digest and removes the plaintext
 before submitting it. Do not place credentials in automation prompts merely
 because the endpoint is local.
+
+Pending session-team tasks likewise place bounded plaintext prompts and private
+file copies under `~/.config/ccs` until safe delivery. After provider acceptance
+the journal drops task plaintext and retains its digest, identities, audit
+references, replies/result, and expiry. Slack keeps the deliberately visible
+task, file, reply, and result messages according to workspace retention. Do not
+delegate secrets merely because both sessions run on the same machine.
 
 ## Research-preview dependencies
 
