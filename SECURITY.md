@@ -75,13 +75,21 @@ accounts, and the Mac user running the daemon.
   closed. A worker may reply only while its exact native session owns the exact
   journaled task. Stop, kill, session death/replacement, switch, removal, close,
   and expiry revoke or invalidate stale authority.
+- **Root-provider process claims:** a nested provider utility may inherit SAB
+  environment variables and live under the same tmux pane, but another matching
+  provider process in its ancestry proves it is a child job. SAB rejects that
+  claim before channel registration, team calls, or artifact delivery.
 - **Journaled, auditable team delivery:** request identities and payload digests
   deduplicate retries. The daemon persists `queued` before Slack/provider side
   effects, posts the bounded task and status in both linked channels, and
   persists an exact target claim before injection. A restart may deliver a
   queued task but never retries an uncertain dispatch. Stable provider finals
-  can complete only their bound task/session; queue, reply, message, and lifetime
-  limits fail visibly.
+  can complete only their bound task/session. Completion posts have durable,
+  idempotent delivery claims; input/file delivery is serialized in-process and
+  failed queued envelopes are removed before reconnect; missing audit-card
+  updates are reported without suppressing the stable result; queue, reply,
+  message, and lifetime limits fail visibly. Pending deliveries cannot be
+  pressure-pruned, and pruning is persisted before staged bytes are removed.
 - **Separate team-file boundary:** team transfer never reuses an artifact grant.
   It requires per-worker file permission, validates paths against the exact
   source workspace with the existing count/size/realpath rules, hashes content,

@@ -252,7 +252,7 @@ export function createTeamTask(state, {
   if (active.filter(task => task.targetChannel === targetChannel).length >= TEAM_MAX_QUEUED_PER_WORKER) {
     throw new TeamError('worker_queue_full', `That worker already has ${TEAM_MAX_QUEUED_PER_WORKER} active tasks.`, 429)
   }
-  pruneTeamTasks(state, { now, max: TEAM_MAX_TASKS - 1 })
+  const pruned = pruneTeamTasks(state, { now, max: TEAM_MAX_TASKS - 1 })
   if (Object.keys(tasks).length >= TEAM_MAX_TASKS) throw new TeamError('task_journal_full', 'The bounded team task journal is full.', 503)
   const task = {
     id: String(id),
@@ -279,6 +279,9 @@ export function createTeamTask(state, {
     replies: [],
     result: null,
     error: null,
+    completionDeliveryStatus: null,
+    completionDeliveryError: null,
+    completionSlackTs: null,
     sourceSlackTs: null,
     targetSlackTs: null,
     sourcePayloadSlackTs: null,
@@ -288,7 +291,7 @@ export function createTeamTask(state, {
     expiresAt: nowIso(now + TEAM_TASK_TTL_MS),
   }
   tasks[task.id] = task
-  return { task, created: true }
+  return { task, created: true, pruned }
 }
 
 export function teamTaskForRequest(state, sourceChannel, requestId) {
@@ -351,7 +354,6 @@ export function appendTeamTaskReply(state, taskId, {
   id = randomId('reply'),
 } = {}) {
   const task = teamTask(state, taskId)
-  if (!ACTIVE_TASK_STATES.has(task.status)) throw new TeamError('task_not_active', 'That task no longer accepts replies.', 409)
   if (task.targetChannel !== fromChannel) throw new TeamError('reply_not_allowed', 'Only the assigned worker may reply to this task.', 403)
   const body = String(text || '').trim()
   if (!body && !files.length) throw new TeamError('empty_reply', 'A reply needs text or at least one file.')
@@ -364,6 +366,7 @@ export function appendTeamTaskReply(state, taskId, {
     if (existing.payloadHash !== payloadHash) throw new TeamError('request_conflict', 'That reply request ID was already used for different content.', 409)
     return { reply: existing, created: false }
   }
+  if (!ACTIVE_TASK_STATES.has(task.status)) throw new TeamError('task_not_active', 'That task no longer accepts replies.', 409)
   if (task.replies.length >= TEAM_MAX_REPLIES) throw new TeamError('reply_limit', 'This task reached its bounded reply limit.', 409)
   const reply = {
     id: String(id), requestId: key, payloadHash, fromChannel, text: body,
@@ -395,6 +398,8 @@ export function completeTeamTask(state, taskId, {
     : text
   task.text = ''
   task.files = []
+  task.completionDeliveryStatus = 'pending'
+  task.completionDeliveryError = null
   task.completedAt = nowIso(now)
   task.updatedAt = nowIso(now)
   return task
@@ -407,6 +412,8 @@ export function failTeamTask(state, taskId, error, { now = Date.now(), cancelled
   task.error = String(error || (cancelled ? 'Task cancelled.' : 'Task failed.')).slice(0, 2000)
   task.text = ''
   task.files = []
+  task.completionDeliveryStatus = 'pending'
+  task.completionDeliveryError = null
   task.completedAt = nowIso(now)
   task.updatedAt = nowIso(now)
   return task
@@ -450,6 +457,8 @@ export function publicTeamTask(task, callerChannel) {
     status: task.status,
     fileDeliveryStatus: task.fileDeliveryStatus,
     fileDeliveryError: task.fileDeliveryError,
+    completionDeliveryStatus: task.completionDeliveryStatus || null,
+    completionDeliveryError: task.completionDeliveryError || null,
     replies: task.replies.map(reply => ({
       id: reply.id,
       text: reply.text,
@@ -474,18 +483,31 @@ export function publicTeamTask(task, callerChannel) {
 export function pruneTeamTasks(state, { now = Date.now(), max = TEAM_MAX_TASKS } = {}) {
   const { tasks } = stores(state)
   const removable = Object.values(tasks)
-    .filter(task => !ACTIVE_TASK_STATES.has(task.status) && Date.parse(task.expiresAt || 0) <= now)
+    .filter(task => !ACTIVE_TASK_STATES.has(task.status) && teamTaskDeliverySettled(task) &&
+      Date.parse(task.expiresAt || 0) <= now)
     .sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)))
-  let removed = 0
-  for (const task of removable) { delete tasks[task.id]; removed++ }
+  const removed = []
+  for (const task of removable) { delete tasks[task.id]; removed.push(task) }
   const completed = Object.values(tasks)
-    .filter(task => !ACTIVE_TASK_STATES.has(task.status))
+    .filter(task => !ACTIVE_TASK_STATES.has(task.status) && teamTaskDeliverySettled(task))
     .sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)))
   while (Object.keys(tasks).length > max && completed.length) {
     const task = completed.shift()
-    if (tasks[task.id]) { delete tasks[task.id]; removed++ }
+    if (tasks[task.id]) { delete tasks[task.id]; removed.push(task) }
   }
   return removed
+}
+
+export function teamTaskDeliverySettled(task) {
+  const completion = !Object.hasOwn(task || {}, 'completionDeliveryStatus') ||
+    task?.completionDeliveryStatus === 'delivered'
+  const replies = (task?.replies || []).every(reply => {
+    const text = !reply.text || Boolean(reply.textSlackTs)
+    const files = !reply.files?.length || ['none', 'uploaded'].includes(reply.fileDeliveryStatus) ||
+      (reply.fileDeliveryStatus === 'failed' && Boolean(reply.fileDeliveryNotifiedAt))
+    return text && files
+  })
+  return completion && replies
 }
 
 export function delegatedTaskPrompt(team, task, destinationFiles = []) {
@@ -507,6 +529,18 @@ export function delegatedTaskPrompt(team, task, destinationFiles = []) {
     task.text,
     paths,
   ].join('\n')
+}
+
+// A provider input stream may disappear after a task has been claimed but
+// before it acknowledges the immutable marker. If that claim later fails, the
+// exact queued envelope must be removed so reconnect recovery cannot execute a
+// task whose coordinator has already received a failure.
+export function withoutDelegatedTaskPrompt(queue, taskId) {
+  const wanted = String(taskId || '')
+  return (Array.isArray(queue) ? queue : []).filter(item => {
+    const text = typeof item === 'string' ? item : String(item?.text || '')
+    return taskMarker(text) !== wanted
+  })
 }
 
 export function taskMarker(prompt) {

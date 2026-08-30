@@ -153,11 +153,18 @@ try {
   } else if (command === 'send-file') {
     const parsed = commonMessageArgs(args, { files: true })
     if (Boolean(parsed.to) === Boolean(parsed.taskId)) usage('send-file requires exactly one of --to or --task')
-    const body = { text: parsed.text, paths: parsed.paths, requestId: parsed.requestId || crypto.randomUUID() }
-    const result = parsed.to
-      ? await request('/team/send', { method: 'POST', body: { ...body, to: parsed.to } })
-      : await request('/team/reply', { method: 'POST', body: { ...body, taskId: parsed.taskId } })
-    output(result.task || result.reply)
+    const requestId = parsed.requestId || crypto.randomUUID()
+    const body = { text: parsed.text, paths: parsed.paths, requestId }
+    try {
+      const options = { method: 'POST', body, timeout: 10 * 60_000 }
+      const result = parsed.to
+        ? await request('/team/send', { ...options, body: { ...body, to: parsed.to } })
+        : await request('/team/reply', { ...options, body: { ...body, taskId: parsed.taskId } })
+      output(result.task || result.reply)
+    } catch (error) {
+      error.message = `${error.message}; retry safely with --request-id ${requestId}`
+      throw error
+    }
   } else if (command === 'reply') {
     const parsed = commonMessageArgs(args)
     if (!parsed.taskId || !parsed.text) usage('reply requires --task and either --stdin or --message')

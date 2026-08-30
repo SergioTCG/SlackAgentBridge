@@ -68,6 +68,8 @@ Roles are bridge state, not a sentence remembered by a model:
   paths.
 - Every `sab team` call independently proves the exact provider process,
   process ancestry, tmux, native session, authoritative channel, and local node.
+- Nested provider utilities such as `codex review` are not sessions: SAB detects
+  the existing provider ancestor and denies channel registration and team tools.
 
 This repeated injection survives compaction, long-lived sessions, model
 changes, and provider switching. It does not modify `AGENTS.md`, `CLAUDE.md`,
@@ -115,12 +117,23 @@ in both channels. A busy worker remains visibly queued; a dormant worker is not
 resurrected by another agent. The owner may wake that session normally, after
 which the task waits for a safe idle input surface.
 
-Before injection, SAB atomically claims the exact worker native session. A
-daemon restart may deliver a still-queued task, but it never retries an
-uncertain `dispatching` claim. That trades a visible failure for duplicate work.
+Before injection, SAB reserves the input surface and atomically claims the exact
+worker native session. It remains `dispatching` until the provider acknowledges
+the immutable task marker. A daemon restart may deliver a still-queued task, but
+it never retries an uncertain claim. That trades a visible failure for duplicate
+work. If the claimed envelope was waiting in an in-memory provider queue, SAB
+removes that exact marker before reporting failure so a later reconnect cannot
+execute it.
 Claude transcript completion, the Codex Stop hook, or the Pi extension supplies
-the stable final result. SAB persists completion before reporting it in the
-coordinator channel and releasing `sab team wait`.
+the stable final result. SAB persists completion plus an idempotent Slack
+delivery claim before reporting it in the coordinator channel. Restart
+reconciliation either proves the original turn is still active or visibly
+releases it without attributing a later final. Deleted or otherwise uneditable
+status cards are reported alongside the result but never prevent result
+delivery. Terminal tasks from the pre-claim journal format are recognized as
+already delivered during upgrade rather than posted a second time. Pending
+completion, reply, or file delivery prevents journal pruning; SAB persists a
+pruned journal before deleting its private file copies.
 
 Interim commentary stays in the worker channel unless the worker deliberately
 uses `sab team reply`. Questions and permission controls also remain in the

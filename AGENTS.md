@@ -73,6 +73,10 @@ generated MCP configuration. Do not print secrets during diagnostics.
   provider-native channel/extension streams may carry inbound text. Ghostty is
   an optional viewport: opening, closing, or focusing it must never start,
   duplicate, interrupt, or stop the provider process.
+- Provider utilities launched inside a bridged session (including review,
+  exec, and nested CLI processes) are child jobs, not SAB sessions. They must
+  not register channels or inherit agent-facing bridge authority merely because
+  they share the provider environment and tmux ancestry.
 - Terminal operations may target only authoritative active sessions on nodes
   assigned to the caller. Standby, provisional, stale, rebound, and mismatched
   node records must not be opened or detached by a bulk terminal action.

@@ -19,11 +19,14 @@ import {
   delegatedTaskPrompt,
   markTeamTaskRunning,
   publicTeamTask,
+  pruneTeamTasks,
   removeTeamWorker,
   setTeamWorkerFiles,
   taskMarker,
   tasksForChannel,
   teamContext,
+  teamTaskDeliverySettled,
+  withoutDelegatedTaskPrompt,
 } from '../daemon/teams.mjs'
 
 const initial = () => ({ sessions: {}, channels: {} })
@@ -147,6 +150,12 @@ test('task phase transitions bind an exact worker session and clear pending cont
   completeTeamTask(state, task.id, { targetSessionId: 'worker-sid', result: 'Finished.', now: 6000 })
   assert.equal(task.status, 'completed')
   assert.equal(task.result, 'Finished.')
+  assert.equal(task.completionDeliveryStatus, 'pending')
+  const recoveredReply = appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Halfway.', requestId: 'reply-1', now: 6500,
+  })
+  assert.equal(recoveredReply.created, false)
+  assert.equal(recoveredReply.reply.id, reply.id)
   assert.throws(() => completeTeamTask(state, task.id, { targetSessionId: 'other', result: 'No.' }),
     error => error.code === 'task_not_running')
   assert.equal(publicTeamTask(task, 'C-MASTER').direction, 'outgoing')
@@ -154,6 +163,49 @@ test('task phase transitions bind an exact worker session and clear pending cont
   assert.equal(publicTeamTask(task, 'C-MASTER').sourceChannel, undefined)
   assert.equal(publicTeamTask(task, 'C-MASTER').targetChannel, undefined)
   assert.throws(() => publicTeamTask(task, 'C-OTHER'), error => error.code === 'task_not_visible')
+})
+
+test('bounded journal pruning returns exact removed records for staged-file cleanup', () => {
+  const { state, team } = fixture()
+  for (let index = 0; index < 3; index++) {
+    const { task } = createTeamTask(state, {
+      teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+      target: 'parallel-1', text: `Finished ${index}`, requestId: `prune-${index}`, id: `task_prune_${index}`,
+      now: 1000 + index,
+    })
+    claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 2000 + index })
+    completeTeamTask(state, task.id, { targetSessionId: 'worker', result: 'done', now: 3000 + index })
+    task.completionDeliveryStatus = 'delivered'
+  }
+  const removed = pruneTeamTasks(state, { now: 4000, max: 1 })
+  assert.deepEqual(removed.map(task => task.id), ['task_prune_0', 'task_prune_1'])
+  assert.deepEqual(Object.keys(state.teamTasks), ['task_prune_2'])
+})
+
+test('journal pruning retains terminal tasks until every durable delivery settles', () => {
+  const { state, team } = fixture()
+  const make = (id, now) => {
+    const { task } = createTeamTask(state, {
+      teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+      target: 'parallel-1', text: id, requestId: id, id: `task_${id}`, now,
+    })
+    claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: now + 1 })
+    completeTeamTask(state, task.id, { targetSessionId: 'worker', result: 'done', now: now + 2 })
+    return task
+  }
+  const pendingCompletion = make('pending_completion', 1000)
+  const pendingReply = make('pending_reply', 2000)
+  pendingReply.completionDeliveryStatus = 'delivered'
+  pendingReply.replies.push({ text: 'update', textSlackTs: null, files: [], fileDeliveryStatus: 'none' })
+  const delivered = make('delivered', 3000)
+  delivered.completionDeliveryStatus = 'delivered'
+
+  assert.equal(teamTaskDeliverySettled(pendingCompletion), false)
+  assert.equal(teamTaskDeliverySettled(pendingReply), false)
+  assert.equal(teamTaskDeliverySettled(delivered), true)
+  assert.deepEqual(pruneTeamTasks(state, { now: 10 * 24 * 60 * 60 * 1000, max: 0 }).map(task => task.id),
+    ['task_delivered'])
+  assert.deepEqual(Object.keys(state.teamTasks).sort(), ['task_pending_completion', 'task_pending_reply'])
 })
 
 test('restart recovery preserves one dispatch claim and rejects late completion from another leg', () => {
@@ -220,6 +272,11 @@ test('delegated prompts carry immutable provenance and a task marker', () => {
   assert.doesNotMatch(prompt, /C-MASTER/)
   assert.match(prompt, /sab team reply --task task_prompt/)
   assert.match(prompt, /\/private\/attachment\/report\.txt/)
+  assert.deepEqual(withoutDelegatedTaskPrompt([
+    'ordinary queued prompt',
+    prompt,
+    { text: prompt, route: 'native' },
+  ], 'task_prompt'), ['ordinary queued prompt'])
 })
 
 test('channel inboxes contain only tasks involving that exact channel', () => {

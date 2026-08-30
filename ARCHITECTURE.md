@@ -235,6 +235,12 @@ owner-initiated coordinator turn dispatch authority; collaborator and local
 terminal turns clear it. A delegated worker task is narrower still: only its
 exact assigned live session may reply.
 
+The process claim also requires the provider to be the root provider process
+under the SAB tmux pane. Nested utilities such as `codex review` inherit the
+parent environment but are rejected before SessionStart registration and before
+any team or artifact authority check, so one-off child work cannot create ghost
+channels or masquerade as the interactive session.
+
 Task delivery is journal-first:
 
 1. Revalidate source authority, owner turn, team edge, target mapping, and
@@ -243,14 +249,19 @@ Task delivery is journal-first:
    payload and idempotent status cards in both Slack channels.
 3. Wait while the target is dormant, busy, switching, asking a question,
    awaiting permission, under maintenance, or owned by managed Pi work.
-4. Atomically change `queued → dispatching` and bind the exact target native
-   session before provider injection. A restart never retries an uncertain
-   dispatch claim.
-5. Accept `running` only for the injected immutable task marker. Claude's
+4. Reserve the worker input surface, atomically change `queued → dispatching`,
+   and bind the exact target native session before provider injection. A restart
+   never retries an uncertain dispatch claim.
+5. Accept `running` only when the provider acknowledges the injected immutable
+   task marker. Claude's
    completed transcript path, Codex's Stop hook, or Pi's extension final event
    may complete only the same task/session binding.
-6. Persist completion before updating both audit cards, posting the stable
-   result in the coordinator channel, and releasing polling waiters/mailboxes.
+6. Persist completion and a delivery claim before updating both audit cards and
+   idempotently posting the stable result in the coordinator channel. A missing
+   or uneditable audit card is reported with the result but cannot suppress it;
+   reconciliation retries incomplete result delivery before releasing bounded
+   state. Only fully delivered terminal records are eligible for TTL or journal
+   pressure pruning, and the pruned journal is persisted before file cleanup.
 
 Interim provider commentary remains in the worker channel; a worker explicitly
 uses `sab team reply` to put selected progress in the source mailbox. Questions

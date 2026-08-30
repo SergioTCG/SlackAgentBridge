@@ -33,6 +33,9 @@ test('team task injection is journal-first and uncertain claims are not replayed
   assert.ok(claim > 0 && persist > claim && inject > persist)
   assert.match(daemon, /Delivery became uncertain[\s\S]*SAB did not retry it to avoid duplicate work/)
   assert.match(daemon, /startTeamReconciler\(\) \/\/ status adoption must fence workers/)
+  const dispatchBody = /async function dispatchTeamTask\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.doesNotMatch(dispatchBody, /markTeamTaskRunning/)
+  assert.match(daemon, /teamTaskId && session\.teamActiveTaskId === teamTaskId[\s\S]*markTeamTaskRunning/)
 })
 
 test('team file relay journals an in-flight claim before every Slack upload', () => {
@@ -43,4 +46,38 @@ test('team file relay journals an in-flight claim before every Slack upload', ()
     assert.ok(claim > 0 && persist > claim && upload > persist)
   }
   assert.match(daemon, /outcome became uncertain during daemon restart; SAB did not retry it to avoid duplicate delivery/g)
+  assert.match(daemon, /teamTaskFileDeliveries\.get\(task\.id\)/)
+  assert.match(daemon, /teamReplyDeliveries\.get\(reply\.id\)/)
+})
+
+test('team lifecycle recovery cannot rebind, lose finals, or fence a worker indefinitely', () => {
+  assert.match(daemon, /session\.teamActiveTaskId[\s\S]*worker native session identity changed/)
+  assert.doesNotMatch(daemon, /task\.targetSessionId = sid/)
+  assert.doesNotMatch(daemon, /if \(!delivery\.suppress\) await finishTeamTaskForSession/)
+  assert.match(daemon, /TEAM_RESTART_PROOF_GRACE_MS/)
+  assert.match(daemon, /no live-turn proof returned/)
+  assert.match(daemon, /exceeded its seven-day lifetime/)
+  assert.match(daemon, /teamInputReservation/)
+  assert.match(daemon, /InputError[\s\S]*clearTeamInputReservation\(session\)/)
+  assert.match(daemon, /dispatchClaimedAt[\s\S]*discardQueuedTeamTaskPrompt\(target, task\.id\)/)
+  assert.match(daemon, /abandonedInput = clearTeamInputReservation\(s\)/)
+  assert.match(daemon, /markTeamTaskRunning\(state, teamTaskId\)[\s\S]*updateTeamTaskAudit\(task\)/)
+})
+
+test('completion, pruning, and retry side effects remain durable and idempotent', () => {
+  assert.match(daemon, /completionDeliveryStatus = 'delivering'[\s\S]*client_msg_id: teamAuditClientId\(task, 'completion'\)/)
+  assert.match(daemon, /ensureTeamCompletionDelivery\(task\)/)
+  assert.match(daemon, /for \(const removed of result\.pruned \|\| \[\]\) removeTeamTaskFiles\(removed\)/)
+  assert.match(daemon, /const priorReply = task\.replies\.find[\s\S]*session\.teamActiveTaskId !== task\.id/)
+  assert.match(cli, /timeout: 10 \* 60_000/)
+  assert.match(cli, /retry safely with --request-id/)
+  assert.match(daemon, /!Object\.hasOwn\(task, 'completionDeliveryStatus'\)[\s\S]*completionDeliveryStatus = 'delivered'/)
+  assert.doesNotMatch(daemon, /updateTeamTaskAudit\(task, \{ strict: true \}\)/)
+  const persistPrune = daemon.indexOf('for (const removed of result.pruned || []) removeTeamTaskFiles(removed)')
+  assert.ok(daemon.lastIndexOf('saveStateNow(state)', persistPrune) < persistPrune)
+})
+
+test('nested provider utilities are not registered as SAB sessions', () => {
+  assert.match(daemon, /validProviderRootClaim/)
+  assert.match(daemon, /rejected nested provider claim/)
 })
