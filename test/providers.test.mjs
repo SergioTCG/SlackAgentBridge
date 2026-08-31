@@ -166,6 +166,17 @@ Press enter to continue`
   assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
 })
 
+test('Codex target readiness identifies the blocking startup update chooser', () => {
+  const update = `A new Codex version is available\n` +
+    `› 1. Update now (runs npm install -g @openai/codex)\n` +
+    `  2. Skip\n` +
+    `  3. Skip until next version\n` +
+    `Press enter to continue`
+
+  assert.equal(targetStartupState('codex', update), 'update')
+  assert.equal(targetStartupState('codex', 'Run codex update to update.'), 'starting')
+})
+
 test('Codex target readiness ignores blank rows below the UI in a tall terminal', () => {
   const ready = `OpenAI Codex (v0.147.0)
 › Find and fix a bug in @filename

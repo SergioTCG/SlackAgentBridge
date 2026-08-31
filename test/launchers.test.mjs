@@ -70,6 +70,7 @@ test('Codex runner observes semantic commentary through a loopback App Server pr
   assert.match(source, /app-server --listen ws:\/\/127\.0\.0\.1:0/)
   assert.match(source, /codex-event-proxy\.mjs/)
   assert.match(source, /codex --remote "\$proxy_url"/)
+  assert.match(source, /check_for_update_on_startup=false/)
   assert.match(source, /using the direct TUI/)
 })
 
@@ -77,6 +78,7 @@ test('Codex runner inserts the transparent event proxy without changing user fla
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-proxy-'))
   try {
     const log = path.join(temp, 'codex-argv')
+    const flagsLog = path.join(temp, 'codex-user-flags')
     fs.writeFileSync(path.join(temp, 'codex'), `#!/bin/bash
 if [ "$1" = app-server ]; then
   printf '%s\n' 'listening on: ws://127.0.0.1:45678'
@@ -84,16 +86,26 @@ if [ "$1" = app-server ]; then
   while :; do sleep 1; done
 fi
 printf '%s\n' "$@" > "$CODEX_TEST_LOG"
+printf '%s\n' "$CCS_FLAGS" > "$CODEX_TEST_FLAGS_LOG"
 `, { mode: 0o755 })
     const run = spawnSync(sab, ['__run', 'codex', '--model', 'gpt-test', '--search'], {
       encoding: 'utf8', timeout: 10000,
-      env: { ...process.env, PATH: `${temp}:${process.env.PATH}`, TMPDIR: temp, TMUX: 'test-client', CCS_TMUX: 'sab-test', CODEX_TEST_LOG: log },
+      env: {
+        ...process.env, PATH: `${temp}:${process.env.PATH}`, TMPDIR: temp,
+        TMUX: 'test-client', CCS_TMUX: 'sab-test', CODEX_TEST_LOG: log,
+        CODEX_TEST_FLAGS_LOG: flagsLog,
+      },
     })
     assert.equal(run.status, 0, run.stderr)
     const args = fs.readFileSync(log, 'utf8').trim().split('\n')
     assert.equal(args[0], '--remote')
     assert.match(args[1], /^ws:\/\/127\.0\.0\.1:\d+$/)
-    assert.deepEqual(args.slice(2), ['-c', 'tui.keymap.chat.interrupt_turn="f12"', '--model', 'gpt-test', '--search'])
+    assert.deepEqual(args.slice(2), [
+      '-c', 'check_for_update_on_startup=false',
+      '-c', 'tui.keymap.chat.interrupt_turn="f12"',
+      '--model', 'gpt-test', '--search',
+    ])
+    assert.equal(fs.readFileSync(flagsLog, 'utf8').trim(), '--model gpt-test --search')
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
 })
 
@@ -111,7 +123,11 @@ printf '%s\n' "$@" > "$CODEX_TEST_LOG"
     })
     assert.equal(run.status, 0, run.stderr)
     assert.match(run.stderr, /using the direct TUI/)
-    assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), ['-c', 'tui.keymap.chat.interrupt_turn="f12"', '--search'])
+    assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), [
+      '-c', 'check_for_update_on_startup=false',
+      '-c', 'tui.keymap.chat.interrupt_turn="f12"',
+      '--search',
+    ])
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
 })
 

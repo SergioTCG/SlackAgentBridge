@@ -229,6 +229,12 @@ PID/channel binding. Daemon restart applies the same check to an interrupted
 hookless resume, so `/sab-terminal open` becomes available again without a
 second Codex process or a synthetic prompt.
 
+SAB-managed Codex TUIs disable Codex's interactive startup update check. This
+prevents a detached new, resumed, automation, or provider-switch session from
+waiting on a local update chooser before it can bind to Slack. Codex upgrades
+remain explicit through `/sab-update` and `/sab-update all`; the internal
+setting is not added to stored or user-visible launch flags.
+
 Flagless `/sab-new claude` and `/sab-new codex` use the dangerous defaults
 described above. Explicit flags replace those defaults. Operator overrides
 remain available through the existing `CCS_NEW_FLAGS`, `CCS_RESUME_FLAGS`,

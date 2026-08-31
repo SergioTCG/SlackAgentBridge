@@ -1926,6 +1926,9 @@ async function waitForTargetInputReady(channel, transition, timeoutMs = 5 * 6000
     const pane = await tmuxCapture(transition.target.tmux)
     const startup = targetStartupState(transition.target.provider, pane)
     if (startup === 'ready') return
+    if (startup === 'update') {
+      throw new Error('Codex opened its interactive update chooser despite SAB startup suppression. Run `codex update` on the Mac, then retry the provider switch.')
+    }
     if (startup === 'trust' && !trustNoticeSent) {
       trustNoticeSent = true
       try {
