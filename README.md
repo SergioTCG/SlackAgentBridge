@@ -61,6 +61,10 @@ While a turn runs, its status and elapsed timer remain the newest channel item.
 Daemon restarts re-adopt active turns and their original duration. Codex's
 loopback event proxy mirrors only completed semantic commentary; it excludes
 commands, output, diffs, plans, reasoning, deltas, and final-answer events.
+If Codex rejects a submitted turn because its selected model is at capacity,
+SAB replaces the working timer with that actionable failure instead of leaving
+the channel apparently busy. The detector requires the exact current TUI
+warning on a stable idle input surface and ignores stale terminal scrollback.
 Claude `AskUserQuestion` forms use their structured hook payload, so Slack keeps
 the question header, prompt, recommendation, option descriptions, and previews
 separate from concise answer buttons. A bounded terminal parser remains only as
