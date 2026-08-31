@@ -67,6 +67,21 @@ import { handleAutomationHttp } from './automation-http.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { createTerminalControl } from './terminal-control.mjs'
 import { handleTerminalHttp } from './terminal-http.mjs'
+import { handleTeamHttp } from './team-http.mjs'
+import { validTeamCallerBinding } from './team-auth.mjs'
+import { isNestedProviderClaim } from './process-claims.mjs'
+import {
+  removeTeamFiles as deleteTeamFiles, removeTeamTaskFiles as deleteTeamTaskFiles,
+  stageTeamFiles as stagePrivateTeamFiles, teamSourceFileMetadata,
+} from './team-files.mjs'
+import {
+  TeamError, activeTeamForChannel, addTeamWorker, appendTeamTaskReply, assertCoordinatorDispatch, assertTeamTaskRetry,
+  beginCollaboratorTeamTurn, beginOwnerTeamTurn, claimTeamTask, clearTeamTurn, closeTeam,
+  completeTeamTask, consumeCoordinatorDispatch, coordinatorPromptContext, createTeam, createTeamTask,
+  delegatedTaskPrompt, failTeamTask, markTeamTaskRunning, normalizeTeamAlias, publicTeamTask,
+  removeTeamWorker, resolveTeamPeer, setTeamWorkerFiles, taskMarker, tasksForChannel, teamById,
+  teamContext, teamTask, teamTaskDeliverySettled, teamTaskForRequest, withoutDelegatedTaskPrompt,
+} from './teams.mjs'
 import { createExecutionNodeRouter, createLocalExecutionNode } from './execution-nodes.mjs'
 import { LOCAL_NODE_ID, localSessionByChannel, localSessionByPid, nodeIdForSession } from './nodes.mjs'
 import { createDirectSlackRuntime } from './slack-runtime.mjs'
@@ -388,6 +403,25 @@ function artifactDeliveryContext(session, request) {
 
 function withArtifactDelivery(session, text, request) {
   return text + artifactDeliveryContext(session, request)
+}
+
+function beginSlackTeamTurn(session, sender, request) {
+  if (!session?.channel || !activeTeamForChannel(state, session.channel)) {
+    clearTeamTurn(session)
+    return ''
+  }
+  if (sender) {
+    beginCollaboratorTeamTurn(session, request)
+    saveStateNow(state)
+    return ''
+  }
+  beginOwnerTeamTurn(session, request)
+  saveStateNow(state)
+  return coordinatorPromptContext(state, session.channel)
+}
+
+function ownerPromptPrivateContext(session, request) {
+  return artifactDeliveryContext(session, request) + beginSlackTeamTurn(session, null, request)
 }
 
 const ensureSessionChannel = createSessionChannelGate()
@@ -768,6 +802,11 @@ async function finalizeTurn(session, { terminalFailure = null } = {}) {
   else if (delivery.text) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
   if (delivery.text && !delivery.suppress) await postMd(session.channel, delivery.text)
   else if (delivery.suppress) log('suppressed duplicate Claude terminal failure', session.id.slice(0, 8), delivery.failure?.key)
+  const taskFailure = terminalFailure
+    ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
+    : delivery.failure?.text || null
+  await finishTeamTaskForSession(session, delivery.text, taskFailure)
+  clearTeamInputReservation(session)
   saveState(state)
   // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
   // poller is watching — check once, shortly after, and hand off to a poller.
@@ -789,6 +828,8 @@ async function finalizeCodexTurn(session, body) {
   if (turnId && session.lastMirroredTurn === turnId) return
   const text = String(body.last_assistant_message || '').trim()
   if (text && session.channel) await postMd(session.channel, text)
+  await finishTeamTaskForSession(session, text)
+  clearTeamInputReservation(session)
   if (turnId) session.lastMirroredTurn = turnId
   saveState(state)
 }
@@ -800,6 +841,8 @@ async function finalizePiTurn(session, body) {
   if (turnId && session.lastMirroredTurn === turnId) return
   const text = String(body.last_assistant_message || '').trim()
   if (text && session.channel) await postMd(session.channel, text)
+  await finishTeamTaskForSession(session, text)
+  clearTeamInputReservation(session)
   recordPiUsage(session, body)
   if (turnId) session.lastMirroredTurn = turnId
   saveState(state)
@@ -840,7 +883,14 @@ async function findStatusContext(channel) {
 }
 async function readoptStatus() {
   for (const s of Object.values(state.sessions)) {
-    if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) continue
+    if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) {
+      const abandonedInput = clearTeamInputReservation(s)
+      if (abandonedInput && !s.teamActiveTaskId && s.channel) {
+        await post(s.channel,
+          '⚠️ The bridge restarted before a queued input reached this dormant provider. It was not retried; please resend it.').catch(() => {})
+      }
+      continue
+    }
     if (providerOf(s) === 'pi') {
       const { statusMessage } = await findStatusContext(s.channel)
       const ts = statusMessage?.ts || null
@@ -851,6 +901,7 @@ async function readoptStatus() {
       } else if (ts) {
         try { await web.chat.delete({ channel: s.channel, ts }) } catch {}
       }
+      if (!s.piTurnStartedAt) clearTeamInputReservation(s)
       continue
     }
     if (providerOf(s) === 'codex') {
@@ -869,12 +920,14 @@ async function readoptStatus() {
         }
         if (ts) liveStatuses.adopt(s.id, ts)
         startCodexPoller(s)
+        if (s.teamActiveTaskId) teamTurnProof.add(s.id)
         log('re-adopted live Codex turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
       } else {
         const hadTurnState = !!s.codexTurnStartedAt
         if (ts) liveStatuses.adopt(s.id, ts)
         stopPoller(s)
         await clearStatus(s)
+        clearTeamInputReservation(s)
         if (ts || hadTurnState) log('cleared stale Codex turn status', s.id.slice(0, 8))
       }
       continue
@@ -888,10 +941,12 @@ async function readoptStatus() {
     const ts = statusMessage?.ts || null
     if (waitingForm) {
       startPoller(s) // poller relays the form and manages the answer
+      if (s.teamActiveTaskId) teamTurnProof.add(s.id)
       log('re-adopted session waiting at a question form', s.id.slice(0, 8))
     } else if (spinning) {
       if (ts) liveStatuses.adopt(s.id, ts) // resume editing the existing (frozen) message
       startPoller(s)
+      if (s.teamActiveTaskId) teamTurnProof.add(s.id)
       log('re-adopted live turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
     } else {
       // Idle: nothing to mirror. Re-anchor the read offset to EOF so a stale or
@@ -899,6 +954,7 @@ async function readoptStatus() {
       // clear any status left frozen by the restart.
       try { const sz = fs.statSync(s.transcript).size; if (Number.isFinite(sz) && sz !== s.offset) { s.offset = sz; log('re-anchored idle session', s.id.slice(0, 8), 'offset→EOF') } } catch {}
       if (ts) { try { await web.chat.delete({ channel: s.channel, ts }) } catch {} }
+      clearTeamInputReservation(s)
     }
   }
   saveState(state)
@@ -1026,6 +1082,37 @@ async function validTmuxClaim(pid, tname) {
   return ok
 }
 
+const providerRootClaimCache = new Map()
+async function validProviderRootClaim(pid, tname, provider) {
+  const key = `${pid}:${tname}:${provider}`
+  if (providerRootClaimCache.has(key)) return providerRootClaimCache.get(key)
+  if (!(await validTmuxClaim(pid, tname))) return false
+  let panePids = []
+  const processes = []
+  try {
+    panePids = (await execFile('tmux', ['list-panes', '-t', tname, '-F', '#{pane_pid}']))
+      .stdout.split('\n').filter(Boolean).map(Number)
+    let current = Number(pid)
+    for (let hop = 0; hop < 16 && current > 1; hop++) {
+      const [parentResult, commResult] = await Promise.all([
+        execFile('ps', ['-o', 'ppid=', '-p', String(current)]),
+        execFile('ps', ['-o', 'comm=', '-p', String(current)]),
+      ])
+      const parent = Number(parentResult.stdout.trim()) || 0
+      processes.push({ pid: current, ppid: parent, comm: commResult.stdout.trim() })
+      if (!parent || panePids.includes(current) || panePids.includes(parent)) break
+      current = parent
+    }
+  } catch {
+    providerRootClaimCache.set(key, false)
+    return false
+  }
+  const valid = !isNestedProviderClaim(processes, pid, panePids, provider)
+  providerRootClaimCache.set(key, valid)
+  if (!valid) log('rejected nested provider claim', provider, pid, tname)
+  return valid
+}
+
 async function completeAuthoritativeSessionStart(session, provider, source) {
   const sid = session.id
   const tmux = session.tmux || ''
@@ -1069,7 +1156,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   const pid = await resolveAgentPid(ppid, provider)
   if (!pid) return
   const requestedTmux = tmux
-  if (tmux && !(await validTmuxClaim(pid, tmux))) tmux = null
+  if (tmux && !(await validProviderRootClaim(pid, tmux, provider))) return
   const sid = body.session_id
   if (!sid) return
   const automationHook = automationLifecycle.findForHook(provider, sid, requestedTmux)
@@ -1139,6 +1226,10 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
         `(transcript=${transcriptMatches}, sameTerminal=${sameTerminal})`)
       return
     }
+    if (session.teamActiveTaskId) {
+      await failTeamTaskForSession(session,
+        'The worker native session identity changed before the delegated task completed.')
+    }
     delete state.sessions[session.id]
     if (session.channel) state.channels[session.channel] = sid
     rebindLineageSession(state, priorSid, sid, provider)
@@ -1205,7 +1296,13 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     return
   }
   if (provider === 'pi' && ev === 'InputError') {
-    if (session.channel) await post(session.channel, `⚠️ ${String(body.error || 'Pi could not accept that input.').slice(0, 500)}`)
+    const reason = String(body.error || 'Pi could not accept that input.').slice(0, 500)
+    clearTeamInputReservation(session)
+    if (session.teamActiveTaskId) {
+      discardQueuedTeamTaskPrompt(session, session.teamActiveTaskId)
+      await failTeamTaskForSession(session, `Pi rejected the delegated input: ${reason}`)
+    } else saveStateNow(state)
+    if (session.channel) await post(session.channel, `⚠️ ${reason}`)
     return
   }
   if (provider === 'pi' && ev === 'ManagedCheckpoint') {
@@ -1283,10 +1380,12 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     return
   }
   if (provider === 'pi' && (ev === 'Status' || ev === 'Settings')) {
+    if (ev === 'Status' && session.teamActiveTaskId) teamTurnProof.add(session.id)
     if (session.channel && ev === 'Settings') await updateTopic(session)
     return
   }
   if (provider === 'pi' && ev === 'AgentStart') {
+    if (session.teamActiveTaskId) teamTurnProof.add(session.id)
     if (!targetClaim && !internalTurns.has(session.id) && session.channel) beginPiTurn(session)
     return
   }
@@ -1327,8 +1426,28 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       consumeInjected(sid, p)
       return
     }
+    const teamTaskId = taskMarker(p)
+    if (p && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
     const ch = session.channel || (await ensureChannel(session))
     const injected = consumeInjected(sid, p)
+    if (teamTaskId && session.teamActiveTaskId === teamTaskId) {
+      try {
+        const task = markTeamTaskRunning(state, teamTaskId)
+        teamTurnProof.add(session.id)
+        saveStateNow(state)
+        await updateTeamTaskAudit(task)
+      }
+      catch (error) { log('team task prompt acknowledgement rejected', teamTaskId, String(error?.message || error)) }
+    } else if (teamTaskId && session.teamActiveTaskId) {
+      await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
+    } else if (session.teamActiveTaskId && p && !automationEcho && !injected) {
+      await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
+    } else if (p && !automationEcho && !injected) {
+      // Local terminal input and uncorrelated provider prompts do not inherit a
+      // prior Slack owner's lateral team authority.
+      clearTeamTurn(session)
+      saveStateNow(state)
+    }
     // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
     // system-injected content (task notifications, reminders, local-command echoes).
     if (p && !automationEcho && !injected && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
@@ -1367,6 +1486,9 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   if (ev === 'SessionEnd') {
     stopPoller(session)
     await clearStatus(session)
+    await failTeamTaskForSession(session, 'The worker session ended before completing its delegated task.')
+    clearTeamInputReservation(session)
+    teamTurnProof.delete(session.id)
     const failedPrivate = failPrivateTurn(session, new Error('agent session ended during a private bridge turn'), targetClaim)
     const switching = transitionForSession(state, sid)
     if (session.channel && !restarting.has(sid) && !switchingSids.has(sid) && !switching) {
@@ -2351,6 +2473,9 @@ async function handleSlackMessage(channel, text, sender, request) {
   }
 
   const managedSession = sessionByChannel(channel)
+  if (managedSession?.teamActiveTaskId) {
+    return post(channel, `🕸️ Delegated team task \`${managedSession.teamActiveTaskId}\` currently owns this worker turn. Wait for its final response or use \`/sab-stop\` before sending unrelated work.`)
+  }
   if (providerOf(managedSession) === 'pi' && (
     ['active', 'paused'].includes(managedSession?.managed?.status) || managedSession?.piRouting?.status === 'routing'
   )) {
@@ -2373,12 +2498,20 @@ async function handleSlackMessage(channel, text, sender, request) {
       return post(channel, `💤 Session is dormant — <@${sender.id}>’s message wasn’t delivered. Only the owner can resume it.`)
     }
     const attributed = `[Slack collaborator ${sender.name}]\n${trimmed}`
-    if (providerOf(session) === 'pi') {
-      return injectText(session, attributed, {
-        privateContext: artifactDeliveryContext(session, request), route: 'native',
-      })
+    beginSlackTeamTurn(session, sender, request)
+    reserveTeamInput(session, 'slack')
+    try {
+      if (providerOf(session) === 'pi') {
+        await injectText(session, attributed, {
+          privateContext: artifactDeliveryContext(session, request), route: 'native',
+        })
+      } else await injectText(session, withArtifactDelivery(session, attributed, request))
+    } catch (error) {
+      clearTeamInputReservation(session)
+      saveStateNow(state)
+      throw error
     }
-    return injectText(session, withArtifactDelivery(session, attributed, request))
+    return
   }
 
   // The ./ commands were retired in favour of native namespaced slash commands; nudge.
@@ -2411,9 +2544,16 @@ async function handleSlackMessage(channel, text, sender, request) {
     }
     return post(channel, '❓ A question form is open — tap a button above or reply with just its number.')
   }
-  if (providerOf(session) === 'pi') {
-    await injectText(session, trimmed, { privateContext: artifactDeliveryContext(session, request) })
-  } else await injectText(session, withArtifactDelivery(session, trimmed, request))
+  reserveTeamInput(session, 'slack')
+  try {
+    if (providerOf(session) === 'pi') {
+      await injectText(session, trimmed, { privateContext: ownerPromptPrivateContext(session, request) })
+    } else await injectText(session, trimmed + ownerPromptPrivateContext(session, request))
+  } catch (error) {
+    clearTeamInputReservation(session)
+    saveStateNow(state)
+    throw error
+  }
 }
 const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kill', 'cleanup', 'stop', 'help'])
 
@@ -2497,6 +2637,9 @@ async function handleAttachments(channel, caption, files, sender, request) {
   }
   const session = sessionByChannel(channel)
   if (!session) { log('attachment in unmapped channel, ignored', channel); return }
+  if (session.teamActiveTaskId) {
+    return post(channel, `🕸️ Delegated team task \`${session.teamActiveTaskId}\` currently owns this worker turn. Wait for it to finish before sending unrelated attachments.`)
+  }
   if (providerOf(session) === 'pi' && (
     ['active', 'paused'].includes(session.managed?.status) || session.piRouting?.status === 'routing'
   )) {
@@ -2507,6 +2650,9 @@ async function handleAttachments(channel, caption, files, sender, request) {
   if (sender && !(session.pid && pidAlive(session.pid))) {
     return post(channel, `💤 Session is dormant — <@${sender.id}>’s attachment wasn’t delivered. Only the owner can resume it.`)
   }
+  reserveTeamInput(session, 'slack-attachment')
+  let injected = false
+  try {
   const dir = path.join(CONFIG_DIR, 'attachments')
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   try { fs.chmodSync(dir, 0o700) } catch {}
@@ -2532,14 +2678,736 @@ async function handleAttachments(channel, caption, files, sender, request) {
     ? `${caption.trim()}\n\n(I attached ${saved.length} file(s) from Slack — read them if relevant:\n${list}\n)`
     : `I attached ${saved.length} file(s) from Slack. Please read them:\n${list}`
   const attributed = sender ? `[Slack collaborator ${sender.name}]\n${body}` : body
+  const teamPrivateContext = beginSlackTeamTurn(session, sender, request)
   if (providerOf(session) === 'pi') {
-    return injectText(session, attributed, {
-      files: saved, privateContext: artifactDeliveryContext(session, request),
+    await injectText(session, attributed, {
+      files: saved, privateContext: artifactDeliveryContext(session, request) + teamPrivateContext,
       route: sender ? 'native' : null,
     })
+    injected = true
+    return
   }
-  const delivered = withArtifactDelivery(session, attributed, request)
+  const delivered = withArtifactDelivery(session, attributed, request) + teamPrivateContext
   await injectText(session, delivered)
+  injected = true
+  } finally {
+    if (!injected) {
+      clearTeamInputReservation(session)
+      saveStateNow(state)
+    }
+  }
+}
+
+// ---- bridge-owned session teams -------------------------------------------
+// Agents never receive Slack credentials or choose raw Slack destinations.
+// The local CLI proves its exact provider process/tmux; durable channel-level
+// membership then resolves the only peers it may address. Worker results are
+// returned through the task journal/CLI rather than pasted into a coordinator
+// that may still be in the middle of its own turn.
+const TEAM_RECONCILE_MS = 3000
+const TEAM_RESTART_PROOF_GRACE_MS = 15_000
+const teamDaemonStartedAt = Date.now()
+let teamReconciler = null
+let teamReconcileRunning = false
+const teamTaskFileDeliveries = new Map()
+const teamReplyDeliveries = new Map()
+const teamCompletionDeliveries = new Map()
+const teamTurnProof = new Set()
+
+function reserveTeamInput(session, source) {
+  if (!session || session.teamInputReservation) return false
+  session.teamInputReservation = { source, acceptedAt: new Date().toISOString() }
+  saveStateNow(state)
+  return true
+}
+
+function clearTeamInputReservation(session) {
+  if (!session || !Object.hasOwn(session, 'teamInputReservation')) return false
+  delete session.teamInputReservation
+  return true
+}
+
+function discardQueuedTeamTaskPrompt(session, taskId) {
+  if (!session?.id || !taskId) return false
+  const queued = pendingBySid.get(session.id) || []
+  const retained = withoutDelegatedTaskPrompt(queued, taskId)
+  if (retained.length === queued.length) return false
+  if (retained.length) pendingBySid.set(session.id, retained)
+  else pendingBySid.delete(session.id)
+  log('discarded failed queued team prompt', taskId, session.id.slice(0, 8))
+  return true
+}
+
+function teamTaskStatusText(task) {
+  const icon = task.status === 'completed' ? '✅'
+    : task.status === 'failed' ? '❌'
+      : task.status === 'cancelled' ? '🚫'
+        : task.status === 'running' ? '⚙️'
+          : task.status === 'dispatching' ? '📨' : '⏳'
+  const detail = task.error ? ` — ${String(task.error).slice(0, 600)}` : ''
+  return `${icon} *Team task* \`${task.id}\` · ${task.status}${detail}`
+}
+
+function teamAuditClientId(task, side) {
+  const hex = crypto.createHash('sha256').update(`${task.id}:${side}`).digest('hex').slice(0, 32)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20)}`
+}
+
+function teamTaskPayloadText(task, destination) {
+  const direction = destination === 'source'
+    ? `➡️ Delegated to <#${task.targetChannel}> (\`${task.targetAlias}\`)`
+    : `⬅️ Delegated by <#${task.sourceChannel}>`
+  const files = task.files?.length
+    ? `\n\n*Files*\n${task.files.map(file => `• \`${String(file.filename).replace(/`/g, "'")}\` · ${file.size} bytes`).join('\n')}`
+    : ''
+  return `📋 *Team task* \`${task.id}\`\n${direction}\n\n${task.text || '_File-only task._'}${files}`
+}
+
+async function ensureTeamTaskAudit(task) {
+  try {
+    if (!task.sourcePayloadSlackTs) {
+      const payload = await postSlackMessage(task.sourceChannel, {
+        text: teamTaskPayloadText(task, 'source'),
+        unfurl_links: false,
+        client_msg_id: teamAuditClientId(task, 'source-payload'),
+      })
+      task.sourcePayloadSlackTs = payload?.ts || null
+      saveStateNow(state)
+    }
+    if (!task.sourceSlackTs) {
+      const source = await postSlackMessage(task.sourceChannel, {
+        text: `${teamTaskStatusText(task)}\n➡️ <#${task.targetChannel}> (\`${task.targetAlias}\`)`,
+        unfurl_links: false,
+        client_msg_id: teamAuditClientId(task, 'source'),
+      })
+      task.sourceSlackTs = source?.ts || null
+      saveStateNow(state)
+    }
+    if (!task.targetPayloadSlackTs) {
+      const payload = await postSlackMessage(task.targetChannel, {
+        text: teamTaskPayloadText(task, 'target'),
+        unfurl_links: false,
+        client_msg_id: teamAuditClientId(task, 'target-payload'),
+      })
+      task.targetPayloadSlackTs = payload?.ts || null
+      saveStateNow(state)
+    }
+    if (!task.targetSlackTs) {
+      const target = await postSlackMessage(task.targetChannel, {
+        text: `${teamTaskStatusText(task)}\n⬅️ <#${task.sourceChannel}>`,
+        unfurl_links: false,
+        client_msg_id: teamAuditClientId(task, 'target'),
+      })
+      task.targetSlackTs = target?.ts || null
+      saveStateNow(state)
+    }
+  } catch (error) {
+    failTeamTask(state, task.id, `Slack audit delivery failed: ${error?.data?.error || error?.message || error}`)
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    throw new TeamError('slack_audit_failed', 'Slack could not create the required visible team-task audit trail.', 502)
+  }
+}
+
+async function updateTeamTaskAudit(task) {
+  const textFor = channel => channel === task.sourceChannel
+    ? `${teamTaskStatusText(task)}\n➡️ <#${task.targetChannel}> (\`${task.targetAlias}\`)`
+    : `${teamTaskStatusText(task)}\n⬅️ <#${task.sourceChannel}>`
+  let failure = null
+  for (const [channel, ts] of [[task.sourceChannel, task.sourceSlackTs], [task.targetChannel, task.targetSlackTs]]) {
+    if (!ts) continue
+    try { await enqueue(channel, () => web.chat.update({ channel, ts, text: textFor(channel) })) }
+    catch (error) {
+      failure ||= error
+      log('team audit update failed', task.id, channel, error?.data?.error || String(error))
+    }
+  }
+  return !failure
+}
+
+async function performTeamCompletionDelivery(task) {
+  if (!['completed', 'failed', 'cancelled'].includes(task.status)) return false
+  if (task.completionDeliveryStatus === 'delivered') return true
+  task.completionDeliveryStatus = 'delivering'
+  task.completionDeliveryAttempts = Number(task.completionDeliveryAttempts || 0) + 1
+  saveStateNow(state)
+  try {
+    const auditUpdated = await updateTeamTaskAudit(task)
+    const auditWarning = auditUpdated ? '' : '\n\n⚠️ The result is complete, but one or more earlier task status cards could not be updated.'
+    if (!task.completionSlackTs) {
+      const text = task.status === 'completed'
+        ? `📬 *Team result from* <#${task.targetChannel}> · \`${task.id}\`\n\n${task.result || '_Worker completed without text._'}${auditWarning}`
+        : `${teamTaskStatusText(task)} from <#${task.targetChannel}>${auditWarning}`
+      const message = await postSlackMessage(task.sourceChannel, {
+        text,
+        unfurl_links: false,
+        client_msg_id: teamAuditClientId(task, 'completion'),
+      })
+      task.completionSlackTs = message?.ts || null
+    }
+    task.completionDeliveryStatus = 'delivered'
+    task.completionDeliveryError = auditUpdated
+      ? null
+      : 'Completion was delivered, but one or more task status cards could not be updated.'
+    task.completionDeliveredAt = new Date().toISOString()
+    saveStateNow(state)
+    return true
+  } catch (error) {
+    task.completionDeliveryStatus = 'pending'
+    task.completionDeliveryError = String(error?.data?.error || error?.message || error).slice(0, 1000)
+    saveStateNow(state)
+    throw new TeamError('completion_delivery_failed', 'Slack did not accept the team completion update; SAB will retry it.', 502)
+  }
+}
+
+function ensureTeamCompletionDelivery(task) {
+  const existing = teamCompletionDeliveries.get(task.id)
+  if (existing) return existing
+  const operation = performTeamCompletionDelivery(task)
+  teamCompletionDeliveries.set(task.id, operation)
+  return operation.finally(() => {
+    if (teamCompletionDeliveries.get(task.id) === operation) teamCompletionDeliveries.delete(task.id)
+  })
+}
+
+function teamTargetBusy(session) {
+  return Boolean(
+    session.teamActiveTaskId || session.teamInputReservation ||
+    pollers.has(session.id) || codexPollers.has(session.id) || piPollers.has(session.id) ||
+    session.codexTurnStartedAt || session.piTurnStartedAt || pendingBySid.get(session.id)?.length ||
+    qforms.has(session.id) || hasPendingPerm(session) || activeTransition(session.channel) ||
+    updatingSessions.has(session.id) || restarting.has(session.id) || resurrectInFlight.has(session.id) || switchingSids.has(session.id) ||
+    internalTurns.has(session.id) || ['active', 'paused'].includes(session.managed?.status) ||
+    session.piRouting?.status === 'routing'
+  )
+}
+
+function removeTeamFiles(id) {
+  try { deleteTeamFiles(CONFIG_DIR, id) }
+  catch (error) { log('team file cleanup failed', id, String(error?.message || error)) }
+}
+
+function removeTeamTaskFiles(task) {
+  try { deleteTeamTaskFiles(CONFIG_DIR, task) }
+  catch (error) { log('team task file cleanup failed', task?.id, String(error?.message || error)) }
+}
+
+function stageTeamFiles(session, requestedPaths, id) {
+  return stagePrivateTeamFiles(CONFIG_DIR, session.cwd, requestedPaths, id)
+}
+
+async function uploadTeamFiles(channel, files, comment) {
+  if (!files.length) return
+  const options = {
+    channel_id: channel,
+    initial_comment: comment,
+    file_uploads: files.map(file => ({ file: file.path, filename: file.filename, title: file.filename })),
+  }
+  if (files.length === 1) {
+    delete options.file_uploads
+    options.file = files[0].path
+    options.filename = files[0].filename
+    options.title = files[0].filename
+  }
+  await enqueue(channel, () => web.filesUploadV2(options))
+  await bumpStatusForChannel(channel)
+}
+
+async function performTeamTaskFileDelivery(task) {
+  if (!task.files?.length || task.fileDeliveryStatus === 'none' || task.fileDeliveryStatus === 'uploaded') return true
+  if (task.fileDeliveryStatus === 'uploading') {
+    task.fileDeliveryStatus = 'failed'
+    task.fileDeliveryError = 'Slack file upload outcome became uncertain during daemon restart; SAB did not retry it to avoid duplicate delivery.'
+    failTeamTask(state, task.id, task.fileDeliveryError)
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    throw new TeamError('file_relay_uncertain', task.fileDeliveryError, 409)
+  }
+  if (task.fileDeliveryStatus === 'failed') {
+    throw new TeamError('file_relay_failed', task.fileDeliveryError || 'The team task file relay failed.', 409)
+  }
+  const team = state.teams?.[task.teamId]
+  const member = team && !team.closedAt ? team.members?.[task.targetChannel] : null
+  if (member?.role !== 'worker' || !member.files) {
+    task.fileDeliveryStatus = 'failed'
+    task.fileDeliveryError = 'Team file permission was revoked before this task could be delivered.'
+    failTeamTask(state, task.id, task.fileDeliveryError)
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    throw new TeamError('files_not_allowed', task.fileDeliveryError, 403)
+  }
+  task.fileDeliveryStatus = 'uploading'
+  saveStateNow(state)
+  try {
+    await uploadTeamFiles(task.targetChannel, task.files,
+      `📎 Team task \`${task.id}\` from <#${task.sourceChannel}>`)
+    task.fileDeliveryStatus = 'uploaded'
+    saveStateNow(state)
+    return true
+  } catch (error) {
+    task.fileDeliveryStatus = 'failed'
+    task.fileDeliveryError = `Slack file relay failed: ${error?.data?.error || error?.message || error}`
+    failTeamTask(state, task.id, task.fileDeliveryError)
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    throw new TeamError('file_relay_failed', 'Slack did not accept the team task files.', 502)
+  }
+}
+
+function ensureTeamTaskFileDelivery(task) {
+  const existing = teamTaskFileDeliveries.get(task.id)
+  if (existing) return existing
+  const operation = performTeamTaskFileDelivery(task)
+  teamTaskFileDeliveries.set(task.id, operation)
+  return operation.finally(() => {
+    if (teamTaskFileDeliveries.get(task.id) === operation) teamTaskFileDeliveries.delete(task.id)
+  })
+}
+
+async function notifyTeamReplyFileFailure(task, reply) {
+  if (reply.fileDeliveryNotifiedAt) return
+  const notified = await post(task.sourceChannel,
+    `⚠️ Team reply file delivery for \`${task.id}\` failed safely — ${String(reply.fileDeliveryError || 'unknown failure').slice(0, 800)}`)
+    .then(() => true, () => false)
+  if (!notified) return
+  reply.fileDeliveryNotifiedAt = new Date().toISOString()
+  saveStateNow(state)
+}
+
+async function performTeamReplyDelivery(task, reply) {
+  if (reply.text && !reply.textSlackTs) {
+    const message = await postSlackMessage(task.sourceChannel, {
+      text: `📨 *Team update from* <#${task.targetChannel}> · \`${task.id}\`\n\n${reply.text}`,
+      unfurl_links: false,
+      client_msg_id: teamAuditClientId(task, reply.id),
+    })
+    reply.textSlackTs = message?.ts || null
+    saveStateNow(state)
+  }
+  if (!reply.files?.length || reply.fileDeliveryStatus === 'none' || reply.fileDeliveryStatus === 'uploaded') return true
+  if (reply.fileDeliveryStatus === 'uploading') {
+    reply.fileDeliveryStatus = 'failed'
+    reply.fileDeliveryError = 'Slack file upload outcome became uncertain during daemon restart; SAB did not retry it to avoid duplicate delivery.'
+    saveStateNow(state)
+    await notifyTeamReplyFileFailure(task, reply)
+    throw new TeamError('file_relay_uncertain', reply.fileDeliveryError, 409)
+  }
+  if (reply.fileDeliveryStatus === 'failed') {
+    await notifyTeamReplyFileFailure(task, reply)
+    throw new TeamError('file_relay_failed', reply.fileDeliveryError || 'The team reply file relay failed.', 409)
+  }
+  const team = state.teams?.[task.teamId]
+  const member = team && !team.closedAt ? team.members?.[task.targetChannel] : null
+  if (member?.role !== 'worker' || !member.files) {
+    reply.fileDeliveryStatus = 'failed'
+    reply.fileDeliveryError = 'Team file permission was revoked before this reply could be delivered.'
+    saveStateNow(state)
+    await notifyTeamReplyFileFailure(task, reply)
+    throw new TeamError('files_not_allowed', reply.fileDeliveryError, 403)
+  }
+  reply.fileDeliveryStatus = 'uploading'
+  saveStateNow(state)
+  try {
+    await uploadTeamFiles(task.sourceChannel, reply.files,
+      `📎 Team reply for \`${task.id}\` from <#${task.targetChannel}>`)
+    reply.fileDeliveryStatus = 'uploaded'
+    saveStateNow(state)
+    return true
+  } catch (error) {
+    reply.fileDeliveryStatus = 'failed'
+    reply.fileDeliveryError = `Slack file relay failed: ${error?.data?.error || error?.message || error}`
+    saveStateNow(state)
+    await notifyTeamReplyFileFailure(task, reply)
+    throw new TeamError('file_relay_failed', 'Slack did not accept the team reply files.', 502)
+  }
+}
+
+function ensureTeamReplyDelivery(task, reply) {
+  const existing = teamReplyDeliveries.get(reply.id)
+  if (existing) return existing
+  const operation = performTeamReplyDelivery(task, reply)
+  teamReplyDeliveries.set(reply.id, operation)
+  return operation.finally(() => {
+    if (teamReplyDeliveries.get(reply.id) === operation) teamReplyDeliveries.delete(reply.id)
+  })
+}
+
+async function resolveTeamCaller({ ppid, tmux, provider: providerValue }) {
+  const provider = normalizeProvider(providerValue, null)
+  const tname = String(tmux || '')
+  if (!provider || !tname) throw new TeamError('unauthorized_session', 'The command must come from a live bridged session.', 403)
+  const pid = await resolveAgentPid(ppid, provider)
+  const session = sessionByPid(pid)
+  const tmuxClaimed = Boolean(session) && await validProviderRootClaim(pid, tname, provider)
+  const valid = validTeamCallerBinding(state, session, {
+    pid, tmux: tname, provider, live: pidAlive(pid), tmuxClaimed,
+  })
+  if (!valid) {
+    throw new TeamError('unauthorized_session', 'The command must come from its exact authoritative live session.', 403)
+  }
+  return session
+}
+
+function requireTeamCallerContext(session) {
+  const context = teamContext(state, session.channel)
+  if (!context) throw new TeamError('not_a_team_member', 'This SAB session channel is not in an active team.', 404)
+  return context
+}
+
+function teamRuntimeContext(session) {
+  const context = requireTeamCallerContext(session)
+  const team = teamById(state, context.id)
+  const peers = context.peers.map(peer => {
+    const channel = Object.entries(team.members || {}).find(([, member]) => member.alias === peer.alias)?.[0]
+    const target = channel ? sessionByChannel(channel) : null
+    const authoritative = Boolean(target && state.channels?.[channel] === target.id && target.channel === channel)
+    const live = authoritative && target.pid && pidAlive(target.pid)
+    const availability = !authoritative ? 'unavailable'
+      : activeTransition(channel) ? 'switching'
+        : !live ? 'dormant'
+          : teamTargetBusy(target) ? 'busy' : 'ready'
+    return {
+      ...peer,
+      provider: authoritative ? providerOf(target) : null,
+      availability,
+    }
+  })
+  return { ...context, peers }
+}
+
+async function dispatchTeamTask(task) {
+  if (task.status !== 'queued') return false
+  if (!task.sourcePayloadSlackTs || !task.sourceSlackTs || !task.targetPayloadSlackTs || !task.targetSlackTs) {
+    try { await ensureTeamTaskAudit(task) }
+    catch { return false }
+  }
+  let team
+  try { team = teamById(state, task.teamId) }
+  catch (error) {
+    failTeamTask(state, task.id, error.message)
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    return false
+  }
+  const sourceMember = team.members?.[task.sourceChannel]
+  const targetMember = team.members?.[task.targetChannel]
+  if (sourceMember?.role !== 'coordinator' || targetMember?.role !== 'worker') {
+    failTeamTask(state, task.id, 'Team membership changed before delivery.')
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    return false
+  }
+  const target = sessionByChannel(task.targetChannel)
+  if (!target || state.channels?.[task.targetChannel] !== target.id) {
+    failTeamTask(state, task.id, 'The target channel no longer has an authoritative SAB session.')
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    return false
+  }
+  try { await ensureTeamTaskFileDelivery(task) }
+  catch { return false }
+  if (task.status !== 'queued') return false
+  if (!(target.pid && pidAlive(target.pid) && target.tmux && await tmuxAlive(target.tmux))) return false
+  if (teamTargetBusy(target)) return false
+  const prompt = delegatedTaskPrompt(team, task, task.files)
+  claimTeamTask(state, task.id, {
+    targetSessionId: target.id,
+    targetProvider: providerOf(target),
+    targetNodeId: nodeIdForSession(target),
+  })
+  target.teamActiveTaskId = task.id
+  clearTeamTurn(target)
+  saveStateNow(state)
+  await updateTeamTaskAudit(task)
+  try {
+    if (providerOf(target) === 'pi') await injectText(target, prompt, { route: 'native', files: task.files })
+    else await injectText(target, prompt)
+    log('team task injection accepted; awaiting provider marker', task.id,
+      task.sourceChannel, '→', task.targetChannel, target.id.slice(0, 8))
+    return true
+  } catch (error) {
+    delete target.teamActiveTaskId
+    failTeamTask(state, task.id, `Provider injection failed: ${String(error?.message || error).slice(0, 1000)}`)
+    saveStateNow(state)
+    await updateTeamTaskAudit(task)
+    return false
+  }
+}
+
+async function reconcileTeamTasks() {
+  if (teamReconcileRunning) return
+  teamReconcileRunning = true
+  try {
+    const now = Date.now()
+    const tasks = Object.values(state.teamTasks || {}).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+    for (const task of tasks) {
+      const terminal = ['completed', 'failed', 'cancelled'].includes(task.status)
+      // Tasks written by the first session-team implementation predate the
+      // durable completion-delivery claim. Their terminal result was already
+      // posted synchronously, so mark it delivered instead of duplicating it
+      // during the first reconciliation after upgrade.
+      if (terminal && !Object.hasOwn(task, 'completionDeliveryStatus')) {
+        task.completionDeliveryStatus = 'delivered'
+        task.completionDeliveryError = null
+        task.completionDeliveredAt = task.completedAt || task.updatedAt || new Date(now).toISOString()
+        saveStateNow(state)
+      }
+      for (const reply of task.replies || []) {
+        if (!reply.textSlackTs || ['pending', 'uploading'].includes(reply.fileDeliveryStatus) ||
+            (reply.fileDeliveryStatus === 'failed' && !reply.fileDeliveryNotifiedAt)) {
+          await ensureTeamReplyDelivery(task, reply).catch(error =>
+            log('team reply reconciliation failed', task.id, reply.id, String(error?.message || error)))
+        }
+      }
+      if (terminal && task.completionDeliveryStatus !== 'delivered') {
+        await ensureTeamCompletionDelivery(task).catch(error =>
+          log('team completion reconciliation failed', task.id, String(error?.message || error)))
+      }
+      if (terminal && teamTaskDeliverySettled(task) && Date.parse(task.expiresAt || 0) <= now) {
+        delete state.teamTasks[task.id]
+        saveStateNow(state)
+        removeTeamTaskFiles(task)
+        continue
+      }
+      if (['queued', 'dispatching', 'running'].includes(task.status) && Date.parse(task.expiresAt || 0) <= now) {
+        const target = task.targetSessionId ? state.sessions?.[task.targetSessionId] : null
+        if (target?.teamActiveTaskId === task.id) delete target.teamActiveTaskId
+        if (target) {
+          discardQueuedTeamTaskPrompt(target, task.id)
+          clearTeamTurn(target)
+          clearTeamInputReservation(target)
+          teamTurnProof.delete(target.id)
+        }
+        failTeamTask(state, task.id, 'The delegated team task exceeded its seven-day lifetime and was released safely.')
+        saveStateNow(state)
+        await ensureTeamCompletionDelivery(task).catch(error =>
+          log('team expiry delivery deferred', task.id, String(error?.message || error)))
+      } else if (task.status === 'queued') await dispatchTeamTask(task)
+      else if (['dispatching', 'running'].includes(task.status)) {
+        const target = state.sessions?.[task.targetSessionId]
+        if (!target || target.channel !== task.targetChannel || state.channels?.[task.targetChannel] !== target.id ||
+            !(target.pid && pidAlive(target.pid))) {
+          if (target?.teamActiveTaskId === task.id) {
+            delete target.teamActiveTaskId
+            discardQueuedTeamTaskPrompt(target, task.id)
+          }
+          failTeamTask(state, task.id, 'The assigned worker session ended or lost channel authority.')
+          saveStateNow(state)
+          await ensureTeamCompletionDelivery(task).catch(error =>
+            log('team authority-loss delivery deferred', task.id, String(error?.message || error)))
+        } else if (task.status === 'dispatching' && Date.parse(task.dispatchClaimedAt || 0) + 5 * 60 * 1000 <= now &&
+            !pollers.has(target.id) && !codexPollers.has(target.id) && !piPollers.has(target.id)) {
+          delete target.teamActiveTaskId
+          discardQueuedTeamTaskPrompt(target, task.id)
+          failTeamTask(state, task.id, 'Delivery became uncertain before the provider acknowledged the delegated turn; SAB did not retry it to avoid duplicate work.')
+          saveStateNow(state)
+          await ensureTeamCompletionDelivery(task).catch(error =>
+            log('team dispatch failure delivery deferred', task.id, String(error?.message || error)))
+        } else if (task.status === 'running' && Date.parse(task.startedAt || 0) < teamDaemonStartedAt &&
+            Date.now() - teamDaemonStartedAt >= TEAM_RESTART_PROOF_GRACE_MS && !teamTurnProof.has(target.id)) {
+          delete target.teamActiveTaskId
+          clearTeamInputReservation(target)
+          failTeamTask(state, task.id,
+            'The daemon restarted while this worker turn was active, but no live-turn proof returned; SAB released it without retrying or misattributing a final.')
+          saveStateNow(state)
+          await ensureTeamCompletionDelivery(task).catch(error =>
+            log('team restart recovery delivery deferred', task.id, String(error?.message || error)))
+        }
+      }
+    }
+  } finally { teamReconcileRunning = false }
+}
+
+function startTeamReconciler() {
+  if (teamReconciler) return
+  teamReconciler = setInterval(() => reconcileTeamTasks().catch(error => log('team reconciliation failed', String(error))), TEAM_RECONCILE_MS)
+  teamReconciler.unref?.()
+  reconcileTeamTasks().catch(error => log('team reconciliation failed', String(error)))
+}
+
+async function finishTeamTaskForSession(session, result, error = null) {
+  const taskId = session.teamActiveTaskId
+  const finalText = String(result || '').trim()
+  const revokedTurn = clearTeamTurn(session)
+  if (!taskId) {
+    if (revokedTurn) saveStateNow(state)
+    else saveState(state)
+    return false
+  }
+  delete session.teamActiveTaskId
+  let task
+  try {
+    task = teamTask(state, taskId)
+    if (error || !finalText) failTeamTask(state, task.id, error || 'The worker turn ended without a stable final response.')
+    else completeTeamTask(state, task.id, { targetSessionId: session.id, result: finalText })
+  } catch (failure) {
+    log('team task completion rejected', taskId, String(failure?.message || failure))
+    saveStateNow(state)
+    return false
+  }
+  saveStateNow(state)
+  await ensureTeamCompletionDelivery(task).catch(failure =>
+    log('team completion delivery deferred', task.id, String(failure?.message || failure)))
+  teamTurnProof.delete(session.id)
+  setImmediate(() => reconcileTeamTasks().catch(failure => log('team follow-up dispatch failed', String(failure))))
+  return true
+}
+
+async function failTeamTaskForSession(session, reason) {
+  const taskId = session?.teamActiveTaskId
+  const revokedTurn = clearTeamTurn(session)
+  if (!taskId) {
+    if (revokedTurn) saveStateNow(state)
+    return false
+  }
+  delete session.teamActiveTaskId
+  discardQueuedTeamTaskPrompt(session, taskId)
+  let task
+  try { task = failTeamTask(state, taskId, reason) }
+  catch { saveStateNow(state); return false }
+  saveStateNow(state)
+  await ensureTeamCompletionDelivery(task).catch(error =>
+    log('team failure delivery deferred', task.id, String(error?.message || error)))
+  teamTurnProof.delete(session.id)
+  return true
+}
+
+const teamService = {
+  async context(caller) {
+    const session = await resolveTeamCaller(caller)
+    return teamRuntimeContext(session)
+  },
+  async peers(caller) {
+    const session = await resolveTeamCaller(caller)
+    return teamRuntimeContext(session).peers
+  },
+  async inbox(caller, { limit, after } = {}) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    return tasksForChannel(state, session.channel, { limit, after }).map(task => publicTeamTask(task, session.channel))
+  },
+  async task(caller, taskId) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    return publicTeamTask(teamTask(state, taskId), session.channel)
+  },
+  async send(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    const context = requireTeamCallerContext(session)
+    if (context.role !== 'coordinator') throw new TeamError('dispatch_not_allowed', 'Only the team coordinator may create worker tasks.', 403)
+    if (activeTransition(session.channel) || switchingSids.has(session.id)) throw new TeamError('source_switching', 'The coordinator is switching providers.', 409)
+    const destination = resolveTeamPeer(state, context.id, request.to)
+    const destinationSession = sessionByChannel(destination.channel)
+    if (!destinationSession || state.channels?.[destination.channel] !== destinationSession.id ||
+        destinationSession.channel !== destination.channel || nodeIdForSession(destinationSession) !== LOCAL_NODE_ID) {
+      throw new TeamError('target_authority_lost', 'That worker no longer has an authoritative local SAB session.', 409)
+    }
+    const prior = teamTaskForRequest(state, session.channel, request.requestId)
+    if (prior) {
+      let retryFiles = []
+      try {
+        retryFiles = request.paths?.length ? teamSourceFileMetadata(session.cwd, request.paths) : []
+      }
+      catch (error) {
+        if (error instanceof ArtifactUploadError) throw new TeamError(error.code, error.message, error.status)
+        throw error
+      }
+      assertTeamTaskRetry(state, prior, { teamId: context.id, target: request.to, text: request.text, files: retryFiles })
+      return { task: publicTeamTask(prior, session.channel), created: false }
+    }
+    assertCoordinatorDispatch(session)
+    const taskId = `task_${crypto.randomBytes(12).toString('base64url')}`
+    let files = []
+    try { files = stageTeamFiles(session, request.paths || [], taskId) }
+    catch (error) {
+      if (error instanceof ArtifactUploadError) throw new TeamError(error.code, error.message, error.status)
+      throw error
+    }
+    let result
+    try {
+      result = createTeamTask(state, {
+        id: taskId,
+        teamId: context.id,
+        sourceChannel: session.channel,
+        sourceSessionId: session.id,
+        sourceProvider: providerOf(session),
+        sourceNodeId: nodeIdForSession(session),
+        target: request.to,
+        text: request.text,
+        files,
+        requestId: request.requestId,
+      })
+    } catch (error) {
+      if (files.length) removeTeamFiles(taskId)
+      throw error
+    }
+    consumeCoordinatorDispatch(session)
+    saveStateNow(state)
+    for (const removed of result.pruned || []) removeTeamTaskFiles(removed)
+    await ensureTeamTaskAudit(result.task)
+    await dispatchTeamTask(result.task)
+    return { task: publicTeamTask(result.task, session.channel), created: true }
+  },
+  async reply(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    const task = teamTask(state, request.taskId)
+    if (task.targetChannel !== session.channel || task.targetSessionId !== session.id) {
+      throw new TeamError('reply_not_allowed', 'This native worker session does not own that task.', 403)
+    }
+    const priorReply = task.replies.find(reply => reply.requestId === request.requestId)
+    if (priorReply) {
+      let retryFiles = []
+      try { retryFiles = request.paths?.length ? teamSourceFileMetadata(session.cwd, request.paths) : [] }
+      catch (error) {
+        if (error instanceof ArtifactUploadError) throw new TeamError(error.code, error.message, error.status)
+        throw error
+      }
+      const appended = appendTeamTaskReply(state, task.id, {
+        requestId: request.requestId, fromChannel: session.channel, text: request.text, files: retryFiles,
+      })
+      await ensureTeamReplyDelivery(task, appended.reply)
+      return {
+        reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === appended.reply.id),
+        task: publicTeamTask(task, task.sourceChannel),
+        created: false,
+      }
+    }
+    if (session.teamActiveTaskId !== task.id) {
+      throw new TeamError('reply_not_allowed', 'This live worker session no longer owns that active task.', 403)
+    }
+    const { member } = resolveTeamPeer(state, task.teamId, session.channel)
+    const replyId = `reply_${crypto.randomBytes(12).toString('base64url')}`
+    if (request.paths?.length && !member.files) throw new TeamError('files_not_allowed', 'File relay is not enabled for this worker.', 403)
+    let files = []
+    try { files = stageTeamFiles(session, request.paths || [], replyId) }
+    catch (error) {
+      if (error instanceof ArtifactUploadError) throw new TeamError(error.code, error.message, error.status)
+      throw error
+    }
+    let appended
+    try {
+      appended = appendTeamTaskReply(state, task.id, {
+        id: replyId, requestId: request.requestId, fromChannel: session.channel, text: request.text, files,
+      })
+    } catch (error) {
+      if (files.length) removeTeamFiles(replyId)
+      throw error
+    }
+    const reply = appended.reply
+    if (!appended.created) {
+      if (files.length) removeTeamFiles(replyId)
+      await ensureTeamReplyDelivery(task, reply)
+      return {
+        reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === reply.id),
+        task: publicTeamTask(task, task.sourceChannel),
+        created: false,
+      }
+    }
+    saveStateNow(state)
+    await ensureTeamReplyDelivery(task, reply)
+    return { reply: publicTeamTask(task, task.sourceChannel).replies.at(-1), task: publicTeamTask(task, task.sourceChannel), created: true }
+  },
 }
 
 const sessionMeta = new Map() // sid → { model, effort } as set via the bridge
@@ -2944,9 +3812,157 @@ async function setPiSetting(session, name, value) {
 // right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
 const defaultNewFlags = (provider = 'claude') => defaultNewFlagsFor(provider)
 
+function teamStatusMarkdown(team) {
+  const rows = Object.entries(team.members || {}).map(([channel, member]) => {
+    const session = sessionByChannel(channel)
+    const live = Boolean(session?.pid && pidAlive(session.pid))
+    const task = Object.values(state.teamTasks || {}).find(item => item.targetChannel === channel && ['queued', 'dispatching', 'running'].includes(item.status))
+    return `| ${member.alias} | ${member.role} | <#${channel}> | ${live ? '🟢 live' : '💤 dormant'} | ${member.files ? 'enabled' : 'off'} | ${task ? `\`${task.id}\` · ${task.status}` : '—'} |`
+  })
+  return `*Session team \`${team.name}\`* · version ${team.version}\n` +
+    `| Alias | Role | Channel | Session | Files | Active task |\n|---|---|---|---|---|---|\n${rows.join('\n')}`
+}
+
+async function postTeamAddPicker(channel, team) {
+  return postSlackMessage(channel, {
+    text: `Add a worker to ${team.name}`,
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: `*Add a worker to* \`${team.name}\`\nOnly an authoritative private SAB session channel will be accepted.` } },
+      { type: 'actions', elements: [{
+        type: 'conversations_select',
+        action_id: `team_add_channel:${team.id}`,
+        placeholder: { type: 'plain_text', text: 'Choose a SAB session channel' },
+        filter: { include: ['private'] },
+      }] },
+    ],
+  })
+}
+
+async function announceCancelledTeamTasks(ids) {
+  for (const id of ids) {
+    const task = state.teamTasks?.[id]
+    if (!task) continue
+    await ensureTeamCompletionDelivery(task).catch(error =>
+      log('team cancellation delivery deferred', task.id, String(error?.message || error)))
+  }
+}
+
+function revokeCancelledTeamTasks(ids) {
+  for (const id of ids) {
+    const task = state.teamTasks?.[id]
+    const target = task && state.sessions?.[task.targetSessionId]
+    if (target?.teamActiveTaskId === id) {
+      delete target.teamActiveTaskId
+      discardQueuedTeamTaskPrompt(target, id)
+      clearTeamInputReservation(target)
+      clearTeamTurn(target)
+      teamTurnProof.delete(target.id)
+    }
+  }
+}
+
+async function handleTeamCommand(channel, rest) {
+  const session = sessionByChannel(channel)
+  if (!session) return post(channel, 'Use `/sab-team` in an authoritative SAB session channel.')
+  const sub = String(rest[0] || 'status').toLowerCase()
+  if (sub === 'create') {
+    if (rest.length !== 2) return post(channel, 'Usage: `/sab-team create <name>`')
+    if (activeTransition(channel)) return post(channel, '⏳ Wait for the provider switch to finish before creating a team.')
+    try {
+      const team = createTeam(state, {
+        name: rest[1], coordinatorChannel: channel, createdBy: USER,
+      })
+      saveStateNow(state)
+      await post(channel, `🕸️ *Created session team* \`${team.name}\`. This channel is its coordinator. Add workers with \`/sab-team add\`.`)
+      return postMd(channel, teamStatusMarkdown(team))
+    } catch (error) {
+      if (error instanceof TeamError) return post(channel, `❌ ${error.message}`)
+      throw error
+    }
+  }
+  const team = activeTeamForChannel(state, channel)
+  if (!team) return post(channel, 'This channel is not in an active session team. Create one with `/sab-team create <name>` from the intended coordinator channel.')
+  if (sub === 'status') {
+    if (rest.length !== 1) return post(channel, 'Usage: `/sab-team status`')
+    return postMd(channel, teamStatusMarkdown(team))
+  }
+  if (team.coordinatorChannel !== channel) {
+    return post(channel, `This channel is a worker in \`${team.name}\`. Team membership is managed from <#${team.coordinatorChannel}>.`)
+  }
+  if (activeTransition(channel)) return post(channel, '⏳ Wait for the provider switch to finish before changing team membership.')
+  if (sub === 'add') {
+    if (rest.length !== 1) return post(channel, 'Usage: `/sab-team add`')
+    return postTeamAddPicker(channel, team)
+  }
+  if (sub === 'permissions' && rest.length === 1) {
+    const rows = Object.entries(team.members || {})
+      .filter(([, member]) => member.role === 'worker')
+      .map(([memberChannel, member]) => `| ${member.alias} | <#${memberChannel}> | text + status + final | ${member.files ? 'enabled' : 'off'} |`)
+    return postMd(channel,
+      `*Session team permissions* — coordinator → worker tasks; worker → coordinator replies only. Worker-to-worker relay is disabled.\n` +
+      `| Worker | Channel | Text | Files |\n|---|---|---|---|\n${rows.join('\n') || '| _none_ | | | |'}`)
+  }
+  if (sub === 'files' || sub === 'permissions') {
+    const alias = rest[1]
+    const capability = sub === 'files' ? 'files' : String(rest[2] || '').toLowerCase()
+    const setting = sub === 'files' ? rest[2] : rest[3]
+    if ((sub === 'files' && rest.length !== 3) ||
+        (sub === 'permissions' && (rest.length !== 4 || capability !== 'files')) ||
+        !['on', 'off'].includes(String(setting).toLowerCase())) {
+      return post(channel, 'Usage: `/sab-team permissions` or `/sab-team permissions <worker-alias> files <on|off>`')
+    }
+    try {
+      const result = setTeamWorkerFiles(state, team.id, alias, String(setting).toLowerCase() === 'on')
+      saveStateNow(state)
+      const targetNotified = await post(result.channel,
+        `${result.member.files ? '📎' : '🔒'} Team file relay is now *${result.member.files ? 'enabled' : 'off'}* for \`${result.member.alias}\`.`)
+        .then(() => true, () => false)
+      return post(channel,
+        `${result.member.files ? '📎 Enabled' : '🔒 Disabled'} file relay for \`${result.member.alias}\` (<#${result.channel}>).` +
+        (targetNotified ? '' : ' ⚠️ The setting is durable, but Slack could not post the worker notification.'))
+    } catch (error) {
+      if (error instanceof TeamError) return post(channel, `❌ ${error.message}`)
+      throw error
+    }
+  }
+  if (sub === 'remove') {
+    if (rest.length !== 2) return post(channel, 'Usage: `/sab-team remove <worker-alias>`')
+    try {
+      const result = removeTeamWorker(state, team.id, rest[1])
+      revokeCancelledTeamTasks(result.cancelled)
+      clearTeamTurn(sessionByChannel(result.channel))
+      saveStateNow(state)
+      await announceCancelledTeamTasks(result.cancelled)
+      const targetNotified = await post(result.channel,
+        `🚫 Removed from session team \`${team.name}\`. No new cross-channel work can be sent or returned.`)
+        .then(() => true, () => false)
+      return post(channel, `🚫 Removed \`${result.member.alias}\` (<#${result.channel}>) from \`${team.name}\`.` +
+        (targetNotified ? '' : ' ⚠️ The revocation is durable, but Slack could not post the worker notification.'))
+    } catch (error) {
+      if (error instanceof TeamError) return post(channel, `❌ ${error.message}`)
+      throw error
+    }
+  }
+  if (sub === 'close') {
+    if (rest.length !== 1) return post(channel, 'Usage: `/sab-team close`')
+    const memberChannels = Object.keys(team.members)
+    const result = closeTeam(state, team.id)
+    revokeCancelledTeamTasks(result.cancelled)
+    for (const memberChannel of memberChannels) clearTeamTurn(sessionByChannel(memberChannel))
+    saveStateNow(state)
+    await announceCancelledTeamTasks(result.cancelled)
+    for (const memberChannel of memberChannels) {
+      await post(memberChannel, `🕸️ Session team \`${team.name}\` was closed. Existing provider sessions are unaffected.`).catch(() => {})
+    }
+    return
+  }
+  return post(channel,
+    'Usage: `/sab-team create <name>`, `/sab-team add`, `/sab-team status`, `/sab-team permissions`, `/sab-team remove <alias>`, or `/sab-team close`.')
+}
+
 const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags', 'switch', 'run', 'terminal'])
 const CLAUDE_ONLY_COMMANDS = new Set(['account'])
-const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup'])
+const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup', 'team'])
 
 function commandHelp(provider = null) {
   const context = provider ? ` This channel currently uses *${providerLabel(provider)}*.` : ''
@@ -2957,6 +3973,7 @@ function commandHelp(provider = null) {
     '`/sab-switch <claude|codex|pi> [new]` — hand this channel to another provider\n' +
     '`/sab-status [provider]` · `/sab-usage [provider] …` — current session or control-channel overview\n' +
     '`/sab-terminal open|close|list|open-all|close-all` — manage optional Ghostty viewports\n' +
+    '`/sab-team create|add|status|permissions|remove|close` — link sessions for safe agent delegation\n' +
     '`/sab-run …` — Pi managed runs · `/sab-account …` — Claude subscriptions\n' +
     '`/sab-health` · `/sab-cleanup` · `/sab-claim` — bridge-wide operations'
 }
@@ -2971,9 +3988,11 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   if (name === 'help') {
     return post(channel, commandHelp(commandProvider))
   }
+  if (name === 'team' && ingressProvider) return post(channel, 'Use the provider-neutral `/sab-team` command.')
   if (ingressProvider && ingressProvider !== 'claude' && (CLAUDE_ONLY_COMMANDS.has(name) || BRIDGE_COMMANDS.has(name))) {
     return post(channel, `${BRIDGE_COMMANDS.has(name) ? `Use the bridge-wide \`/sab-${name}\`.` : `\`/sab-${name}\` is Claude-only.`}`)
   }
+  if (name === 'team') return handleTeamCommand(channel, rest)
   if (channelSession && ingressProvider && SESSION_SCOPED_COMMANDS.has(name) && providerOf(channelSession) !== ingressProvider) {
     const actualProvider = providerOf(channelSession)
     return post(channel, `This is a ${providerLabel(actualProvider)} session. Use \`${slackCommand(actualProvider, name === 'restart' ? 'update' : name)}\` here.`)
@@ -2981,6 +4000,10 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   const channelTransition = activeTransition(channel)
   if (channelTransition && SESSION_SCOPED_COMMANDS.has(name) && !['status', 'switch', 'terminal'].includes(name)) {
     return post(channel, `⏳ Provider switch is in its \`${channelTransition.phase}\` phase. Wait for commit/rollback before changing or ending either native leg.`)
+  }
+  if (channelSession?.teamActiveTaskId && SESSION_SCOPED_COMMANDS.has(name) &&
+      !['status', 'usage', 'stop', 'kill', 'terminal'].includes(name)) {
+    return post(channel, `🕸️ Team task \`${channelSession.teamActiveTaskId}\` owns this worker turn. Wait for its final response or interrupt/end it before changing provider settings.`)
   }
   if (name === 'terminal') {
     let action = String(rest[0] || (channelSession ? 'list' : 'list')).toLowerCase()
@@ -3169,14 +4192,25 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
     stopPoller(target)
     await clearStatus(target)
+    await failTeamTaskForSession(target, 'The worker session was ended before completing its delegated task.')
     clearPermissionsForPid(target.pid, 'session ended')
     target.pid = null
     saveState(state)
     return post(channel, `🛑 Ended session \`${target.id.slice(0, 8)}\` (${path.basename(target.cwd)}). The channel stays — write here to resume.`)
   }
   if (name === 'cleanup') {
-    const dead = Object.values(state.sessions).filter(s => s.channel && s.channel !== channel && !(s.pid && pidAlive(s.pid)))
-    if (!dead.length) return post(channel, 'No dormant channels to archive (skipping the one you’re in).')
+    const dormant = Object.values(state.sessions).filter(s => s.channel && s.channel !== channel && !(s.pid && pidAlive(s.pid)))
+    const protectedByTeam = session => {
+      try { return Boolean(activeTeamForChannel(state, session.channel)) }
+      catch { return true }
+    }
+    const teamProtected = dormant.filter(protectedByTeam)
+    const dead = dormant.filter(session => !protectedByTeam(session))
+    if (!dead.length) {
+      return post(channel, teamProtected.length
+        ? `No dormant channels are eligible for archival. ${teamProtected.length} dormant team channel(s) were preserved; remove or close their team membership first.`
+        : 'No dormant channels to archive (skipping the one you’re in).')
+    }
     let n = 0
     for (const s of dead) {
       try { await web.conversations.archive({ channel: s.channel }); n++ }
@@ -3185,7 +4219,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       deleteHandoffs(CONFIG_DIR, s.channel)
     }
     saveState(state)
-    return post(channel, `🧹 Archived ${n} dormant channel(s). Note: archived channels can’t auto-resume — unarchive manually in Slack if you need one back.`)
+    return post(channel, `🧹 Archived ${n} dormant channel(s).${teamProtected.length ? ` Preserved ${teamProtected.length} dormant team channel(s).` : ''} Note: archived channels can’t auto-resume — unarchive manually in Slack if you need one back.`)
   }
   if (name === 'model' || name === 'effort') {
     const session = sessionByChannel(channel)
@@ -3267,17 +4301,21 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   if (name === 'stop') {
     const session = sessionByChannel(channel)
     if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, 'No active session here to interrupt.')
+    clearTeamTurn(session)
+    saveStateNow(state)
     const activeProvider = providerOf(session)
     if (activeProvider === 'pi') {
       let result
       try { result = await sendPiControl(session, 'abort') }
       catch (error) { return post(channel, `⚠️ Pi interrupt failed: ${String(error?.message || error).slice(0, 200)}`) }
+      await failTeamTaskForSession(session, 'The delegated worker turn was interrupted by the owner.')
       if (result?.managed?.routing_cancelled) return post(channel, '⎋ *Interrupted* adaptive routing; the queued prompt was not delivered.')
       if (result?.managed?.status === 'paused') return post(channel, '⎋ *Interrupted* the turn and paused its managed run. Resume with `/sab-run continue`.')
     } else if (activeProvider === 'codex') {
       const interruptedTurnStartedAt = session.codexTurnStartedAt ?? null
       try { await tmuxInterrupt(session.tmux, 'codex') }
       catch (error) { return post(channel, `⚠️ Codex interrupt could not be sent: ${String(error?.message || error).slice(0, 200)}`) }
+      await failTeamTaskForSession(session, 'The delegated worker turn was interrupted by the owner.')
       const outcome = await waitForCodexInterrupt(session, { getPane: () => tmuxCapture(session.tmux) })
       if (outcome === 'hook') return post(channel, '⎋ *Interrupted* the running turn.')
       if (outcome === 'superseded' || (session.codexTurnStartedAt ?? null) !== interruptedTurnStartedAt) {
@@ -3291,7 +4329,10 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
           : '⎋ *Interrupted* the running turn. Codex returned to idle and its working status was cleared.')
       }
       return post(channel, '⚠️ Interrupt sent, but Codex did not return to idle within 5 seconds. The working status remains active; retry `/sab-stop` or inspect the terminal with `/sab-terminal open`.')
-    } else await tmuxInterrupt(session.tmux, activeProvider)
+    } else {
+      await tmuxInterrupt(session.tmux, activeProvider)
+      await failTeamTaskForSession(session, 'The delegated worker turn was interrupted by the owner.')
+    }
     return post(channel, '⎋ *Interrupted* the running turn.')
   }
   if (name === 'usage') {
@@ -3523,6 +4564,7 @@ const terminalControl = createTerminalControl({
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
   if (await handleNodeHttp(req, res, url, getNodeManagement)) return
+  if (await handleTeamHttp(req, res, url, teamService)) return
   if (await handleAutomationHttp(req, res, url, automationLifecycle)) return
   if (await handleTerminalHttp(req, res, url, terminalControl)) return
   if (url.pathname === '/codex/commentary' && req.method === 'POST') {
@@ -3878,7 +4920,7 @@ http.createServer(async (req, res) => {
       }
       const pid = await resolveAgentPid(url.searchParams.get('ppid'), provider)
       const session = sessionByPid(pid)
-      const validClaim = session?.tmux === tmux && await validTmuxClaim(pid, tmux)
+      const validClaim = session?.tmux === tmux && await validProviderRootClaim(pid, tmux, provider)
       if (!session?.channel || providerOf(session) !== provider || !validClaim || !pidAlive(pid)) {
         throw new ArtifactUploadError('unauthorized_session', 'The upload must come from its authorized live session.', 403)
       }
@@ -4057,6 +5099,46 @@ async function handleSocketInteractive({ body }) {
       if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), defaultNewFlags(provider), provider)
       return
     }
+    if (String(action.action_id || '').startsWith('team_add_channel:')) {
+      const teamId = String(action.action_id).slice('team_add_channel:'.length)
+      const sourceChannel = body.channel?.id
+      const targetChannel = action.selected_conversation
+      try {
+        const team = teamById(state, teamId)
+        if (!sourceChannel || team.coordinatorChannel !== sourceChannel) {
+          throw new TeamError('not_team_coordinator', 'This picker no longer belongs to the team coordinator channel.', 403)
+        }
+        const target = sessionByChannel(targetChannel)
+        if (!target || state.channels?.[targetChannel] !== target.id) {
+          throw new TeamError('not_sab_channel', 'The selected channel is not an authoritative SAB session channel.')
+        }
+        if (activeTransition(targetChannel)) throw new TeamError('target_switching', 'The selected channel is switching providers.')
+        const info = await web.conversations.info({ channel: targetChannel })
+        if (!info.channel?.is_private || info.channel?.is_archived) {
+          throw new TeamError('invalid_target_channel', 'Choose an active private SAB session channel.')
+        }
+        const alias = normalizeTeamAlias(info.channel.name || `worker-${target.id.slice(0, 8)}`)
+        const member = addTeamWorker(state, team.id, { channel: targetChannel, alias })
+        saveStateNow(state)
+        try {
+          await post(targetChannel,
+            `🕸️ Joined session team \`${team.name}\` as worker \`${member.alias}\`. <#${sourceChannel}> is the coordinator. ` +
+            'Delegated tasks carry an immutable task ID; stable final responses return automatically.')
+          await post(sourceChannel,
+            `✅ Added <#${targetChannel}> as worker \`${member.alias}\` in \`${team.name}\`. Text delegation is enabled; file relay remains off until \`/sab-team permissions ${member.alias} files on\`.`)
+        } catch (notificationError) {
+          removeTeamWorker(state, team.id, member.alias)
+          saveStateNow(state)
+          await post(targetChannel, `⚠️ Team join rolled back because SAB could not report it in both affected channels.`).catch(() => {})
+          throw new TeamError('team_join_audit_failed',
+            `The membership was rolled back because Slack could not report it: ${notificationError?.data?.error || notificationError?.message || notificationError}`, 502)
+        }
+      } catch (error) {
+        log('team add failed', teamId, targetChannel, error?.code || error?.data?.error || String(error))
+        await post(sourceChannel, `❌ Could not add that team worker. ${String(error?.message || error).slice(0, 800)}`)
+      }
+      return
+    }
     if (action.action_id === 'collab_add') {
       const uid = action.selected_user, channel = body.channel?.id
       if (uid && channel && uid !== USER) {
@@ -4165,6 +5247,7 @@ setInterval(async () => {
       log('sweep: pid dead', s.pid, s.id.slice(0, 8))
       const switching = transitionForSession(state, s.id)
       stopPoller(s)
+      await failTeamTaskForSession(s, 'The worker process exited before completing its delegated task.')
       clearPermissionsForPid(s.pid, 'session process exited')
       s.pid = null
       if (switching?.transition.source.sid === s.id && ['preflight', 'aligning'].includes(switching.transition.phase)) {
@@ -4244,5 +5327,6 @@ setInterval(async () => {
   startAutomationReconciler()
   await recoverHooklessCodexResumes()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
+  startTeamReconciler() // status adoption must fence workers that were already busy before restart
   selfUpdate('boot').catch(e => log('self-update error', String(e)))
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })

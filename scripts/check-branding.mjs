@@ -27,7 +27,7 @@ requireCheck(installer.includes('si.sergej.claudeslackproxy'), 'installer lost t
 requireCheck(readme.includes('`sab`') && readme.includes('sab new claude') && readme.includes('sab new codex') && readme.includes('sab new pi'), 'README does not document the single CLI')
 requireCheck(readme.includes('sab terminal') && readme.includes('sab upload') && readme.includes('sab automation'), 'README does not document sab subcommands')
 requireCheck(fs.readdirSync(path.join(root, 'bin')).filter(name => !name.startsWith('.')).join(',') === 'sab', 'bin contains a public executable other than sab')
-requireCheck(manifest.features.slash_commands.length === 17 && manifest.features.slash_commands.every(item => item.command.startsWith('/sab-')), 'manifest is not the unified 17-command namespace')
+requireCheck(manifest.features.slash_commands.length === 18 && manifest.features.slash_commands.every(item => item.command.startsWith('/sab-')), 'manifest is not the unified 18-command namespace')
 requireCheck(!fs.existsSync(path.join(root, 'spike/slack-app-manifest.yaml')), 'stale YAML manifest still exists')
 
 for (const command of manifest.features.slash_commands.map(item => item.command)) {

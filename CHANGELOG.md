@@ -8,6 +8,13 @@ Notable changes to this project. Format based on
 
 ### Added
 
+- Added bridge-owned session teams for secure coordinator/worker delegation
+  across explicitly linked local SAB channels. Owner-only `/sab-team`
+  administration, repeated provider-neutral role context, the JSON-safe `sab
+  team` mailbox, durable idempotent task phases, safe busy-worker queueing,
+  provider-final correlation, visible two-channel audit records, and opt-in
+  workspace-contained file relay remove the human copy/paste proxy without
+  exposing Slack credentials or arbitrary channel history.
 - Began the compatibility-preserving multi-node foundation: legacy sessions
   implicitly remain on the local node, explicit channel/session/node routes fail
   closed on disagreement, and spawn plus terminal operations now cross an
@@ -25,10 +32,34 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Nested Codex utilities such as `codex review` can no longer inherit a parent
+  session's bridge identity and create a ghost Slack channel. Root-provider
+  ancestry is now required for lifecycle, team, and artifact authority.
+- Session-team review hardening now preserves exact native-session ownership,
+  serializes input and file delivery, waits for provider task-marker
+  acknowledgement, recovers or visibly releases interrupted work, enforces TTL
+  for every active phase, reconciles idempotent completion delivery, cleans
+  pruned file copies, preserves reply/file retry identities, removes failed
+  queued prompts before provider reconnect, recognizes already-delivered legacy
+  completions, clears rejected Pi inputs, and reports broken audit cards without
+  withholding the stable result. Crash recovery clears abandoned input claims,
+  running transitions update both audit cards, and pruning waits for complete
+  delivery and persists before deleting staged bytes.
+- Bulk session updates now skip workers with active delegated tasks, and dormant
+  team channels are protected from cleanup until their membership is removed or
+  the team is closed.
 - Claude interactive questions now render from structured `AskUserQuestion`
   hook data, preserving the prompt, recommendation, descriptions, and previews
   while keeping Slack buttons concise. Wide terminal layouts can no longer fold
   their side-by-side preview panel into option labels or erase the question.
+
+### Security
+
+- Cross-channel calls now require exact provider-process ancestry, PID/tmux,
+  native session, authoritative channel, local-node, owner-turn/task, and
+  directed-edge agreement. Collaborator turns fail closed; uncertain restart
+  dispatches are never replayed; team files use content-hashed private copies
+  and a permission distinct from artifact grants.
 
 ## [2.0.1] — 2026-08-26
 

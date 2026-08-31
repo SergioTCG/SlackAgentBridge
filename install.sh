@@ -127,7 +127,7 @@ fi
 ln -sf "$BRIDGE/bin/sab" "$BIN_DIR/sab"
 say "  linked the single CLI: $BIN_DIR/sab"
 chmod +x "$BRIDGE"/bin/sab "$BRIDGE"/scripts/run-session.sh "$BRIDGE"/scripts/claude-consent.sh \
-  "$BRIDGE"/scripts/sab-account.sh "$BRIDGE"/scripts/sab-upload.mjs "$BRIDGE"/scripts/sab-automation.mjs "$BRIDGE"/scripts/sab-terminal.mjs \
+  "$BRIDGE"/scripts/sab-account.sh "$BRIDGE"/scripts/sab-upload.mjs "$BRIDGE"/scripts/sab-team.mjs "$BRIDGE"/scripts/sab-automation.mjs "$BRIDGE"/scripts/sab-terminal.mjs \
   "$BRIDGE"/hooks/hook.sh "$BRIDGE"/hooks/codex-hook.sh \
   "$BRIDGE"/daemon/daemon.mjs "$BRIDGE"/channel/server.mjs 2>/dev/null || true
 

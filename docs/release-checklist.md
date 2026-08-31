@@ -6,10 +6,10 @@
 - [ ] Version, changelog, repository URLs, description, and topics agree.
 - [ ] `AGENTS.md`, `CLAUDE.md`, README, architecture, security, and the 2.0
       migration guide describe the same command, terminal, and safety contract.
-- [ ] `slack/app-manifest.json` is the sole manifest and contains only the 17
+- [ ] `slack/app-manifest.json` is the sole manifest and contains only the 18
       documented `/sab-*` commands.
 - [ ] `sab` is the sole public executable; `new`, `terminal`, `account`,
-      `upload`, and `automation` subcommands work.
+      `upload`, `team`, `automation`, and `node` subcommands work.
 - [ ] The installer removes legacy launcher symlinks without deleting unrelated
       files and never creates a second daemon or LaunchAgent label.
 - [ ] Old state/config/checkout/control-channel identities and missing-provider
@@ -46,8 +46,10 @@
 - [ ] Back up/export the currently installed manifest.
 - [ ] Apply the canonical v2 manifest to the existing Slack app.
 - [ ] Reinstall the same app and confirm no token or OAuth-scope change.
-- [ ] Confirm all 17 `/sab-*` commands autocomplete and old provider-prefixed
+- [ ] Confirm all 18 `/sab-*` commands autocomplete and old provider-prefixed
       commands are absent.
+- [ ] Confirm `/sab-team` was registered without adding OAuth scopes or a second
+      Slack app.
 
 ## Controlled live canary
 
@@ -78,7 +80,8 @@
 - [ ] `/sab-update all` updates each represented provider binary once, resumes
       every idle authoritative session with unchanged settings, queues a prompt
       arriving mid-relaunch, and explicitly skips a busy turn, permission,
-      switch, managed run, automation, standby leg, and stale mapping.
+      switch, managed run, automation, delegated worker task, standby leg, and
+      stale mapping.
 - [ ] `/sab-account` works only for Claude and `/sab-run` only for Pi.
 - [ ] Claude/Codex permission relay and Pi safe-mode/project-trust decisions work.
 - [ ] Pi image input, adaptive routing, plan/approve, pause/resume, all budgets,
@@ -95,6 +98,21 @@
 - [ ] Automation duplicate create launches/prompts exactly once, survives daemon
       restart, invites before whitelisting, and exact repeated stop/archive does
       not mutate any other session or channel.
+- [ ] Create one session team with a coordinator and two provider-diverse
+      workers. Confirm private role context, alias-only peer discovery, safe busy
+      queueing, explicit interim reply, stable final return, and status cards in
+      both channels.
+- [ ] Confirm a collaborator coordinator prompt cannot dispatch, a worker cannot
+      address another worker, a stale/rebound leg cannot call `sab team`, and
+      daemon restart neither duplicates a queued task nor retries an uncertain
+      dispatch.
+- [ ] Enable file relay for only one worker. Confirm source-workspace regular
+      files arrive as Slack uploads/private copies and that the disabled edge,
+      traversal, symlink escape, oversize, replay conflict, and raw channel
+      selector all fail closed.
+- [ ] Confirm `/sab-stop`, `/sab-kill`, member removal, and team closure cancel
+      only the exact delegated task; `/sab-cleanup` preserves dormant team
+      channels and provider switching preserves idle channel-level membership.
 - [ ] No duplicate Slack channels appear.
 
 ## Publish

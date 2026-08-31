@@ -52,6 +52,7 @@ duplicating the native conversation.
 | Remote permission decisions | ✓ | ✓ | `--safe` |
 | Token and cost usage | `ccusage` | `ccusage` | native ledger |
 | Provider handoff in one channel | ✓ | ✓ | ✓ |
+| Cross-session team delegation | ✓ | ✓ | ✓ |
 | Persistent plans, goals, and review | — | — | adaptive `/sab-run` |
 | Claude subscription switching | ✓ | — | — |
 | Chrome integration | `--chrome` | no counterpart | no counterpart |
@@ -108,6 +109,10 @@ apply this manifest to the **existing Slack app** and reinstall that app once so
 Slack registers `/sab-*` and removes the old provider-prefixed commands. This
 does not require a second app, new tokens, or new OAuth scopes.
 
+After upgrading to the session-team release, apply and reinstall the same
+canonical manifest once more so Slack registers `/sab-team`. Existing tokens
+and OAuth scopes remain valid.
+
 Fresh installs use `~/.slack-agent-bridge`. Existing
 `~/.claudeslackproxy` checkouts, `~/.config/ccs` state, session channels, and the
 historical `si.sergej.claudeslackproxy` LaunchAgent are retained. The installer
@@ -155,6 +160,9 @@ Other script-safe subcommands are:
 sab account list
 sab account add work
 sab upload --grant TOKEN -- FILE_PATH...
+sab team context --json
+sab team send --to WORKER_ALIAS --stdin
+sab team wait --task TASK_ID --json
 sab automation create ...
 sab automation status EXTERNAL_KEY
 sab automation stop EXTERNAL_KEY --archive
@@ -191,6 +199,7 @@ A session channel always acts on its authoritative provider.
 | `/sab-run …` | Control Pi adaptive routing and managed runs |
 | `/sab-account [name\|default]` | Show or change a Claude subscription |
 | `/sab-terminal [list\|open\|close\|open-all\|close-all]` | Manage optional viewports |
+| `/sab-team [create\|add\|status\|permissions\|remove\|close]` | Link SAB sessions for auditable delegation |
 | `/sab-health` | Show daemon health |
 | `/sab-cleanup` | Archive dormant session channels |
 | `/sab-claim` | Claim an unowned bridge |
@@ -204,7 +213,8 @@ terminal is never required.
 `/sab-update all` is the quiet-period maintenance sweep. It considers only the
 authoritative live session bound to each channel, skips any session with an
 active turn, question, permission, provider switch, managed Pi run, automation
-ownership, or restart already in progress, and reports every skip or failure.
+ownership, delegated worker task, or restart already in progress, and reports
+every skip or failure.
 Each represented provider CLI is updated once; every eligible native session is
 then resumed with its existing cwd, identity, account, model, effort, and launch
 flags. Messages arriving during the relaunch are queued for that same session.
@@ -244,6 +254,36 @@ invites a selected user to the private channel first and adds them to the prompt
 allowlist only after invitation succeeds. Collaborators may send labelled
 prompts to a live allowed session; they cannot run commands, answer permission
 requests, or resurrect it.
+
+### Session teams
+
+One SAB session channel can coordinate explicitly linked worker channels without
+giving an agent Slack credentials or arbitrary channel access:
+
+```text
+/sab-team create hexagonal-cleanup
+/sab-team add
+/sab-team permissions codex-barrique-parallel-1 files on
+/sab-team status
+```
+
+The owner chooses workers with Slack's private-channel picker. Team identity is
+bound to immutable channel IDs and survives channel renames and provider
+switching. The default topology permits coordinator → worker tasks and worker →
+coordinator replies/results; worker-to-worker relay is disabled. File relay is
+off per worker until explicitly enabled.
+
+Eligible owner turns receive private, provider-neutral role/tool context. A
+delegated worker receives an exact task header, while collaborators receive no
+lateral authority. The JSON-safe `sab team` CLI supports peers, send, bounded
+mailbox/inbox, wait, reply, and task-bound file transfer. Tasks are atomically
+journaled, visibly posted in both channels, queued only for a safe idle worker,
+correlated with provider-stable final output, and fenced against restart/stale
+leg duplication. Dormant peers are never resurrected by another agent.
+
+See [Session teams](docs/session-teams.md) for the complete workflow, limits,
+recovery behavior, and file boundary. Initial relay is local-node only; the
+durable identities are compatible with the accepted multi-node protocol.
 
 ### Managed Pi runs
 

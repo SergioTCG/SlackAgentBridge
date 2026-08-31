@@ -95,7 +95,9 @@ The coordinator owns:
   defaults;
 - immutable channel-to-node routes and projected authoritative session state;
 - Slack interaction state, invitation results, and channel prompt allowlists;
-- durable outbound command and inbound event deduplication journals; and
+- durable outbound command and inbound event deduplication journals;
+- session-team membership, directed permissions, task/mailbox state, and Slack
+  audit references; and
 - artifact destination grants and Slack upload completion.
 
 Each node owns:
@@ -233,6 +235,35 @@ coordinator. The coordinator revalidates sender/message/channel/node/session,
 uploads to the fixed Slack destination, and atomically consumes the grant.
 Neither an agent nor a node chooses a channel ID.
 
+### Session-team collaboration
+
+The shipped local session-team model is already channel/session/provider/node
+identified, but it deliberately rejects non-local callers and members until
+remote lifecycle and byte transport are complete. The coordinator remains the
+authority on team membership, directed edges, owner-turn capabilities, task
+identity, Slack audit records, and bounded mailbox state. A node remains the
+authority on its provider's safe input surface, exact process/tmux claim,
+workspace paths, private copied files, and stable final event.
+
+Remote relay will use dedicated journaled protocol commands/events for task
+offer, acceptance, progress/reply, completion/failure/cancellation, mailbox
+acknowledgement, and bounded file streaming. They inherit command/event IDs,
+deadlines, epoch fencing, and replay rules; generic session input and arbitrary
+Slack posting are not substitutes. The coordinator persists an outbound team
+delivery before sending it, while the destination node persists acceptance
+before injecting it. A repeated command returns the recorded result. An
+uncertain accepted/injected command is never executed again merely because the
+coordinator restarted.
+
+The source agent continues to use only aliases through `sab team`. The source
+node derives and authenticates its session identity; the coordinator resolves
+the immutable destination channel and node. For files, the source node validates
+and hashes bytes inside its workspace, the authenticated transport carries a
+bounded stream, and the destination node writes a mode-restricted private copy
+before acknowledging readiness. Slack uploads remain coordinator-owned. Until
+those operations and disconnect/replay tests ship, cross-node teams remain
+unavailable rather than falling back to the coordinator's local filesystem.
+
 ### Terminals and updates
 
 Ghostty exists only on the node that owns the tmux session. A channel-scoped
@@ -282,3 +313,6 @@ The optional listener is off by default; non-loopback use requires TLS and an
 explicit public WSS URL. `sab node invite/list/revoke/enroll/status` is the only
 local management surface. Step 4 has not shipped, so enrollment is currently a
 transport validation facility rather than permission to run provider sessions.
+Local-node session teams and their durable task identities are implemented, but
+their protocol operations and cross-node file streams remain part of steps 4
+and 5.

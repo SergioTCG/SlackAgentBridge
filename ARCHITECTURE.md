@@ -23,6 +23,7 @@ daemon/daemon.mjs ─────────────── ~/.config/ccs/st
        ├── provider adapters ───── daemon/providers.mjs
        ├── automation API ──────── daemon/automation*.mjs
        ├── artifact API ────────── daemon/artifacts.mjs
+       ├── session teams ───────── daemon/team-{auth,files,http}.mjs + teams.mjs
        ├── terminal API ────────── daemon/terminal-{http,control}.mjs
        ├── Slack coordinator ───── daemon/{coordinator,slack-runtime}.mjs
        ├── execution routing ───── daemon/{nodes,execution-nodes}.mjs
@@ -46,7 +47,7 @@ them.
 ## Components
 
 - `bin/sab` is the only public local executable. It dispatches `new`,
-  `terminal`, `account`, `upload`, `automation`, and `node`. Its private `__run`
+  `terminal`, `account`, `upload`, `team`, `automation`, and `node`. Its private `__run`
   subcommand is used only inside tmux.
 - `scripts/run-session.sh` is the provider runner. A local `sab new` creates and
   attaches to tmux; daemon-created sessions start tmux detached. It configures
@@ -75,6 +76,12 @@ them.
 - `daemon/terminal-control.mjs` resolves authoritative active sessions and
   serializes terminal operations per tmux name. `daemon/terminal-http.mjs` and
   `scripts/sab-terminal.mjs` expose the same operations to local scripts.
+- `daemon/teams.mjs` defines the bounded channel-level team and task journal.
+  `daemon/team-auth.mjs` is the exact caller-identity gate;
+  `daemon/team-files.mjs` owns workspace-contained private file staging; and
+  `daemon/team-http.mjs` plus `scripts/sab-team.mjs` expose the loopback-only,
+  JSON-safe agent mailbox. Slack membership administration and provider-final
+  correlation remain in the sole daemon.
 - `daemon/nodes.mjs` defines compatibility-safe execution-node identity and
   exact channel/session/node binding. `daemon/execution-nodes.mjs` is the
   execution boundary; the first adapter wraps existing local spawn and terminal
@@ -107,6 +114,15 @@ state remains resumable without a bulk migration.
 `state.channels[channelId]` is the authoritative active mapping. The mapped
 session must point back to the same immutable channel ID. A channel name may be
 changed freely in Slack and is never an identity key.
+
+Session teams are created lazily. `state.teams[teamId]` binds one coordinator
+and bounded workers by immutable channel ID with presentation aliases and
+per-worker file permission. `state.teamTasks[taskId]` is the bounded,
+immediately persisted delivery journal: request/payload digest, exact source and
+target channel/session/provider/node identities, dispatch phase, Slack audit
+timestamps, replies, stable result/error, and expiry. Plaintext task input is
+removed after provider acceptance. Team membership survives provider switching
+because every send/reply revalidates the channel's current active leg.
 
 A missing `session.nodeId` and missing `state.channelNodes[channelId]` resolve to
 the implicit local node. Explicit remote metadata must agree on both records;
@@ -166,7 +182,7 @@ an unrelated Codex process.
 channel/session mapping. Before each stop it revalidates the PID, tmux, and
 authority and rejects active turns, question forms, permission decisions,
 provider transitions, private maintenance turns, managed Pi activity,
-automation ownership, and concurrent wake/restart work. Eligible sessions are
+automation ownership, delegated team work, and concurrent wake/restart work. Eligible sessions are
 grouped by provider: all selected sessions in a group stop, that provider's CLI
 updates once, and every stopped session resumes even when the update check
 fails. Incoming prompts during this bounded relaunch are held in the existing
@@ -185,7 +201,7 @@ The canonical manifest exposes one namespace:
 /sab-new  /sab-model  /sab-effort  /sab-flags  /sab-update
 /sab-stop /sab-switch /sab-kill    /sab-status /sab-usage
 /sab-run  /sab-account /sab-terminal
-/sab-health /sab-cleanup /sab-claim /sab-help
+/sab-team /sab-health /sab-cleanup /sab-claim /sab-help
 ```
 
 `/sab-new` requires the provider. In a session channel, the authoritative
@@ -198,6 +214,73 @@ rejects non-Claude sessions before mutation.
 The parser accepts old provider-prefixed slash commands only as an unadvertised
 upgrade shim while the owner replaces a 1.x manifest. No old command appears in
 the canonical manifest, help, or public launcher surface.
+
+## Session teams
+
+`/sab-team` is owner-only administration over a provider-neutral, local-node
+collaboration graph. Team creation makes the current authoritative private SAB
+channel the coordinator. The Block Kit picker accepts only another exact
+authoritative private SAB channel. Membership and permission changes are
+persisted before acknowledgement and reported in affected channels. The first
+topology is a star: coordinator-to-worker tasks and worker-to-coordinator
+replies/status/finals. Worker mesh is absent; files are denied until explicitly
+enabled for that worker.
+
+The agent surface is `sab team`, never Slack Web API access. Its loopback request
+derives the source from process ancestry and requires exact PID, tmux, provider,
+native session, active channel mapping, and local node. Agent-visible peers and
+tasks contain aliases and authorized envelopes rather than raw destination
+IDs. A short-lived bounded `session.teamTurn` gives only a current
+owner-initiated coordinator turn dispatch authority; collaborator and local
+terminal turns clear it. A delegated worker task is narrower still: only its
+exact assigned live session may reply.
+
+The process claim also requires the provider to be the root provider process
+under the SAB tmux pane. Nested utilities such as `codex review` inherit the
+parent environment but are rejected before SessionStart registration and before
+any team or artifact authority check, so one-off child work cannot create ghost
+channels or masquerade as the interactive session.
+
+Task delivery is journal-first:
+
+1. Revalidate source authority, owner turn, team edge, target mapping, and
+   request identity; stage any approved files from the source workspace.
+2. Atomically persist a unique queued task, then publish its complete bounded
+   payload and idempotent status cards in both Slack channels.
+3. Wait while the target is dormant, busy, switching, asking a question,
+   awaiting permission, under maintenance, or owned by managed Pi work.
+4. Reserve the worker input surface, atomically change `queued → dispatching`,
+   and bind the exact target native session before provider injection. A restart
+   never retries an uncertain dispatch claim.
+5. Accept `running` only when the provider acknowledges the injected immutable
+   task marker. Claude's
+   completed transcript path, Codex's Stop hook, or Pi's extension final event
+   may complete only the same task/session binding.
+6. Persist completion and a delivery claim before updating both audit cards and
+   idempotently posting the stable result in the coordinator channel. A missing
+   or uneditable audit card is reported with the result but cannot suppress it;
+   reconciliation retries incomplete result delivery before releasing bounded
+   state. Only fully delivered terminal records are eligible for TTL or journal
+   pressure pruning, and the pruned journal is persisted before file cleanup.
+
+Interim provider commentary remains in the worker channel; a worker explicitly
+uses `sab team reply` to put selected progress in the source mailbox. Questions
+and permissions stay on the worker's normal Slack surface. Interrupt, kill,
+session death, team removal/closure, and expiry produce visible task failure or
+cancellation. Bulk updates skip active worker tasks and cleanup preserves
+dormant team channels.
+
+Team file relay is separate from artifact grants. It applies the artifact
+realpath/regular-file/count/aggregate-size validator to the exact source
+workspace, hashes content for retry conflict detection, writes mode-0600 copies
+under `~/.config/ccs/team-files`, uploads the copies to the linked Slack channel,
+and injects only destination-private paths. Staged content and terminal task
+metadata expire under the bounded journal.
+
+Remote-node dispatch is deliberately not enabled. Task records already carry
+node identities so the accepted authenticated command/event/file transport can
+replace the local delivery adapter later without changing `/sab-team` or `sab
+team`. See [Session teams](docs/session-teams.md).
 
 ## Provider adapters
 
@@ -293,8 +376,8 @@ file type, count, aggregate size, expiry, and replay state.
 ## Loopback APIs
 
 Port `8877` binds only to loopback and carries hooks, status, provider streams,
-permission decisions, artifacts, terminal control, legacy `/spawn`, and the
-automation lifecycle API. It must never be proxied or forwarded. Script-facing
+permission decisions, artifacts, terminal control, session-team mailboxes,
+legacy `/spawn`, and the automation lifecycle API. It must never be proxied or forwarded. Script-facing
 mutations require JSON and reject browser Origin/fetch metadata and non-loopback
 Host headers.
 
@@ -309,6 +392,16 @@ Automation endpoints are:
 - `POST /automation/sessions`
 - `GET /automation/sessions/:externalKey`
 - `POST /automation/sessions/:externalKey/stop`
+
+Team endpoints are:
+
+- `GET /team/context`, `/team/peers`, and `/team/inbox`
+- `GET /team/tasks/:taskId`
+- `POST /team/send` and `/team/reply`
+
+Every endpoint rejects browser origins and non-loopback Host values. Team
+mutations additionally require exact provider-process/tmux ancestry; no bearer
+capability or Slack destination is accepted from the caller.
 
 Automation creation atomically records its external key and deterministic tmux
 identity before launch. Duplicate keys return the existing record. Native

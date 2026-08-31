@@ -9,7 +9,7 @@ command-interface release, not a state reset.
 - `sab` is the only public local executable.
 - Start providers with `sab new claude`, `sab new codex`, or `sab new pi`.
 - Accounts, artifacts, automation, and terminals are `sab account`,
-  `sab upload`, `sab automation`, and `sab terminal`.
+  `sab upload`, `sab team`, `sab automation`, and `sab terminal`.
 - Slack uses only `/sab-*`. The provider comes from the active session channel;
   `/sab-new` and `/sab-switch` take an explicit provider.
 - Sessions start headlessly in tmux. Ghostty windows are optional viewports.
@@ -34,7 +34,7 @@ Do not create a second Slack app or load a second LaunchAgent.
 ## Slack manifest migration
 
 Apply [`slack/app-manifest.json`](../slack/app-manifest.json) to the **existing**
-Slack app and reinstall that app once. This registers the 17 `/sab-*` commands
+Slack app and reinstall that app once. The current manifest registers the 18 `/sab-*` commands
 and removes the 1.x provider-prefixed commands. No new OAuth scope or token is
 required.
 
@@ -77,6 +77,7 @@ closing them no longer ends their providers.
 | Claude account command | `sab account` / `/sab-account` |
 | artifact helper | `sab upload` |
 | automation helper | `sab automation` |
+| session-team helper | `sab team` / `/sab-team` |
 | window helper | `sab terminal` / `/sab-terminal` |
 
 ## Rollback
