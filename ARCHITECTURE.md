@@ -316,8 +316,13 @@ exact warning in the visible terminal tail, on a proven idle input surface and
 across two consecutive live observations, may replace the working timer with a
 failure. Startup recovery applies the same exact current-tail check to a
 persisted orphan turn. Stale scrollback and conversational mentions never
-qualify. Remote flagless sessions default to Codex's canonical dangerous flag
-(`--yolo`).
+qualify. Every SAB-managed Codex TUI receives the fixed internal
+`check_for_update_on_startup=false` override so its detached startup cannot be
+captured by the native update chooser; provider binaries are updated only by
+the explicit SAB maintenance path. The override is not persisted as a user
+launch flag. A legacy chooser that still appears during provider switching is
+recognized as an immediate actionable startup failure. Remote flagless
+sessions default to Codex's canonical dangerous flag (`--yolo`).
 
 ### Pi
 

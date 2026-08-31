@@ -32,6 +32,12 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- SAB-managed Codex launches now disable the CLI's interactive startup update
+  check, so an available Codex release cannot strand a new, resumed,
+  automation-owned, or provisional provider-switch session before its hooks
+  bind to Slack. Explicit `/sab-update` maintenance remains unchanged, and an
+  unexpected legacy update chooser fails provider-switch validation with an
+  actionable error instead of waiting for the full readiness timeout.
 - Codex model-capacity rejections that return to the TUI without a `Stop` hook
   now clear the misleading working timer and post an actionable Slack failure.
   Detection is restricted to the exact current warning on a stable idle input

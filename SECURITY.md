@@ -197,7 +197,10 @@ accounts, and the Mac user running the daemon.
   `~/.config/ccs` with restrictive permissions and are ignored by Git.
 - **Conservative self-update:** the updater fast-forwards only a clean checkout
   with no unpublished local commits. Set `CCS_AUTO_UPDATE=0` to require manual
-  review and deployment.
+  review and deployment. SAB-managed Codex TUIs disable the provider's native
+  interactive startup update check; Codex binary changes remain explicit
+  `/sab-update` maintenance rather than an unattended session-start side
+  effect.
 - **Fail-closed session sweeps:** `/sab-update all` operates only on exact
   authoritative live mappings and skips interactive, transitional, managed,
   automation-owned, delegated-team, waking, or restarting sessions. It never touches dormant

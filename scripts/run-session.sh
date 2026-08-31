@@ -69,7 +69,12 @@ EOF
 }
 
 run_codex() {
-  direct_codex() { exec codex -c 'tui.keymap.chat.interrupt_turn="f12"' "$@"; }
+  # SAB owns provider updates through `/sab-update`; a native startup chooser
+  # would otherwise strand a detached session before hooks can bind its Slack
+  # channel. Keep this internal so it is neither user launch metadata nor a
+  # remotely configurable flag.
+  codex_tui_args=(-c 'check_for_update_on_startup=false' -c 'tui.keymap.chat.interrupt_turn="f12"')
+  direct_codex() { exec codex "${codex_tui_args[@]}" "$@"; }
   if [ "${CCS_CODEX_APP_SERVER:-1}" = "0" ] || [ -z "${CCS_TMUX:-}" ]; then direct_codex "$@"; fi
 
   runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/sab-codex-events.XXXXXX")" || direct_codex "$@"
@@ -114,7 +119,7 @@ run_codex() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  codex --remote "$proxy_url" -c 'tui.keymap.chat.interrupt_turn="f12"' "$@"
+  codex --remote "$proxy_url" "${codex_tui_args[@]}" "$@"
 }
 
 run_pi() {

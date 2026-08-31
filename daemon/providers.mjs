@@ -290,6 +290,10 @@ export function targetStartupState(provider, pane) {
     const footer = lines.some(line => /[·•].*(?:~\/|\/)[^\s]*/.test(line))
     if (prompt && footer && !/(?:esc|ctrl-c|f12) to interrupt/i.test(visible)) return 'ready'
     if (/do you trust|trust the (?:contents|directory|folder|workspace|project)|(?:review|trust|approve|enable).{0,80}hooks?/i.test(visible)) return 'trust'
+    // This is the interactive chooser, not the passive "Run codex update"
+    // notice. SAB-managed launches suppress it, but recognizing the exact
+    // fallback keeps provider switching from waiting five minutes in silence.
+    if (/Update now \(runs [^)]+\)/i.test(visible)) return 'update'
     return 'starting'
   }
   if (provider === 'pi') {
