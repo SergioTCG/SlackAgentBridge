@@ -310,8 +310,14 @@ canonicalizes npm's persistent App Server launcher to its direct matching
 native child—the identity emitted by lifecycle hooks—and then revalidates that
 child against the exact tmux. If either sidecar cannot start, the runner falls
 back to the direct TUI. Transcript JSONL is never parsed; `ccusage` is the
-public usage adapter. Remote flagless sessions default to Codex's canonical
-dangerous flag (`--yolo`).
+public usage adapter. One bounded TUI exception handles Codex's fixed model
+capacity rejection, which can return to idle without emitting `Stop`: only the
+exact warning in the visible terminal tail, on a proven idle input surface and
+across two consecutive live observations, may replace the working timer with a
+failure. Startup recovery applies the same exact current-tail check to a
+persisted orphan turn. Stale scrollback and conversational mentions never
+qualify. Remote flagless sessions default to Codex's canonical dangerous flag
+(`--yolo`).
 
 ### Pi
 

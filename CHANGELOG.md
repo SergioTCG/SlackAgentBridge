@@ -32,6 +32,11 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex model-capacity rejections that return to the TUI without a `Stop` hook
+  now clear the misleading working timer and post an actionable Slack failure.
+  Detection is restricted to the exact current warning on a stable idle input
+  surface, including daemon-restart recovery, so stale scrollback cannot end a
+  later healthy turn.
 - Nested Codex utilities such as `codex review` can no longer inherit a parent
   session's bridge identity and create a ghost Slack channel. Root-provider
   ancestry is now required for lifecycle, team, and artifact authority.

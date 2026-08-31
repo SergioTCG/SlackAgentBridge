@@ -30,6 +30,7 @@ import { createStatusMessages, recoverCodexTurnStartedAt } from './status.mjs'
 import {
   claimCodexCommentary, codexCommentaryDisposition, commentaryFromAppServerMessage, releaseCodexCommentary,
 } from './codex-commentary.mjs'
+import { codexTerminalFailure, codexTerminalFailureDecision } from './codex-terminal.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
   slackArtifactUploadOptions,
@@ -693,12 +694,31 @@ function startCodexPoller(session) {
     nextUsageAt: 0,
     baseline: codexTokenSnapshot(session.codexUsageBaseline),
     current: null,
+    failureKey: null,
+    failureConfirmations: 0,
+    turnStartedAt: session.codexTurnStartedAt,
   }
   const tick = async () => {
     if (p.stopped || p.running || !(session.pid && pidAlive(session.pid))) return
     p.running = true
     try {
       const now = Date.now()
+      const pane = session.tmux ? await tmuxCapture(session.tmux) : ''
+      if (p.stopped) return
+      const failureDecision = codexTerminalFailureDecision({
+        pane,
+        ready: targetStartupState('codex', pane) === 'ready',
+        previousKey: p.failureKey,
+        confirmations: p.failureConfirmations,
+      })
+      p.failureKey = failureDecision.key
+      p.failureConfirmations = failureDecision.confirmations
+      if (failureDecision.action === 'failure') {
+        p.stopped = true
+        log('Codex terminal failure finalize (Stop hook missing)', session.id.slice(0, 8), failureDecision.failure.key)
+        await finalizeCodexTerminalFailure(session, failureDecision.failure, p.turnStartedAt)
+        return
+      }
       if (now >= p.nextUsageAt) {
         p.nextUsageAt = now + CODEX_USAGE_REFRESH_MS
         try {
@@ -834,6 +854,20 @@ async function finalizeCodexTurn(session, body) {
   saveState(state)
 }
 
+async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt) {
+  // Claim only the turn observed by this poller. A newer UserPromptSubmit may
+  // already have replaced it while tmux capture or Slack I/O was in flight.
+  if (!expectedStartedAt || session.codexTurnStartedAt !== expectedStartedAt) return false
+  stopPoller(session)
+  await clearStatus(session)
+  const text = String(failure?.text || 'Codex could not start this turn.').slice(0, 2000)
+  if (session.channel) await postMd(session.channel, `⚠️ *Codex turn failed:* ${text}`)
+  await finishTeamTaskForSession(session, '', text)
+  clearTeamInputReservation(session)
+  saveState(state)
+  return true
+}
+
 async function finalizePiTurn(session, body) {
   stopPoller(session)
   await clearStatus(session)
@@ -907,7 +941,23 @@ async function readoptStatus() {
     if (providerOf(s) === 'codex') {
       const context = await findStatusContext(s.channel)
       const ts = context.statusMessage?.ts || null
-      const recovery = codexStatusRecoveryDecision(s, await tmuxCapture(s.tmux))
+      const pane = await tmuxCapture(s.tmux)
+      const terminalFailure = targetStartupState('codex', pane) === 'ready'
+        ? codexTerminalFailure(pane)
+        : null
+      if (terminalFailure && (s.codexTurnStartedAt || ts)) {
+        if (!s.codexTurnStartedAt) {
+          s.codexTurnStartedAt = recoverCodexTurnStartedAt({
+            statusMessage: context.statusMessage,
+            latestPromptTs: context.latestPromptTs,
+          })
+        }
+        if (ts) liveStatuses.adopt(s.id, ts)
+        await finalizeCodexTerminalFailure(s, terminalFailure, s.codexTurnStartedAt)
+        log('recovered Codex terminal failure', s.id.slice(0, 8), terminalFailure.key)
+        continue
+      }
+      const recovery = codexStatusRecoveryDecision(s, pane)
       if (recovery === 'resume') {
         if (!s.codexTurnStartedAt) {
           s.codexTurnStartedAt = recoverCodexTurnStartedAt({
