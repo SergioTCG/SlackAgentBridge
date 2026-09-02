@@ -326,8 +326,10 @@ descriptions, previews, and concise buttons, while tmux key input remains the
 answer transport.
 A pane parser handles only restart recovery, legacy Claude versions, and
 post-Stop approval screens; a live structured form cannot be overwritten by its
-width-dependent terminal rendering. Claude keeps consent and account-switching
-paths. Remote flagless sessions default to
+width-dependent terminal rendering. For an owner-selected workspace, the
+bounded startup helper confirms trust only after the affirmative trust row is
+visibly selected; it fails closed on unknown prompt rendering. Claude keeps
+consent and account-switching paths. Remote flagless sessions default to
 `--dangerously-skip-permissions`; `--dsp` normalizes to that flag. `--chrome`
 is Claude-specific.
 

@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sab = path.join(root, 'bin', 'sab')
 const runner = path.join(root, 'scripts', 'run-session.sh')
+const claudeConsent = path.join(root, 'scripts', 'claude-consent.sh')
 
 test('sab is the only public session launcher', () => {
   assert.equal(fs.existsSync(sab), true)
@@ -66,6 +67,46 @@ test('Claude runner uses its explicit approved channel without a detached develo
     ])
     assert.deepEqual(args.slice(4), ['--model', 'opus', '--resume', 'session-id'])
     assert.equal(args.includes('--dangerously-load-development-channels'), false)
+  } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+})
+
+test('Claude trust helper selects the affirmative row instead of confirming the default exit', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-claude-trust-'))
+  try {
+    const log = path.join(temp, 'keys')
+    const selected = path.join(temp, 'selected-yes')
+    const ended = path.join(temp, 'ended')
+    fs.writeFileSync(path.join(temp, 'tmux'), `#!/bin/bash
+case "$1" in
+  has-session) [ ! -f "$TMUX_TEST_ENDED" ] ;;
+  capture-pane)
+    printf '%s\\n' 'Quick safety check: Is this a project you created or one you trust?'
+    if [ -f "$TMUX_TEST_SELECTED" ]; then
+      printf '%s\\n' '  No, exit' ' ❯ Yes, I trust this folder'
+    else
+      printf '%s\\n' ' ❯ No, exit' '   Yes, I trust this folder'
+    fi
+    ;;
+  send-keys)
+    key="\${!#}"
+    printf '%s\\n' "$key" >> "$TMUX_TEST_LOG"
+    if [ "$key" = Down ]; then : > "$TMUX_TEST_SELECTED"; fi
+    if [ "$key" = Enter ]; then : > "$TMUX_TEST_ENDED"; fi
+    ;;
+esac
+`, { mode: 0o755 })
+    const run = spawnSync(claudeConsent, ['sab-test'], {
+      encoding: 'utf8', timeout: 10000,
+      env: {
+        ...process.env,
+        PATH: `${temp}:${process.env.PATH}`,
+        TMUX_TEST_LOG: log,
+        TMUX_TEST_SELECTED: selected,
+        TMUX_TEST_ENDED: ended,
+      },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), ['Down', 'Enter'])
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
 })
 

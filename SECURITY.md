@@ -292,6 +292,9 @@ Claude support uses the Channels research-preview API. SAB supplies exactly one
 local stdio server in its private generated MCP configuration and selects that
 server through `--channels`; headless launches do not auto-accept or depend on
 the interactive `--dangerously-load-development-channels` confirmation.
+Workspace trust remains separate: only the exact owner-selected launch tmux is
+inspected, and the helper confirms only after Claude's affirmative trust row is
+visibly selected. Unknown or changed prompt rendering fails closed.
 Anthropic may change or remove the Channels contract, including its allowlist or
 permission behavior. Pin and test Claude Code before an unattended production
 upgrade when stability matters.
