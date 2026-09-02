@@ -235,6 +235,15 @@ owner-initiated coordinator turn dispatch authority; collaborator and local
 terminal turns clear it. A delegated worker task is narrower still: only its
 exact assigned live session may reply.
 
+Teams may opt into `auto-until-blocked` continuation. A terminal worker reply
+or task result is persisted and delivered before creating one deduplicated
+continuation event. An idle authoritative coordinator receives a bounded,
+bridge-marked owner continuation and rereads the authoritative inbox and team
+context before dispatching. Existing teams remain `manual` by default;
+automatic continuation is serialized per team, survives daemon restart through
+the state journal, and pauses with an actionable owner notification when the
+coordinator is missing, busy, or a safety/product decision is required.
+
 The process claim also requires the provider to be the root provider process
 under the SAB tmux pane. Nested utilities such as `codex review` inherit the
 parent environment but are rejected before SessionStart registration and before

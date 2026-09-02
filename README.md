@@ -203,7 +203,7 @@ A session channel always acts on its authoritative provider.
 | `/sab-run …` | Control Pi adaptive routing and managed runs |
 | `/sab-account [name\|default]` | Show or change a Claude subscription |
 | `/sab-terminal [list\|open\|close\|open-all\|close-all]` | Manage optional viewports |
-| `/sab-team [create\|add\|status\|permissions\|remove\|close]` | Link SAB sessions for auditable delegation |
+| `/sab-team [create\|add\|status\|auto\|manual\|permissions\|remove\|close]` | Link SAB sessions for auditable delegation and optional continuation |
 | `/sab-health` | Show daemon health |
 | `/sab-cleanup` | Archive dormant session channels |
 | `/sab-claim` | Claim an unowned bridge |
@@ -275,6 +275,7 @@ giving an agent Slack credentials or arbitrary channel access:
 /sab-team add
 /sab-team permissions codex-barrique-parallel-1 files on
 /sab-team status
+/sab-team auto   # opt into bounded continuation; use /sab-team manual to disable
 ```
 
 The owner chooses workers with Slack's private-channel picker. Team identity is

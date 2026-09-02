@@ -117,7 +117,8 @@ generated MCP configuration. Do not print secrets during diagnostics.
   chooses the Slack destination from a short-lived grant tied to an accepted
   Slack message and its live session.
 - Session teams are channel-level, owner-created, bounded star graphs. Only a
-  current owner coordinator turn may dispatch to linked workers; collaborators
+  current owner coordinator turn—or an explicitly enabled, bounded
+  `auto-until-blocked` continuation turn—may dispatch to linked workers; collaborators
   have no lateral authority. Worker replies/finals bind to one exact task and
   authoritative native session. Journal before Slack/provider side effects,
   never retry an uncertain dispatch after restart, and keep every transfer
