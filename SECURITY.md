@@ -288,10 +288,13 @@ delegate secrets merely because both sessions run on the same machine.
 
 ## Research-preview dependencies
 
-Claude support uses the Channels research-preview API through
-`--dangerously-load-development-channels`. Anthropic may change or remove that
-contract, including its consent or permission behavior. Pin and test Claude Code
-before an unattended production upgrade when stability matters.
+Claude support uses the Channels research-preview API. SAB supplies exactly one
+local stdio server in its private generated MCP configuration and selects that
+server through `--channels`; headless launches do not auto-accept or depend on
+the interactive `--dangerously-load-development-channels` confirmation.
+Anthropic may change or remove the Channels contract, including its allowlist or
+permission behavior. Pin and test Claude Code before an unattended production
+upgrade when stability matters.
 
 Codex support uses lifecycle and permission hooks plus its App Server event
 protocol for interim commentary. Hooks remain authoritative for final delivery

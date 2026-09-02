@@ -36,6 +36,10 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Claude 2.1.258 can no longer strand headless starts and resumes at a detached
+  development-channel confirmation. The runner now selects SAB's explicit local
+  MCP server through the approved `--channels` path, while preserving workspace
+  trust handling and the same provider lifecycle hooks.
 - Claude resurrection no longer mistakes a briefly materialized tmux for an
   active session. SAB now waits for the exact `SessionStart` PID/tmux claim,
   retries a transient provider exit once, records only its bounded numeric exit

@@ -316,11 +316,14 @@ team`. See [Session teams](docs/session-teams.md).
 
 ### Claude Code
 
-Claude inbound messages use the MCP Channel server. Hooks mirror lifecycle and
-outbound final content; its transcript and statusline support live progress,
-account usage, and topic metadata. `AskUserQuestion` uses the bounded structured
-`PreToolUse.tool_input.questions` payload for Slack text, descriptions,
-previews, and concise buttons, while tmux key input remains the answer transport.
+Claude inbound messages use the explicitly configured MCP Channel server,
+selected through Claude's approved `--channels` path. Headless launches never
+depend on the interactive development-channel confirmation. Hooks mirror
+lifecycle and outbound final content; its transcript and statusline support live
+progress, account usage, and topic metadata. `AskUserQuestion` uses the bounded
+structured `PreToolUse.tool_input.questions` payload for Slack text,
+descriptions, previews, and concise buttons, while tmux key input remains the
+answer transport.
 A pane parser handles only restart recovery, legacy Claude versions, and
 post-Stop approval screens; a live structured form cannot be overwritten by its
 width-dependent terminal rendering. Claude keeps consent and account-switching
