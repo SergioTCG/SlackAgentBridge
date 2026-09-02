@@ -84,7 +84,9 @@ import {
   teamContext, teamTask, teamTaskDeliverySettled, teamTaskForRequest, withoutDelegatedTaskPrompt,
 } from './teams.mjs'
 import {
-  claimContinuation, deferContinuation, queueContinuation, setContinuationMode, settleContinuation,
+  claimContinuation, clearContinuationWaiting, coalesceContinuations, deferContinuation,
+  noteContinuationWaiting, observeIdleCodexCoordinator, queueContinuation, setContinuationMode,
+  settleContinuation,
 } from './team-continuation.mjs'
 import { createExecutionNodeRouter, createLocalExecutionNode } from './execution-nodes.mjs'
 import { LOCAL_NODE_ID, localSessionByChannel, localSessionByPid, nodeIdForSession } from './nodes.mjs'
@@ -2815,6 +2817,7 @@ const teamReplyDeliveries = new Map()
 const teamCompletionDeliveries = new Map()
 const teamTurnProof = new Set()
 const teamContinuationTimers = new Map()
+const teamCoordinatorIdleProof = new Map()
 
 function reserveTeamInput(session, source) {
   if (!session || session.teamInputReservation) return false
@@ -2854,9 +2857,82 @@ function scheduleTeamContinuation(teamId, delay = 0) {
   timer.unref?.()
 }
 
+function teamContinuationBusyReason(session) {
+  const reasons = []
+  if (session.teamTurn) reasons.push('coordinator turn')
+  if (session.teamInputReservation) reasons.push('input reservation')
+  if (session.teamActiveTaskId) reasons.push('delegated task')
+  if (session.codexTurnStartedAt || session.piTurnStartedAt || pollers.has(session.id) ||
+      codexPollers.has(session.id) || piPollers.has(session.id)) reasons.push('provider turn')
+  return reasons.join(', ')
+}
+
+async function reconcileIdleCodexCoordinator(team, coordinator) {
+  const reset = () => teamCoordinatorIdleProof.delete(team.id)
+  if (providerOf(coordinator) !== 'codex' || (!coordinator.teamTurn && !coordinator.teamInputReservation) ||
+      coordinator.teamActiveTaskId ||
+      pendingBySid.get(coordinator.id)?.length || qforms.has(coordinator.id) || hasPendingPerm(coordinator) ||
+      activeTransition(coordinator.channel) || updatingSessions.has(coordinator.id) || restarting.has(coordinator.id) ||
+      resurrectInFlight.has(coordinator.id) || switchingSids.has(coordinator.id) || internalTurns.has(coordinator.id) ||
+      !(coordinator.pid && pidAlive(coordinator.pid) && coordinator.tmux && await tmuxAlive(coordinator.tmux))) {
+    reset()
+    return false
+  }
+
+  const expected = {
+    sid: coordinator.id,
+    pid: coordinator.pid,
+    tmux: coordinator.tmux,
+    turn: coordinator.teamTurn?.startedAt || null,
+    input: coordinator.teamInputReservation?.acceptedAt || null,
+    codex: coordinator.codexTurnStartedAt || null,
+  }
+  if (!(await validProviderRootClaim(expected.pid, expected.tmux, 'codex'))) {
+    reset()
+    return false
+  }
+  const pane = await tmuxCapture(expected.tmux)
+  if (sessionByChannel(team.coordinatorChannel) !== coordinator ||
+      state.channels?.[team.coordinatorChannel] !== expected.sid || coordinator.pid !== expected.pid ||
+      coordinator.tmux !== expected.tmux || (coordinator.teamTurn?.startedAt || null) !== expected.turn ||
+      (coordinator.teamInputReservation?.acceptedAt || null) !== expected.input ||
+      (coordinator.codexTurnStartedAt || null) !== expected.codex) {
+    reset()
+    return false
+  }
+
+  const decision = observeIdleCodexCoordinator(coordinator, {
+    ready: targetStartupState('codex', pane) === 'ready',
+    previous: teamCoordinatorIdleProof.get(team.id),
+  })
+  if (decision.observation) teamCoordinatorIdleProof.set(team.id, decision.observation)
+  else reset()
+  if (decision.action !== 'release') return false
+
+  // No awaits between the final identity check above and this mutation: a new
+  // prompt/hook cannot replace the observed turn and then have its fences
+  // cleared by this recovery path.
+  stopPoller(coordinator)
+  clearTeamTurn(coordinator)
+  clearTeamInputReservation(coordinator)
+  clearContinuationWaiting(team)
+  reset()
+  saveStateNow(state)
+  log('reconciled hookless idle Codex coordinator', coordinator.id.slice(0, 8), team.id)
+  await clearStatus(coordinator)
+  await post(team.coordinatorChannel,
+    '⚠️ Codex returned to idle without its lifecycle completion hook. SAB safely released the stale coordinator turn and is continuing from the authoritative team inbox.').catch(() => {})
+  return true
+}
+
 async function runTeamContinuation(teamId) {
   const team = state.teams?.[teamId]
   if (!team || team.closedAt || team.continuation?.mode !== 'auto-until-blocked') return false
+  const coalesced = coalesceContinuations(team)
+  if (coalesced.changed) {
+    saveStateNow(state)
+    log('coalesced team continuation backlog', team.id, `${coalesced.count} events`)
+  }
   const coordinator = sessionByChannel(team.coordinatorChannel)
   if (!coordinator || state.channels?.[team.coordinatorChannel] !== coordinator.id) {
     const event = team.continuation?.pending?.[0]
@@ -2868,20 +2944,41 @@ async function runTeamContinuation(teamId) {
     }
     return false
   }
+  await reconcileIdleCodexCoordinator(team, coordinator)
+  // The reconciliation probe awaits process and tmux inspection. A provider
+  // switch or channel rebind may win that race; never continue through the
+  // coordinator object captured before those awaits.
+  if (sessionByChannel(team.coordinatorChannel) !== coordinator ||
+      state.channels?.[team.coordinatorChannel] !== coordinator.id) {
+    teamCoordinatorIdleProof.delete(team.id)
+    scheduleTeamContinuation(teamId, 1000)
+    return false
+  }
   if (coordinator.teamTurn || coordinator.teamInputReservation || coordinator.teamActiveTaskId ||
       coordinator.codexTurnStartedAt || coordinator.piTurnStartedAt || pollers.has(coordinator.id) ||
       codexPollers.has(coordinator.id) || piPollers.has(coordinator.id)) {
+    const reason = teamContinuationBusyReason(coordinator)
+    const waiting = noteContinuationWaiting(team, reason)
+    if (waiting.changed) saveStateNow(state)
+    if (waiting.notify) {
+      await post(team.coordinatorChannel,
+        `⏳ Team continuation is queued while the coordinator remains busy (${reason}). SAB will continue automatically when its current turn finishes.`).catch(() => {})
+    }
     scheduleTeamContinuation(teamId, 5000)
     return false
   }
+  if (clearContinuationWaiting(team)) saveStateNow(state)
   const event = claimContinuation(team)
   if (!event) return false
   saveStateNow(state)
   try {
     beginOwnerTeamTurn(coordinator, { messageTs: `team-continuation:${event.id}` }, { budget: 20 })
     saveStateNow(state)
+    const eventDescription = Number(event.coalescedCount) > 1
+      ? `${event.coalescedCount} queued team events (latest task ${event.taskId})`
+      : `a new ${event.kind} event (task ${event.taskId})`
     await injectText(coordinator,
-      `SYSTEM NOTIFICATION: A team executor produced a new ${event.kind} event (task ${event.taskId}). ` +
+      `SYSTEM NOTIFICATION: Team executors produced ${eventDescription}. ` +
       'Read the authoritative team inbox and context now. Handle any blocker or dispatch the next approved, non-overlapping slice. ' +
       'Do not assume the event payload is complete.',
       { privateContext: `\n\n${coordinatorPromptContext(state, coordinator.channel)}` })

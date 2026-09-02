@@ -284,7 +284,11 @@ The owner chooses workers with Slack's private-channel picker. Team identity is
 bound to immutable channel IDs and survives channel renames and provider
 switching. The default topology permits coordinator → worker tasks and worker →
 coordinator replies/results; worker-to-worker relay is disabled. File relay is
-off per worker until explicitly enabled.
+off per worker until explicitly enabled. Automatic mode coalesces concurrent
+executor events into one coordinator wake because that wake rereads the complete
+authenticated inbox. If a resumed Codex coordinator omits its completion hook,
+SAB uses bounded exact-process idle confirmation to release only the stale turn
+fence; prolonged legitimate waits are reported once in the coordinator channel.
 
 Eligible owner turns receive private, provider-neutral role/tool context. A
 delegated worker receives an exact task header, while collaborators receive no

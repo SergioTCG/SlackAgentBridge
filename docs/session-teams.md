@@ -124,6 +124,16 @@ it never retries an uncertain claim. That trades a visible failure for duplicate
 work. If the claimed envelope was waiting in an in-memory provider queue, SAB
 removes that exact marker before reporting failure so a later reconnect cannot
 execute it.
+
+In automatic mode, multiple executor events accumulated while the coordinator
+is busy are represented by one durable wake; the coordinator always rereads the
+complete authenticated inbox, so old event payloads are neither replayed nor
+trusted. A resumed Codex TUI that omits lifecycle hooks is reconciled only after
+two unchanged, exact-process idle observations and a grace period. SAB then
+clears the stale coordinator fence and proceeds without scraping a final answer
+or assigning a worker result. A genuine busy wait is reported once after one
+minute and continues to retry safely.
+
 Claude transcript completion, the Codex Stop hook, or the Pi extension supplies
 the stable final result. SAB persists completion plus an idempotent Slack
 delivery claim before reporting it in the coordinator channel. Restart

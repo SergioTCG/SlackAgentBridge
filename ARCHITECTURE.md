@@ -244,6 +244,18 @@ automatic continuation is serialized per team, survives daemon restart through
 the state journal, and pauses with an actionable owner notification when the
 coordinator is missing, busy, or a safety/product decision is required.
 
+Because the inbox is authoritative, all events pending when a continuation is
+claimed are durably coalesced into one wake rather than replayed as separate
+model turns. Covered event keys remain in the bounded record for retry
+idempotency. A resumed Codex coordinator may exceptionally omit both prompt and
+completion hooks. SAB may release only its bridge-owned turn/input fences after
+the exact authoritative PID/tmux has shown the native idle input surface twice,
+unchanged, after a grace period. This path never parses a transcript or terminal
+answer and never completes a delegated worker task. A changed session, process,
+turn fingerprint, queued input, permission, transition, or task resets the proof.
+Ordinary busy waits receive one delayed visible notice instead of remaining
+silent indefinitely.
+
 The process claim also requires the provider to be the root provider process
 under the SAB tmux pane. Nested utilities such as `codex review` inherit the
 parent environment but are rejected before SessionStart registration and before

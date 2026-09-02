@@ -244,7 +244,10 @@ Slack when its scope or progress is no longer appropriate.
 - Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
   replies create only durable event identifiers; the coordinator rereads the
   authenticated team inbox before acting. Disable with `/sab-team manual` when
-  every dispatch requires human approval.
+  every dispatch requires human approval. Missing Codex lifecycle hooks may
+  release only stale coordinator fences after repeated idle proof from the exact
+  authoritative PID/tmux; the bridge does not scrape terminal answers, infer a
+  worker result, retry queued provider input, or cross a session/channel rebind.
 - Remember that mirrored prompts, responses, filenames, and attachments are
   stored under the Slack workspace's retention and administration policies.
 - Treat artifact requests as deliberate data egress. Review collaborator access

@@ -36,6 +36,12 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Automatic team continuation no longer remains silently blocked when a resumed
+  Codex coordinator returns to its idle input surface without emitting prompt or
+  completion hooks. Exact PID/tmux and unchanged-turn idle proof now releases
+  only stale coordinator fences, concurrent executor events coalesce into one
+  authoritative-inbox wake, and prolonged legitimate waits receive one visible
+  coordinator-channel notice.
 - Idle Codex resumes triggered by `/sab-model`, `/sab-effort`, `/sab-flags`, or
   an ordinary Slack wake now complete the same exact-tmux ancestry adoption as
   `/sab-update`. A visible TUI without `SessionStart` can no longer leave the
