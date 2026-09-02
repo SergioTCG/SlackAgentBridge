@@ -73,8 +73,10 @@ accounts, and the Mac user running the daemon.
   every call. Only a current owner-initiated coordinator turn receives a
   bounded dispatch budget. Collaborator and unrelated terminal turns fail
   closed. A worker may reply only while its exact native session owns the exact
-  journaled task. Stop, kill, session death/replacement, switch, removal, close,
-  and expiry revoke or invalidate stale authority.
+  journaled task. Such an authenticated task-bound reply proves prompt
+  acceptance if the provider omitted its lifecycle marker, but never substitutes
+  for a stable final. Stop, kill, session death/replacement, switch, removal,
+  close, and expiry revoke or invalidate stale authority.
 - **Root-provider process claims:** a nested provider utility may inherit SAB
   environment variables and live under the same tmux pane, but another matching
   provider process in its ancestry proves it is a child job. SAB rejects that
@@ -83,8 +85,9 @@ accounts, and the Mac user running the daemon.
   deduplicate retries. The daemon persists `queued` before Slack/provider side
   effects, posts the bounded task and status in both linked channels, and
   persists an exact target claim before injection. A restart may deliver a
-  queued task but never retries an uncertain dispatch. Stable provider finals
-  can complete only their bound task/session. Completion posts have durable,
+  queued task but never retries an uncertain dispatch. Persisted worker replies
+  prevent already-accepted work from being misclassified as uncertain; stable
+  provider finals can complete only their bound task/session. Completion posts have durable,
   idempotent delivery claims; input/file delivery is serialized in-process and
   failed queued envelopes are removed before reconnect; missing audit-card
   updates are reported without suppressing the stable result; queue, reply,
@@ -214,6 +217,11 @@ accounts, and the Mac user running the daemon.
   tmux ancestry immediately before the atomic state repair. Boot recovery uses
   the same checks and cannot adopt a standby, rebound, cross-channel, or
   unrelated Codex process.
+- **Claude resume readiness:** a detached tmux appearing is not enough to revive
+  a Claude session. Only the exact `SessionStart` PID/tmux claim makes it active.
+  Failed attempts retain only a mode-0600 numeric exit code under the private
+  runtime directory—never pane text, prompts, credentials, or transcripts—and
+  clear their input and viewport claims before reporting failure.
 
 These measures reduce accidental exposure; they do not sandbox a provider that
 was deliberately launched in dangerous mode.

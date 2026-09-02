@@ -36,6 +36,18 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Claude resurrection no longer mistakes a briefly materialized tmux for an
+  active session. SAB now waits for the exact `SessionStart` PID/tmux claim,
+  retries a transient provider exit once, records only its bounded numeric exit
+  status, and visibly reports final failure after clearing stale input and
+  viewport claims while preserving the queued message.
+- Delegated work no longer fails as an uncertain dispatch when the exact
+  authenticated worker has already returned a task-bound update but Codex
+  omitted `UserPromptSubmit`. The reply now atomically proves the `running`
+  transition, restores live Codex status tracking, and heals the same persisted
+  pre-upgrade state after restart without treating interim text as a final.
+  Reconciliation also requires the session's exact active-task claim before it
+  can mutate or release that worker.
 - Automatic team continuation no longer remains silently blocked when a resumed
   Codex coordinator returns to its idle input surface without emitting prompt or
   completion hooks. Exact PID/tmux and unchanged-turn idle proof now releases

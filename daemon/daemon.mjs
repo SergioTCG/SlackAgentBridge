@@ -106,6 +106,7 @@ import {
   applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
   tmuxCodexProcessPid, waitForCodexResumeClaim,
 } from './codex-resume.mjs'
+import { waitForClaudeResumeClaim } from './claude-resume.mjs'
 import {
   AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
   AUTOMATION_TMUX_POLL_INTERVAL_MS,
@@ -1224,12 +1225,16 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   const provider = normalizeProvider(requestedProvider)
   if (!provider) return
   const ev = body.hook_event_name
+  const sid = body.session_id
+  if (!sid) return
   const pid = await resolveAgentPid(ppid, provider)
   if (!pid) return
   const requestedTmux = tmux
+  if (requestedTmux && abandonedResumeTmux.has(requestedTmux)) {
+    log('ignored hook from abandoned resume', ev, String(sid || '').slice(0, 8), requestedTmux)
+    return
+  }
   if (tmux && !(await validProviderRootClaim(pid, tmux, provider))) return
-  const sid = body.session_id
-  if (!sid) return
   const automationHook = automationLifecycle.findForHook(provider, sid, requestedTmux)
   if (shouldFenceAutomationHook(automationHook, requestedTmux)) {
     log('ignored hook from stopped automation', ev, String(sid).slice(0, 8), automationHook.externalKey)
@@ -1783,6 +1788,47 @@ function resumeCwd(session) {
 // messages that arrive while claude is still starting used to trigger fresh spawns
 // (and fresh "Waking…" posts) every time. Cleared by SessionStart, or after 90s.
 const resurrectInFlight = new Map()
+const abandonedResumeTmux = new Set()
+
+function abandonResumeTmux(tmuxName) {
+  abandonedResumeTmux.add(tmuxName)
+  const timer = setTimeout(() => abandonedResumeTmux.delete(tmuxName), 2 * 60 * 1000)
+  timer.unref?.()
+}
+
+function claudeStartupStatusPath(tmuxName) {
+  const dir = path.join(CONFIG_DIR, 'runtime')
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try { fs.chmodSync(dir, 0o700) } catch {}
+  const file = path.join(dir, `resume-${tmuxName}.exit`)
+  try { fs.unlinkSync(file) } catch {}
+  fs.writeFileSync(`${file}.armed`, '', { mode: 0o600 })
+  return file
+}
+
+function readClaudeStartupExit(file) {
+  try {
+    const value = Number(fs.readFileSync(file, 'utf8').trim())
+    return Number.isInteger(value) && value >= 0 && value <= 255 ? value : null
+  } catch { return null }
+}
+
+function removeClaudeStartupStatus(file) {
+  if (!file) return
+  try { fs.unlinkSync(file) } catch {}
+  try { fs.unlinkSync(`${file}.armed`) } catch {}
+}
+
+async function completeClaudeResumeReadiness(session, tmuxName, startupStatusPath) {
+  const nodeId = nodeIdForSession(session)
+  return waitForClaudeResumeClaim(session, {
+    expectedTmux: tmuxName,
+    tmuxAlive: name => executionNodes.tmuxAlive(nodeId, name),
+    pidAlive,
+    validTmuxClaim,
+    readExitCode: () => readClaudeStartupExit(startupStatusPath),
+  })
+}
 
 async function resurrect(session, text) {
   const inflight = resurrectInFlight.get(session.id)
@@ -1790,6 +1836,8 @@ async function resurrect(session, text) {
   resurrectInFlight.set(session.id, Date.now())
   let up = false
   let initialPrompt = null
+  let lastResumeError = null
+  let lastTmuxName = null
   try {
     const anchored = resumeCwd(session)
     if (anchored !== session.cwd) { log('resume cwd re-anchored', session.id.slice(0, 8), session.cwd, '→', anchored); session.cwd = anchored; saveState(state) }
@@ -1828,18 +1876,47 @@ async function resurrect(session, text) {
     // Start headlessly and verify that the tmux-owned provider materializes.
     for (let attempt = 1; attempt <= 2; attempt++) {
       const tmuxName = `sab-res-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`
+      lastTmuxName = tmuxName
+      const startupStatusPath = provider === 'claude' ? claudeStartupStatusPath(tmuxName) : null
       session.tmux = tmuxName
       saveState(state)
       const nodeId = nodeIdForSession(session)
-      await executionNodes.spawn(nodeId, {
-        cwd: session.cwd,
-        args,
-        title: `sab ${path.basename(session.cwd)} (resumed)`,
-        tmuxName,
-        autoConsent: provider === 'claude',
-        account: provider === 'claude' ? session.account : null, // Claude-only subscription binding
-        provider,
-      })
+      try {
+        await executionNodes.spawn(nodeId, {
+          cwd: session.cwd,
+          args,
+          title: `sab ${path.basename(session.cwd)} (resumed)`,
+          tmuxName,
+          autoConsent: provider === 'claude',
+          account: provider === 'claude' ? session.account : null, // Claude-only subscription binding
+          provider,
+          startupStatusPath,
+        })
+      } catch (error) {
+        lastResumeError = error
+        removeClaudeStartupStatus(startupStatusPath)
+        log(`${providerLabel(provider)} resume spawn failed`, session.id.slice(0, 8), tmuxName,
+          String(error?.message || error))
+        continue
+      }
+      if (provider === 'claude') {
+        try {
+          await completeClaudeResumeReadiness(session, tmuxName, startupStatusPath)
+          up = true
+          removeClaudeStartupStatus(startupStatusPath)
+          return
+        } catch (error) {
+          lastResumeError = error
+          up = false
+          log('Claude resume readiness failed', session.id.slice(0, 8), tmuxName,
+            String(error?.message || error))
+          abandonResumeTmux(tmuxName)
+          await tmuxKill(tmuxName).catch(() => {})
+          removeClaudeStartupStatus(startupStatusPath)
+          if (session.tmux === tmuxName) session.pid = null
+          continue
+        }
+      }
       for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await executionNodes.tmuxAlive(nodeId, tmuxName) }
       if (up) {
         if (provider === 'codex') {
@@ -1857,9 +1934,20 @@ async function resurrect(session, text) {
       log('spawn did not materialize', { attempt, tmuxName })
       await execFile('pkill', ['-f', tmuxName]).catch(() => {}) // kill the failed young instance
     }
+    if (session.tmux === lastTmuxName) {
+      session.tmux = null
+      session.pid = null
+    }
+    if (session.channel && state.channels?.[session.channel] === session.id &&
+        state.channelTmux?.[session.channel] === lastTmuxName) {
+      delete state.channelTmux[session.channel]
+    }
+    clearTeamInputReservation(session)
+    saveStateNow(state)
+    const detail = String(lastResumeError?.message || 'the provider exited before establishing its lifecycle identity').slice(0, 500)
     await post(session.channel,
-      '⚠️ *The provider process did not initialize* — I cleaned up and retried without luck. ' +
-      'The message remains queued; inspect the local daemon log and retry when the provider is available.')
+      `⚠️ *The provider process did not initialize* — ${detail}. I cleaned up and retried without luck. ` +
+      'The message remains queued; send another message after correcting or updating the provider to retry.')
   } finally {
     if (!up) {
       resurrectInFlight.delete(session.id)
@@ -2819,6 +2907,15 @@ const teamTurnProof = new Set()
 const teamContinuationTimers = new Map()
 const teamCoordinatorIdleProof = new Map()
 
+function recordTeamWorkerProof(session, task) {
+  teamTurnProof.add(session.id)
+  if (providerOf(session) !== 'codex' || session.codexTurnStartedAt) return false
+  const claimedAt = Date.parse(task.dispatchClaimedAt || task.startedAt || '')
+  session.codexTurnStartedAt = Number.isFinite(claimedAt) ? claimedAt : Date.now()
+  delete session.codexUsageBaseline
+  return true
+}
+
 function reserveTeamInput(session, source) {
   if (!session || session.teamInputReservation) return false
   session.teamInputReservation = { source, acceptedAt: new Date().toISOString() }
@@ -3443,18 +3540,28 @@ async function reconcileTeamTasks() {
       else if (['dispatching', 'running'].includes(task.status)) {
         const target = state.sessions?.[task.targetSessionId]
         if (!target || target.channel !== task.targetChannel || state.channels?.[task.targetChannel] !== target.id ||
-            !(target.pid && pidAlive(target.pid))) {
+            target.teamActiveTaskId !== task.id || !(target.pid && pidAlive(target.pid))) {
           if (target?.teamActiveTaskId === task.id) {
             delete target.teamActiveTaskId
             discardQueuedTeamTaskPrompt(target, task.id)
           }
-          failTeamTask(state, task.id, 'The assigned worker session ended or lost channel authority.')
+          failTeamTask(state, task.id, 'The assigned worker session ended or lost exact task/channel authority.')
           saveStateNow(state)
           await ensureTeamCompletionDelivery(task).catch(error =>
             log('team authority-loss delivery deferred', task.id, String(error?.message || error)))
+        } else if (task.status === 'dispatching' && task.replies?.length) {
+          // A reply already journaled by the exact authenticated worker proves
+          // the delegated prompt was accepted even when Codex omitted its
+          // UserPromptSubmit hook. This also heals reply/task pairs written by
+          // an older daemon before this acceptance rule existed.
+          const firstReplyAt = Date.parse(task.replies[0]?.createdAt || '')
+          markTeamTaskRunning(state, task.id, { now: Number.isFinite(firstReplyAt) ? firstReplyAt : now })
+          saveStateNow(state)
+          await updateTeamTaskAudit(task).catch(error =>
+            log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
         } else if (task.status === 'dispatching' && Date.parse(task.dispatchClaimedAt || 0) + 5 * 60 * 1000 <= now &&
             !pollers.has(target.id) && !codexPollers.has(target.id) && !piPollers.has(target.id)) {
-          delete target.teamActiveTaskId
+          if (target.teamActiveTaskId === task.id) delete target.teamActiveTaskId
           discardQueuedTeamTaskPrompt(target, task.id)
           failTeamTask(state, task.id, 'Delivery became uncertain before the provider acknowledged the delegated turn; SAB did not retry it to avoid duplicate work.')
           saveStateNow(state)
@@ -3643,6 +3750,17 @@ const teamService = {
       const appended = appendTeamTaskReply(state, task.id, {
         requestId: request.requestId, fromChannel: session.channel, text: request.text, files: retryFiles,
       })
+      const workerProof = appended.accepted ||
+        (task.status === 'running' && session.teamActiveTaskId === task.id)
+      const startCodexStatus = workerProof && recordTeamWorkerProof(session, task)
+      if (appended.accepted || startCodexStatus) {
+        saveStateNow(state)
+        if (startCodexStatus) startCodexPoller(session)
+      }
+      if (appended.accepted) {
+        await updateTeamTaskAudit(task).catch(error =>
+          log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
+      }
       await ensureTeamReplyDelivery(task, appended.reply)
       return {
         reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === appended.reply.id),
@@ -3681,7 +3799,13 @@ const teamService = {
         created: false,
       }
     }
+    const startCodexStatus = recordTeamWorkerProof(session, task)
     saveStateNow(state)
+    if (startCodexStatus) startCodexPoller(session)
+    if (appended.accepted) {
+      await updateTeamTaskAudit(task).catch(error =>
+        log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
+    }
     const team = state.teams?.[task.teamId]
     if (team && teamReplyNeedsContinuation(reply.text)) {
       try {
