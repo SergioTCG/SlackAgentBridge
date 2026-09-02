@@ -88,6 +88,7 @@ test('Codex resume args use the subcommand and preserve provider settings', () =
   const session = {
     id: 'thr-123', provider: 'codex',
     launchFlags: '--search --model=old --config=model_reasoning_effort="low"',
+    requestedModel: 'gpt-5.6-sol', requestedEffort: 'high',
     model: 'gpt-5.6-sol', effort: 'high',
   }
   assert.deepEqual(resumeArgsFor(session), [
@@ -98,6 +99,18 @@ test('Codex resume args use the subcommand and preserve provider settings', () =
   assert.deepEqual(resumeArgsFor({ id: 'thr-456', provider: 'codex' }), [
     'resume', CODEX_DANGEROUS_FLAG, 'thr-456',
   ])
+  assert.deepEqual(resumeArgsFor({
+    id: 'thr-fallback', provider: 'codex',
+    launchFlags: '--yolo --model=gpt-5.6-sol --config model_reasoning_effort="xhigh"',
+    model: 'gpt-5.6-luna', effort: 'xhigh',
+  }), [
+    'resume', '--yolo', '--model', 'gpt-5.6-sol',
+    '--config', 'model_reasoning_effort="xhigh"', 'thr-fallback',
+  ])
+  assert.deepEqual(resumeArgsFor({
+    id: 'thr-explicit', provider: 'codex',
+    launchFlags: '--model=gpt-5.6-luna', requestedModel: 'gpt-5.6-sol', model: 'gpt-5.6-luna',
+  }), ['resume', CODEX_DANGEROUS_FLAG, '--model', 'gpt-5.6-sol', 'thr-explicit'])
   assert.deepEqual(resumeArgsFor({ id: 'thr-789', provider: 'codex' }, {
     initialPrompt: 'wake from Slack\nwith the full message',
   }), [

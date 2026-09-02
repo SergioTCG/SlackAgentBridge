@@ -229,8 +229,13 @@ export function resumeArgsFor(session, {
     keep.push(t)
   }
   if (!keep.length) keep.push(...String(defaultCodexFlags).split(/\s+/).filter(Boolean))
-  if (session.model) keep.push('--model', session.model)
-  if (session.effort) keep.push('--config', `model_reasoning_effort=${tomlString(session.effort)}`)
+  // Keep operator intent separate from the actual model reported by Codex.
+  // A capacity fallback may start Luna even though Sol was requested; using the
+  // reported model here would make that temporary fallback permanent on resume.
+  const requestedModel = session.requestedModel || codexModelFromArgs(session.launchFlags) || session.model
+  const requestedEffort = session.requestedEffort || codexEffortFromArgs(session.launchFlags) || session.effort
+  if (requestedModel) keep.push('--model', requestedModel)
+  if (requestedEffort) keep.push('--config', `model_reasoning_effort=${tomlString(requestedEffort)}`)
   const args = ['resume', ...keep, session.id]
   if (initialPrompt) args.push(String(initialPrompt))
   return args
@@ -410,6 +415,19 @@ export function codexEffortFromArgs(flags) {
   const re = /(?:^|\s)(?:-c|--config)(?:=|\s+)(?:["']?model_reasoning_effort\s*=\s*)("[^"]*"|'[^']*'|[^\s"']+)/g
   for (const match of String(flags || '').matchAll(re)) effort = normalizeCodexEffort(match[1]) || effort
   return effort
+}
+
+export function codexModelFromArgs(flags) {
+  let model = null
+  const toks = String(flags || '').trim().split(/\s+/).filter(Boolean)
+  for (let i = 0; i < toks.length; i++) {
+    const token = toks[i]
+    let value = null
+    if (token === '-m' || token === '--model') value = toks[++i]
+    else if (token.startsWith('--model=')) value = token.slice('--model='.length)
+    if (value && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) model = value
+  }
+  return model
 }
 
 function codexProfileFromArgs(flags) {

@@ -16,7 +16,7 @@ import {
 import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } from './slackout.mjs'
 import {
   CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, PI_EFFORTS, PROVIDERS, acceptHookSettings, allowedFlags,
-  codexFlagsWithoutInitialPrompt, codexPermissionDecision, codexStatusRecoveryDecision,
+  codexFlagsWithoutInitialPrompt, codexModelFromArgs, codexPermissionDecision, codexStatusRecoveryDecision,
   defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, normalizeRemoteLaunchFlags, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
@@ -1166,6 +1166,21 @@ async function validProviderRootClaim(pid, tname, provider) {
   return valid
 }
 
+async function reportCodexModelMismatch(session) {
+  if (!session?.channel || providerOf(session) !== 'codex') return
+  if (session.requestedModel && session.model && session.requestedModel !== session.model) {
+    const mismatch = `${session.requestedModel}->${session.model}`
+    if (session.modelMismatch === mismatch) return
+    session.modelMismatch = mismatch
+    saveStateNow(state)
+    await post(session.channel, `⚠️ Codex started with *${session.model}* although *${session.requestedModel}* was requested. ` +
+      'The requested model remains durable for the next restart; this turn may be using a capacity fallback.')
+  } else if (session.modelMismatch) {
+    delete session.modelMismatch
+    saveStateNow(state)
+  }
+}
+
 async function completeAuthoritativeSessionStart(session, provider, source) {
   const sid = session.id
   const tmux = session.tmux || ''
@@ -1177,6 +1192,7 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
     await updateTopic(session) // existing channels also need fresh SessionStart metadata
     if (source === 'resume') await post(ch, '▶️ *Resumed*')
     else if (source === 'clear') await post(ch, '🧹 *Context cleared* — same channel, fresh session')
+    if (provider === 'codex') await reportCodexModelMismatch(session)
     automationLifecycle.correlateSessionStart(session)
 
     // Flush messages queued during resurrection. The completion claim above is
@@ -1300,7 +1316,10 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   if (session.tmux && !tmux && !(await validTmuxClaim(pid, session.tmux))) session.tmux = null
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
-  if (provider === 'codex' && body.model && (ev === 'SessionStart' || !restarting.has(sid))) session.model = body.model
+  if (provider === 'codex' && body.model && (ev === 'SessionStart' || !restarting.has(sid))) {
+    session.model = body.model
+    sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), model: body.model })
+  }
   const previousManagedId = session.managed?.id || null
   if (provider === 'pi') {
     if (body.model) session.model = body.model
@@ -1325,6 +1344,10 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   const acceptSettings = acceptHookSettings(ev, restarting.has(sid))
   if (acceptSettings && flags != null && flags !== '') {
     session.launchFlags = provider === 'codex' ? codexFlagsWithoutInitialPrompt(flags, sid) : flags
+    if (provider === 'codex') {
+      session.requestedModel = codexModelFromArgs(session.launchFlags) || session.requestedModel
+      session.requestedEffort = resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd }) || session.requestedEffort
+    }
   }
   if (provider === 'codex' && ev === 'SessionStart') {
     const effort = resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd })
@@ -1338,6 +1361,14 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     targetClaim.lineage.legs[provider] = sid
     saveStateNow(state)
   } else saveState(state)
+
+  // An idle Codex resume may be adopted without SessionStart. Its first later
+  // hook is therefore also a valid point to surface an actual/requested model
+  // mismatch, using the same durable dedupe as the normal startup path.
+  if (provider === 'codex' && body.model && session.channel && !targetClaim && ev !== 'SessionStart') {
+    await reportCodexModelMismatch(session).catch(error =>
+      log('Codex model mismatch notice failed', session.id.slice(0, 8), String(error?.message || error)))
+  }
 
   if (provider === 'pi' && ev === 'ControlResult') {
     const waiter = piControlWaiters.get(body.request_id)
@@ -3911,6 +3942,8 @@ async function setFlags(session, flags) {
 
 async function setCodexSetting(session, name, value) {
   session[name] = value
+  if (name === 'model') session.requestedModel = value
+  if (name === 'effort') session.requestedEffort = value
   sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), [name]: value })
   const alive = session.pid && pidAlive(session.pid)
   if (!alive) {
