@@ -8,6 +8,10 @@ Notable changes to this project. Format based on
 
 ### Added
 
+- Added opt-in, durable `auto-until-blocked` team continuation. Completed or
+  blocked executor replies enqueue deduplicated events; an idle authoritative
+  coordinator receives a bounded continuation turn and resumes after daemon
+  restart, while existing teams remain manual.
 - Added bridge-owned session teams for secure coordinator/worker delegation
   across explicitly linked local SAB channels. Owner-only `/sab-team`
   administration, repeated provider-neutral role context, the JSON-safe `sab

@@ -240,6 +240,10 @@ Slack when its scope or progress is no longer appropriate.
 - Regularly inspect private-channel membership and collaborator allowlists.
 - Regularly inspect `/sab-team status` and `/sab-team permissions`; close teams
   whose coordination work is finished, and leave file relay off unless needed.
+- Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
+  replies create only durable event identifiers; the coordinator rereads the
+  authenticated team inbox before acting. Disable with `/sab-team manual` when
+  every dispatch requires human approval.
 - Remember that mirrored prompts, responses, filenames, and attachments are
   stored under the Slack workspace's retention and administration policies.
 - Treat artifact requests as deliberate data egress. Review collaborator access

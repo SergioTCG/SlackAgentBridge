@@ -83,6 +83,9 @@ import {
   removeTeamWorker, resolveTeamPeer, setTeamWorkerFiles, taskMarker, tasksForChannel, teamById,
   teamContext, teamTask, teamTaskDeliverySettled, teamTaskForRequest, withoutDelegatedTaskPrompt,
 } from './teams.mjs'
+import {
+  claimContinuation, deferContinuation, queueContinuation, setContinuationMode, settleContinuation,
+} from './team-continuation.mjs'
 import { createExecutionNodeRouter, createLocalExecutionNode } from './execution-nodes.mjs'
 import { LOCAL_NODE_ID, localSessionByChannel, localSessionByPid, nodeIdForSession } from './nodes.mjs'
 import { createDirectSlackRuntime } from './slack-runtime.mjs'
@@ -2766,6 +2769,7 @@ const teamTaskFileDeliveries = new Map()
 const teamReplyDeliveries = new Map()
 const teamCompletionDeliveries = new Map()
 const teamTurnProof = new Set()
+const teamContinuationTimers = new Map()
 
 function reserveTeamInput(session, source) {
   if (!session || session.teamInputReservation) return false
@@ -2789,6 +2793,64 @@ function discardQueuedTeamTaskPrompt(session, taskId) {
   else pendingBySid.delete(session.id)
   log('discarded failed queued team prompt', taskId, session.id.slice(0, 8))
   return true
+}
+
+function teamReplyNeedsContinuation(text) {
+  return /\b(blocked|blocker|cannot|can't|failed|failure|needs? (?:owner|decision|input)|waiting on|unavailable|unsafe)\b/i.test(String(text || ''))
+}
+
+function scheduleTeamContinuation(teamId, delay = 0) {
+  if (teamContinuationTimers.has(teamId)) return
+  const timer = setTimeout(() => {
+    teamContinuationTimers.delete(teamId)
+    runTeamContinuation(teamId).catch(error => log('team continuation failed', teamId, String(error?.message || error)))
+  }, Math.max(0, delay))
+  teamContinuationTimers.set(teamId, timer)
+  timer.unref?.()
+}
+
+async function runTeamContinuation(teamId) {
+  const team = state.teams?.[teamId]
+  if (!team || team.closedAt || team.continuation?.mode !== 'auto-until-blocked') return false
+  const coordinator = sessionByChannel(team.coordinatorChannel)
+  if (!coordinator || state.channels?.[team.coordinatorChannel] !== coordinator.id) {
+    const event = team.continuation?.pending?.[0]
+    if (event) {
+      const claimed = claimContinuation(team)
+      settleContinuation(team, claimed.id, { status: 'needs_owner', error: 'Coordinator session is not authoritative.' })
+      saveStateNow(state)
+      await post(team.coordinatorChannel, '⚠️ Team continuation is waiting: the coordinator session is not currently authoritative.').catch(() => {})
+    }
+    return false
+  }
+  if (coordinator.teamTurn || coordinator.teamInputReservation || coordinator.teamActiveTaskId ||
+      coordinator.codexTurnStartedAt || coordinator.piTurnStartedAt || pollers.has(coordinator.id) ||
+      codexPollers.has(coordinator.id) || piPollers.has(coordinator.id)) {
+    scheduleTeamContinuation(teamId, 5000)
+    return false
+  }
+  const event = claimContinuation(team)
+  if (!event) return false
+  saveStateNow(state)
+  try {
+    beginOwnerTeamTurn(coordinator, { messageTs: `team-continuation:${event.id}` }, { budget: 20 })
+    saveStateNow(state)
+    await injectText(coordinator,
+      `SYSTEM NOTIFICATION: A team executor produced a new ${event.kind} event (task ${event.taskId}). ` +
+      'Read the authoritative team inbox and context now. Handle any blocker or dispatch the next approved, non-overlapping slice. ' +
+      'Do not assume the event payload is complete.',
+      { privateContext: `\n\n${coordinatorPromptContext(state, coordinator.channel)}` })
+    settleContinuation(team, event.id, { status: 'succeeded' })
+    saveStateNow(state)
+    return true
+  } catch (error) {
+    deferContinuation(team, event.id)
+    team.continuation.pending[0].error = String(error?.message || error).slice(0, 1000)
+    saveStateNow(state)
+    scheduleTeamContinuation(teamId, 15000)
+    await post(team.coordinatorChannel, `⚠️ Team continuation is retrying: ${String(error?.message || error).slice(0, 400)}`).catch(() => {})
+    return false
+  }
 }
 
 function teamTaskStatusText(task) {
@@ -3275,7 +3337,11 @@ function startTeamReconciler() {
   if (teamReconciler) return
   teamReconciler = setInterval(() => reconcileTeamTasks().catch(error => log('team reconciliation failed', String(error))), TEAM_RECONCILE_MS)
   teamReconciler.unref?.()
-  reconcileTeamTasks().catch(error => log('team reconciliation failed', String(error)))
+  reconcileTeamTasks().then(() => {
+    for (const team of Object.values(state.teams || {})) {
+      if (team?.continuation?.mode === 'auto-until-blocked' && team.continuation.pending?.length) scheduleTeamContinuation(team.id)
+    }
+  }).catch(error => log('team reconciliation failed', String(error)))
 }
 
 async function finishTeamTaskForSession(session, result, error = null) {
@@ -3299,6 +3365,14 @@ async function finishTeamTaskForSession(session, result, error = null) {
     return false
   }
   saveStateNow(state)
+  const team = state.teams?.[task.teamId]
+  if (team) {
+    try {
+      queueContinuation(team, { taskId: task.id, kind: error ? 'failed' : 'completed' })
+      saveStateNow(state)
+      scheduleTeamContinuation(task.teamId)
+    } catch (failure) { log('team continuation queue full', task.id, String(failure?.message || failure)) }
+  }
   await ensureTeamCompletionDelivery(task).catch(failure =>
     log('team completion delivery deferred', task.id, String(failure?.message || failure)))
   teamTurnProof.delete(session.id)
@@ -3319,6 +3393,14 @@ async function failTeamTaskForSession(session, reason) {
   try { task = failTeamTask(state, taskId, reason) }
   catch { saveStateNow(state); return false }
   saveStateNow(state)
+  const team = state.teams?.[task.teamId]
+  if (team) {
+    try {
+      queueContinuation(team, { taskId: task.id, kind: 'failed' })
+      saveStateNow(state)
+      scheduleTeamContinuation(task.teamId)
+    } catch (failure) { log('team continuation queue full', task.id, String(failure?.message || failure)) }
+  }
   await ensureTeamCompletionDelivery(task).catch(error =>
     log('team failure delivery deferred', task.id, String(error?.message || error)))
   teamTurnProof.delete(session.id)
@@ -3458,6 +3540,14 @@ const teamService = {
       }
     }
     saveStateNow(state)
+    const team = state.teams?.[task.teamId]
+    if (team && teamReplyNeedsContinuation(reply.text)) {
+      try {
+        queueContinuation(team, { taskId: task.id, replyId: reply.id, kind: 'reply' })
+        saveStateNow(state)
+        scheduleTeamContinuation(task.teamId)
+      } catch (failure) { log('team continuation queue full', task.id, String(failure?.message || failure)) }
+    }
     await ensureTeamReplyDelivery(task, reply)
     return { reply: publicTeamTask(task, task.sourceChannel).replies.at(-1), task: publicTeamTask(task, task.sourceChannel), created: true }
   },
@@ -3872,7 +3962,7 @@ function teamStatusMarkdown(team) {
     const task = Object.values(state.teamTasks || {}).find(item => item.targetChannel === channel && ['queued', 'dispatching', 'running'].includes(item.status))
     return `| ${member.alias} | ${member.role} | <#${channel}> | ${live ? '🟢 live' : '💤 dormant'} | ${member.files ? 'enabled' : 'off'} | ${task ? `\`${task.id}\` · ${task.status}` : '—'} |`
   })
-  return `*Session team \`${team.name}\`* · version ${team.version}\n` +
+  return `*Session team \`${team.name}\`* · version ${team.version} · continuation: *${team.continuation?.mode || 'manual'}*\n` +
     `| Alias | Role | Channel | Session | Files | Active task |\n|---|---|---|---|---|---|\n${rows.join('\n')}`
 }
 
@@ -3942,6 +4032,17 @@ async function handleTeamCommand(channel, rest) {
   if (team.coordinatorChannel !== channel) {
     return post(channel, `This channel is a worker in \`${team.name}\`. Team membership is managed from <#${team.coordinatorChannel}>.`)
   }
+  if (sub === 'auto' || sub === 'manual') {
+    if (rest.length !== 1) return post(channel, 'Usage: `/sab-team auto` or `/sab-team manual`')
+    try {
+      setContinuationMode(team, sub === 'auto' ? 'auto-until-blocked' : 'manual')
+      saveStateNow(state)
+      if (sub === 'auto') scheduleTeamContinuation(team.id)
+      return post(channel, sub === 'auto'
+        ? '▶️ *Automatic coordinator continuation enabled* — the team will proceed until a blocker or safety decision requires you.'
+        : '⏸️ *Automatic coordinator continuation disabled* — worker results will wait for an owner turn.')
+    } catch (error) { return post(channel, `❌ ${error.message}`) }
+  }
   if (activeTransition(channel)) return post(channel, '⏳ Wait for the provider switch to finish before changing team membership.')
   if (sub === 'add') {
     if (rest.length !== 1) return post(channel, 'Usage: `/sab-team add`')
@@ -4010,7 +4111,7 @@ async function handleTeamCommand(channel, rest) {
     return
   }
   return post(channel,
-    'Usage: `/sab-team create <name>`, `/sab-team add`, `/sab-team status`, `/sab-team permissions`, `/sab-team remove <alias>`, or `/sab-team close`.')
+    'Usage: `/sab-team create <name>`, `/sab-team add`, `/sab-team status`, `/sab-team auto|manual`, `/sab-team permissions`, `/sab-team remove <alias>`, or `/sab-team close`.')
 }
 
 const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags', 'switch', 'run', 'terminal'])
@@ -4026,7 +4127,7 @@ function commandHelp(provider = null) {
     '`/sab-switch <claude|codex|pi> [new]` — hand this channel to another provider\n' +
     '`/sab-status [provider]` · `/sab-usage [provider] …` — current session or control-channel overview\n' +
     '`/sab-terminal open|close|list|open-all|close-all` — manage optional Ghostty viewports\n' +
-    '`/sab-team create|add|status|permissions|remove|close` — link sessions for safe agent delegation\n' +
+    '`/sab-team create|add|status|auto|manual|permissions|remove|close` — link sessions for safe agent delegation\n' +
     '`/sab-run …` — Pi managed runs · `/sab-account …` — Claude subscriptions\n' +
     '`/sab-health` · `/sab-cleanup` · `/sab-claim` — bridge-wide operations'
 }
