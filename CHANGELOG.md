@@ -36,6 +36,10 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Idle Codex resumes triggered by `/sab-model`, `/sab-effort`, `/sab-flags`, or
+  an ordinary Slack wake now complete the same exact-tmux ancestry adoption as
+  `/sab-update`. A visible TUI without `SessionStart` can no longer leave the
+  session dormant, make `/sab-terminal open` fail, or permit competing resumes.
 - Codex model capacity fallback no longer becomes the durable resume model.
   SAB now retains requested model/effort separately from the actual reported
   model, displays the actual runtime choice, and warns visibly on mismatch.

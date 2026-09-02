@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import {
   applyHooklessCodexClaim, canonicalCodexAppServerPid, codexAppServerProcessPid,
   hooklessAuthoritativeCodexSessions,
@@ -8,6 +9,8 @@ import {
   tmuxCodexProcessPid,
   waitForCodexResumeClaim,
 } from '../daemon/codex-resume.mjs'
+
+const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 
 const processRows = [
   { pid: 100, ppid: 1, comm: '/bin/bash', args: '/bin/bash run-session.sh codex resume session-1' },
@@ -163,4 +166,11 @@ test('hookless adoption rejects rebound channels and tmux identities without mut
   state.channels.C1 = session.id
   assert.throws(() => applyHooklessCodexClaim(state, session, { pid: 222, tmux: 'sab-wrong' }), /mismatched/)
   assert.equal(session.pid, null)
+})
+
+test('every successful generic Codex resurrection completes lifecycle adoption before returning', () => {
+  const resurrection = /async function resurrect\(session, text\) \{([\s\S]*?)\n\}\nconst pendingBySid/.exec(daemon)?.[1] || ''
+  assert.match(resurrection, /if \(provider === 'codex'\) \{[\s\S]*completeCodexResumeReadiness\(session, 'session resurrection'\)/)
+  assert.match(resurrection, /Codex resume readiness failed[\s\S]*tmuxKill\(tmuxName\)[\s\S]*continue/)
+  assert.match(daemon, /async function completeCodexResumeReadiness[\s\S]*waitForCodexResumeClaim[\s\S]*adoptHooklessCodexResume/)
 })

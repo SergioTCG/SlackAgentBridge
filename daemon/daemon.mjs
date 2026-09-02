@@ -1839,7 +1839,19 @@ async function resurrect(session, text) {
         provider,
       })
       for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await executionNodes.tmuxAlive(nodeId, tmuxName) }
-      if (up) return // SessionStart clears the in-flight guard and flushes the queue
+      if (up) {
+        if (provider === 'codex') {
+          try {
+            await completeCodexResumeReadiness(session, 'session resurrection')
+          } catch (error) {
+            log('Codex resume readiness failed', session.id.slice(0, 8), tmuxName, String(error?.message || error))
+            up = false
+            await tmuxKill(tmuxName).catch(() => {})
+            continue
+          }
+        }
+        return // SessionStart or the exact-tmux fallback completed the wake
+      }
       log('spawn did not materialize', { attempt, tmuxName })
       await execFile('pkill', ['-f', tmuxName]).catch(() => {}) // kill the failed young instance
     }
@@ -1880,6 +1892,18 @@ async function adoptHooklessCodexResume(session, claim, reason) {
   log('adopted hookless Codex resume', session.id.slice(0, 8), 'pid', claim.pid, 'tmux', claim.tmux, reason)
   await completeAuthoritativeSessionStart(session, 'codex', 'resume')
   return true
+}
+
+async function completeCodexResumeReadiness(session, reason) {
+  const claim = await waitForCodexResumeClaim(session, {
+    tmuxAlive,
+    pidAlive,
+    findCodexPid: tmux => tmuxCodexProcessPid(tmux, { execFile }),
+    validTmuxClaim,
+    sleep,
+  })
+  if (claim.source === 'process-tree') await adoptHooklessCodexResume(session, claim, reason)
+  return claim
 }
 
 async function recoverHooklessCodexResumes() {
@@ -2418,16 +2442,6 @@ async function resumeUpdatedSession(session, update, updateError = null) {
     log('update result notice failed', session.id.slice(0, 8), String(error)))
   await resurrect(session)
   if (!session.tmux || !(await tmuxAlive(session.tmux))) throw new Error('replacement tmux session did not become active')
-  if (providerOf(session) === 'codex') {
-    const claim = await waitForCodexResumeClaim(session, {
-      tmuxAlive,
-      pidAlive,
-      findCodexPid: tmux => tmuxCodexProcessPid(tmux, { execFile }),
-      validTmuxClaim,
-      sleep,
-    })
-    if (claim.source === 'process-tree') await adoptHooklessCodexResume(session, claim, 'provider update')
-  }
   scheduleUpdateGuardCleanup(session) // SessionStart normally clears this first
 }
 

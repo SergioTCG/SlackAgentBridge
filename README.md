@@ -225,11 +225,11 @@ Each represented provider CLI is updated once; every eligible native session is
 then resumed with its existing cwd, identity, account, model, effort, and launch
 flags. Messages arriving during the relaunch are queued for that same session.
 An idle Codex resume may not emit `SessionStart`; after a bounded hook grace
-period, the bridge recovers it only by finding the Codex process beneath the
-exact replacement tmux and validating that ancestry before repairing the
-PID/channel binding. Daemon restart applies the same check to an interrupted
-hookless resume, so `/sab-terminal open` becomes available again without a
-second Codex process or a synthetic prompt.
+period, every update, settings change, and ordinary Slack wake recovers it only
+by finding the Codex process beneath the exact replacement tmux and validating
+that ancestry before repairing the PID/channel binding. Daemon restart applies
+the same check to an interrupted hookless resume, so `/sab-terminal open`
+becomes available again without a second Codex process or a synthetic prompt.
 
 SAB-managed Codex TUIs disable Codex's interactive startup update check. This
 prevents a detached new, resumed, automation, or provider-switch session from
