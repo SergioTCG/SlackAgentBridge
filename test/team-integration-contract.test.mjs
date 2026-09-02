@@ -64,6 +64,14 @@ test('team lifecycle recovery cannot rebind, lose finals, or fence a worker inde
   assert.match(daemon, /markTeamTaskRunning\(state, teamTaskId\)[\s\S]*updateTeamTaskAudit\(task\)/)
 })
 
+test('automatic continuation recovers a hookless idle Codex coordinator without replaying backlog', () => {
+  assert.match(daemon, /validProviderRootClaim\(expected\.pid, expected\.tmux, 'codex'\)/)
+  assert.match(daemon, /observeIdleCodexCoordinator\(coordinator/)
+  assert.match(daemon, /stopPoller\(coordinator\)[\s\S]*clearTeamTurn\(coordinator\)[\s\S]*clearTeamInputReservation\(coordinator\)/)
+  assert.match(daemon, /coalesceContinuations\(team\)[\s\S]*claimContinuation\(team\)/)
+  assert.match(daemon, /Team continuation is queued while the coordinator remains busy/)
+})
+
 test('completion, pruning, and retry side effects remain durable and idempotent', () => {
   assert.match(daemon, /completionDeliveryStatus = 'delivering'[\s\S]*client_msg_id: teamAuditClientId\(task, 'completion'\)/)
   assert.match(daemon, /ensureTeamCompletionDelivery\(task\)/)
