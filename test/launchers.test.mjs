@@ -43,6 +43,32 @@ test('the private runner exports the authoritative provider and shared bridge id
   assert.match(source, /run_pi/)
 })
 
+test('Claude runner uses its explicit approved channel without a detached development-consent gate', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-claude-channel-'))
+  try {
+    const log = path.join(temp, 'claude-argv')
+    fs.writeFileSync(path.join(temp, 'claude'), '#!/bin/bash\nprintf "%s\\n" "$@" > "$CLAUDE_TEST_LOG"\n', { mode: 0o755 })
+    const run = spawnSync(sab, ['__run', 'claude', '--model', 'opus', '--resume', 'session-id'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${temp}:${process.env.PATH}`,
+        CCS_CONFIG_DIR: temp,
+        CCS_NO_TMUX: '1',
+        TMUX: '',
+        CLAUDE_TEST_LOG: log,
+      },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    const args = fs.readFileSync(log, 'utf8').trim().split('\n')
+    assert.deepEqual(args.slice(0, 4), [
+      '--mcp-config', path.join(temp, 'mcp.json'), '--channels', 'server:slack-bridge',
+    ])
+    assert.deepEqual(args.slice(4), ['--model', 'opus', '--resume', 'session-id'])
+    assert.equal(args.includes('--dangerously-load-development-channels'), false)
+  } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+})
+
 test('local sab new preserves provider argv without evaluating it through a shell', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-local-new-'))
   try {

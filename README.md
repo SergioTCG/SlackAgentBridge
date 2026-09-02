@@ -70,7 +70,9 @@ while retaining the requested model/effort for the next restart.
 Claude `AskUserQuestion` forms use their structured hook payload, so Slack keeps
 the question header, prompt, recommendation, option descriptions, and previews
 separate from concise answer buttons. A bounded terminal parser remains only as
-a restart/legacy fallback.
+a restart/legacy fallback. Claude's explicitly configured local MCP server is
+selected through the approved `--channels` path, so detached starts and resumes
+do not depend on an interactive development-channel confirmation.
 The bridge never parses Codex transcript JSONL. See
 [ARCHITECTURE.md](ARCHITECTURE.md), the provider feasibility notes under
 [`docs/`](docs/), and [Managed Pi runs](docs/pi-managed-runs.md).
