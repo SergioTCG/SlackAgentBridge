@@ -167,6 +167,13 @@ process is gone, an owner Slack message runs the provider-native resume form in
 a new detached tmux session and queues the message until the start event safely
 rebinds it. No terminal needs to be visible.
 
+Claude resurrection requires its exact `SessionStart` PID/tmux claim. A tmux
+that appears briefly and exits is startup failure, not readiness: SAB records
+only its bounded numeric exit status, retries once with a fresh tmux identity,
+then clears the failed input reservation and stale viewport binding and reports
+an actionable Slack error. The queued owner message is retained for an explicit
+later retry; terminal output is never copied into the diagnostic file.
+
 Codex has one bounded lifecycle exception: an idle `codex resume` may expose a
 ready TUI without emitting `SessionStart`. Every resurrection path first allows
 the native hook to claim the replacement. If it remains absent, the bridge
@@ -273,10 +280,12 @@ Task delivery is journal-first:
 4. Reserve the worker input surface, atomically change `queued → dispatching`,
    and bind the exact target native session before provider injection. A restart
    never retries an uncertain dispatch claim.
-5. Accept `running` only when the provider acknowledges the injected immutable
-   task marker. Claude's
-   completed transcript path, Codex's Stop hook, or Pi's extension final event
-   may complete only the same task/session binding.
+5. Accept `running` when the provider acknowledges the injected immutable task
+   marker, or when the exact process-bound worker successfully journals a reply
+   for that task. The latter is durable acceptance proof when a provider omits
+   its prompt hook; it is not final-result proof. Claude's completed transcript
+   path, Codex's Stop hook, or Pi's extension final event may complete only the
+   same task/session binding.
 6. Persist completion and a delivery claim before updating both audit cards and
    idempotently posting the stable result in the coordinator channel. A missing
    or uneditable audit card is reported with the result but cannot suppress it;

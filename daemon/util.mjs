@@ -295,12 +295,20 @@ export async function closeTmuxTerminal(tname) {
 // validated here as well as at the CLI — never trust a stored value blindly.
 export const safeAccount = a => (typeof a === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(a) ? a : null)
 
-export async function spawnSession({ cwd, args, tmuxName, autoConsent, account, provider = 'claude' }) {
+export async function spawnSession({ cwd, args, tmuxName, autoConsent, account, provider = 'claude', startupStatusPath = null }) {
   const acct = provider === 'claude' ? safeAccount(account) : null
   if (!safeTmuxName(tmuxName)) throw new Error('invalid tmux session name')
   fs.mkdirSync(cwd, { recursive: true })
   const env = ['CCS_BRIDGE=1', `CCS_PROVIDER=${provider}`, `CCS_TMUX=${tmuxName}`]
   if (acct) env.push(`CCS_ACCOUNT=${acct}`)
+  if (startupStatusPath) {
+    const runtimeRoot = path.resolve(CONFIG_DIR, 'runtime')
+    const resolved = path.resolve(String(startupStatusPath))
+    if (path.dirname(resolved) !== runtimeRoot || !/^resume-[A-Za-z0-9_.:-]+\.exit$/.test(path.basename(resolved))) {
+      throw new Error('invalid provider startup status path')
+    }
+    env.push(`CCS_STARTUP_STATUS_FILE=${resolved}`)
+  }
   await execFile('tmux', ['new-session', '-d', '-s', tmuxName, '-c', cwd, '--',
     'env', ...env, path.join(BRIDGE, 'bin', 'sab'), '__run', provider, ...args])
   log('spawned headless tmux', { provider: providerCommand(provider), cwd, args, tmuxName })

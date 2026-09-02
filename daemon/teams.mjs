@@ -364,7 +364,13 @@ export function appendTeamTaskReply(state, taskId, {
   const existing = task.replies.find(reply => reply.requestId === key)
   if (existing) {
     if (existing.payloadHash !== payloadHash) throw new TeamError('request_conflict', 'That reply request ID was already used for different content.', 409)
-    return { reply: existing, created: false }
+    // A reply accepted from the exact authenticated worker process is stronger
+    // delivery proof than a provider lifecycle hook. Older daemons could
+    // persist the reply while leaving the task in `dispatching`; heal that
+    // state on an idempotent retry as well.
+    const accepted = task.status === 'dispatching'
+    if (accepted) markTeamTaskRunning(state, task.id, { now })
+    return { reply: existing, created: false, accepted }
   }
   if (!ACTIVE_TASK_STATES.has(task.status)) throw new TeamError('task_not_active', 'That task no longer accepts replies.', 409)
   if (task.replies.length >= TEAM_MAX_REPLIES) throw new TeamError('reply_limit', 'This task reached its bounded reply limit.', 409)
@@ -379,8 +385,10 @@ export function appendTeamTaskReply(state, taskId, {
     createdAt: nowIso(now),
   }
   task.replies.push(reply)
-  task.updatedAt = nowIso(now)
-  return { reply, created: true }
+  const accepted = task.status === 'dispatching'
+  if (accepted) markTeamTaskRunning(state, task.id, { now })
+  else task.updatedAt = nowIso(now)
+  return { reply, created: true, accepted }
 }
 
 export function completeTeamTask(state, taskId, {

@@ -214,7 +214,9 @@ A session channel always acts on its authoritative provider.
 Ordinary messages are injected into the active native session. Attachments are
 downloaded under the bridge attachment directory and their local paths are
 included in the prompt. Dormant owner sessions resume headlessly; opening a
-terminal is never required.
+terminal is never required. A Claude wake is successful only after its exact
+`SessionStart` claim; a provider that exits after briefly creating tmux is
+retried once and then reported visibly while the queued message remains safe.
 
 `/sab-update all` is the quiet-period maintenance sweep. It considers only the
 authoritative live session bound to each channel, skips any session with an

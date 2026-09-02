@@ -119,8 +119,11 @@ which the task waits for a safe idle input surface.
 
 Before injection, SAB reserves the input surface and atomically claims the exact
 worker native session. It remains `dispatching` until the provider acknowledges
-the immutable task marker. A daemon restart may deliver a still-queued task, but
-it never retries an uncertain claim. That trades a visible failure for duplicate
+the immutable task marker or that exact process journals a task-bound `sab team
+reply`. The latter proves that work was accepted when a prompt hook is missing,
+restores Codex status tracking, and survives restart; it never substitutes for
+a stable final. A daemon restart may deliver a still-queued task, but it never
+retries a genuinely uncertain claim. That trades a visible failure for duplicate
 work. If the claimed envelope was waiting in an in-memory provider queue, SAB
 removes that exact marker before reporting failure so a later reconnect cannot
 execute it.

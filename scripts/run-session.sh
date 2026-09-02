@@ -13,6 +13,23 @@ while [ -h "$SOURCE" ]; do
 done
 BRIDGE="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
+startup_status_file="${CCS_STARTUP_STATUS_FILE:-}"
+unset CCS_STARTUP_STATUS_FILE
+startup_status_root="$CONFIG_DIR/runtime/"
+startup_status_name="${startup_status_file#"$startup_status_root"}"
+if [[ "$startup_status_file" != "$startup_status_root"* || "$startup_status_name" == */* ||
+      ! "$startup_status_name" =~ ^resume-[A-Za-z0-9_.:-]+\.exit$ ]]; then
+  startup_status_file=""
+fi
+
+record_startup_exit() {
+  status="$1"
+  [ -n "$startup_status_file" ] || return 0
+  [ -f "${startup_status_file}.armed" ] || return 0
+  tmp_status="${startup_status_file}.tmp.$$"
+  (umask 077 && printf '%s\n' "$status" > "$tmp_status") || return 0
+  mv -f "$tmp_status" "$startup_status_file" 2>/dev/null || rm -f "$tmp_status"
+}
 
 command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 case "$provider" in
@@ -64,6 +81,13 @@ run_claude() {
   cat > "$CONFIG_DIR/mcp.json" <<EOF
 { "mcpServers": { "slack-bridge": { "command": "node", "args": ["$BRIDGE/channel/server.mjs"] } } }
 EOF
+  if [ -n "$startup_status_file" ]; then
+    status=0
+    claude --mcp-config "$CONFIG_DIR/mcp.json" \
+      --dangerously-load-development-channels server:slack-bridge "$@" || status=$?
+    record_startup_exit "$status"
+    return "$status"
+  fi
   exec claude --mcp-config "$CONFIG_DIR/mcp.json" \
     --dangerously-load-development-channels server:slack-bridge "$@"
 }

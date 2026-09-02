@@ -165,6 +165,74 @@ test('task phase transitions bind an exact worker session and clear pending cont
   assert.throws(() => publicTeamTask(task, 'C-OTHER'), error => error.code === 'task_not_visible')
 })
 
+test('an authenticated task-bound worker reply proves provider acceptance without a lifecycle marker', () => {
+  const { state, team } = fixture()
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Do the work.', requestId: 'reply-proof-1', id: 'task_reply_proof', now: 2000,
+  })
+  claimTeamTask(state, task.id, { targetSessionId: 'worker-sid', targetProvider: 'codex', now: 3000 })
+
+  const appended = appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Accepted; checking the repository now.', requestId: 'reply-proof', now: 4000,
+  })
+
+  assert.equal(appended.created, true)
+  assert.equal(appended.accepted, true)
+  assert.equal(task.status, 'running')
+  assert.equal(task.startedAt, new Date(4000).toISOString())
+  assert.equal(task.text, '')
+
+  const duplicate = appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Accepted; checking the repository now.', requestId: 'reply-proof', now: 5000,
+  })
+  assert.equal(duplicate.created, false)
+  assert.equal(duplicate.accepted, false)
+  assert.equal(task.startedAt, new Date(4000).toISOString())
+})
+
+test('a rejected worker reply cannot acknowledge a dispatching task', () => {
+  const { state, team } = fixture()
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Do the work.', requestId: 'reply-reject-1', id: 'task_reply_reject', now: 2000,
+  })
+  claimTeamTask(state, task.id, { targetSessionId: 'worker-sid', targetProvider: 'codex', now: 3000 })
+
+  assert.throws(() => appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-2', text: 'Spoofed.', requestId: 'reply-spoof', now: 4000,
+  }), error => error.code === 'reply_not_allowed')
+  assert.equal(task.status, 'dispatching')
+  assert.equal(task.startedAt, undefined)
+  assert.equal(task.text, 'Do the work.')
+})
+
+test('an idempotent reply retry heals a pre-upgrade dispatching journal', () => {
+  const { state, team } = fixture()
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Do the work.', requestId: 'reply-heal-1', id: 'task_reply_heal', now: 2000,
+  })
+  claimTeamTask(state, task.id, { targetSessionId: 'worker-sid', targetProvider: 'codex', now: 3000 })
+  const text = 'Already working.'
+  appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text, requestId: 'reply-heal', now: 3500,
+  })
+  // Recreate the state shape written by an older daemon: the reply was
+  // durable, but the task never left `dispatching`.
+  task.status = 'dispatching'
+  task.text = 'Do the work.'
+  delete task.startedAt
+
+  const duplicate = appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text, requestId: 'reply-heal', now: 4000,
+  })
+  assert.equal(duplicate.created, false)
+  assert.equal(duplicate.accepted, true)
+  assert.equal(task.status, 'running')
+  assert.equal(task.startedAt, new Date(4000).toISOString())
+})
+
 test('bounded journal pruning returns exact removed records for staged-file cleanup', () => {
   const { state, team } = fixture()
   for (let index = 0; index < 3; index++) {
