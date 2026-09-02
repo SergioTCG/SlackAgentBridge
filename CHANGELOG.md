@@ -36,6 +36,9 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex model capacity fallback no longer becomes the durable resume model.
+  SAB now retains requested model/effort separately from the actual reported
+  model, displays the actual runtime choice, and warns visibly on mismatch.
 - SAB-managed Codex launches now disable the CLI's interactive startup update
   check, so an available Codex release cannot strand a new, resumed,
   automation-owned, or provisional provider-switch session before its hooks

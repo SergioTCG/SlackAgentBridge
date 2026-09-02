@@ -331,7 +331,11 @@ captured by the native update chooser; provider binaries are updated only by
 the explicit SAB maintenance path. The override is not persisted as a user
 launch flag. A legacy chooser that still appears during provider switching is
 recognized as an immediate actionable startup failure. Remote flagless
-sessions default to Codex's canonical dangerous flag (`--yolo`).
+sessions default to Codex's canonical dangerous flag (`--yolo`). Requested
+model/effort are durable launch intent, distinct from the actual model reported
+by Codex. A capacity fallback may update the actual model shown in the topic,
+but it cannot overwrite the requested model used on the next resume; a mismatch
+is reported visibly in the session channel.
 
 ### Pi
 

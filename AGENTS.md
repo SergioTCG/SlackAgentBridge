@@ -99,6 +99,9 @@ generated MCP configuration. Do not print secrets during diagnostics.
   deltas, or final answers. Preserve direct-TUI fallback. Never parse Codex
   transcript JSONL directly; usage telemetry may enter only through `ccusage`'s
   public JSON adapter.
+- Keep Codex requested model/effort separate from the actual model reported by
+  lifecycle hooks. Capacity fallback must be visible and must not silently
+  rewrite the durable settings used for the next resume.
 - Pi inbound messages, lifecycle, usage, settings, and optional safe-mode tool
   decisions use the explicitly loaded `pi/sab-extension.ts`. Do not install it
   globally or parse Pi session files. Pi's native project trust remains a
