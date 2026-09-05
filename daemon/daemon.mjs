@@ -31,6 +31,7 @@ import {
   claimCodexCommentary, codexCommentaryDisposition, commentaryFromAppServerMessage, releaseCodexCommentary,
 } from './codex-commentary.mjs'
 import { codexTerminalFailure, codexTerminalFailureDecision } from './codex-terminal.mjs'
+import { codexFooterSettings } from './codex-footer.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
   slackArtifactUploadOptions,
@@ -685,14 +686,18 @@ function startPoller(session) {
 // the Slack timer continues to update every 3 seconds in the same message.
 const codexPollers = new Map() // sid → { timer, baseline, current, ... }
 const CODEX_USAGE_REFRESH_MS = 12000
-const CODEX_EFFORT_WORDS = '(?:minimal|low|medium|high|xhigh)'
-function codexFooterSettings(pane) {
-  const rows = String(pane || '').split(/\r?\n/).slice(-12)
-  for (const row of rows.reverse()) {
-    const match = row.match(new RegExp(`\\b(gpt-[A-Za-z0-9._-]+)\\s+(${CODEX_EFFORT_WORDS})\\s+·`,'i'))
-    if (match) return { model: match[1], effort: match[2].toLowerCase() }
-  }
-  return null
+async function reconcileCodexFooter(session, pane = null) {
+  if (!session?.channel || providerOf(session) !== 'codex' ||
+      state.channels[session.channel] !== session.id || !(session.pid && pidAlive(session.pid)) || !session.tmux) return false
+  const footer = codexFooterSettings(pane ?? await tmuxCapture(session.tmux))
+  if (!footer || (session.model === footer.model && session.effort === footer.effort)) return false
+  session.model = footer.model
+  session.effort = footer.effort
+  sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), model: footer.model, effort: footer.effort })
+  await updateTopic(session)
+  await reportCodexModelMismatch(session)
+  saveState(state)
+  return true
 }
 
 async function codexUsageForSession(session) {
@@ -721,15 +726,7 @@ function startCodexPoller(session) {
       const now = Date.now()
       const pane = session.tmux ? await tmuxCapture(session.tmux) : ''
       if (p.stopped) return
-      const footer = codexFooterSettings(pane)
-      if (footer && (session.model !== footer.model || session.effort !== footer.effort)) {
-        session.model = footer.model
-        session.effort = footer.effort
-        sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), model: footer.model, effort: footer.effort })
-        await updateTopic(session)
-        await reportCodexModelMismatch(session)
-        saveState(state)
-      }
+      await reconcileCodexFooter(session, pane)
       const failureDecision = codexTerminalFailureDecision({
         pane,
         ready: targetStartupState('codex', pane) === 'ready',
@@ -5739,6 +5736,22 @@ setInterval(async () => {
     }
   }
 }, 30000)
+
+// Interactive `/model` and `/reasoning` changes can happen while Codex is
+// idle, when the turn status poller is intentionally absent. Reconcile only
+// authoritative live legs from the stable footer; Ghostty remains optional and
+// this never reads transcripts or user/assistant content.
+let codexFooterSweepRunning = false
+setInterval(async () => {
+  if (codexFooterSweepRunning) return
+  codexFooterSweepRunning = true
+  try {
+    const sessions = Object.values(state.sessions).filter(session =>
+      providerOf(session) === 'codex' && session.channel && session.tmux && session.pid &&
+      pidAlive(session.pid) && state.channels[session.channel] === session.id)
+    await Promise.allSettled(sessions.map(session => reconcileCodexFooter(session)))
+  } finally { codexFooterSweepRunning = false }
+}, 5000).unref?.()
 
 // ---- boot -------------------------------------------------------------------
 ;(async () => {
