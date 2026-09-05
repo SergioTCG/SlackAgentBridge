@@ -31,7 +31,7 @@ import {
   claimCodexCommentary, codexCommentaryDisposition, commentaryFromAppServerMessage, releaseCodexCommentary,
 } from './codex-commentary.mjs'
 import { codexTerminalFailure, codexTerminalFailureDecision } from './codex-terminal.mjs'
-import { codexFooterSettings } from './codex-footer.mjs'
+import { codexFooterSettings, shouldPromoteCodexFooter } from './codex-footer.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
   slackArtifactUploadOptions,
@@ -691,8 +691,22 @@ async function reconcileCodexFooter(session, pane = null) {
       state.channels[session.channel] !== session.id || !(session.pid && pidAlive(session.pid)) || !session.tmux) return false
   const footer = codexFooterSettings(pane ?? await tmuxCapture(session.tmux))
   if (!footer || (session.model === footer.model && session.effort === footer.effort)) return false
+  const operatorChangedWhileIdle = shouldPromoteCodexFooter({
+    turnStartedAt: session.codexTurnStartedAt,
+    pollerActive: codexPollers.has(session.id),
+    restarting: restarting.has(session.id),
+    updating: updatingSessions.has(session.id),
+  })
   session.model = footer.model
   session.effort = footer.effort
+  if (operatorChangedWhileIdle) {
+    // The only supported native interactive settings change happens at the
+    // idle TUI. Promote that explicit choice to durable resume intent. During
+    // an active turn the same mismatch is treated as a provider fallback and
+    // must never overwrite the requested settings.
+    session.requestedModel = footer.model
+    session.requestedEffort = footer.effort
+  }
   sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), model: footer.model, effort: footer.effort })
   await updateTopic(session)
   await reportCodexModelMismatch(session)
@@ -3849,6 +3863,13 @@ const teamService = {
 
 const sessionMeta = new Map() // sid → { model, effort } as set via the bridge
 
+function claudeModelForResume(model) {
+  const id = String(model?.id || '').trim()
+  if (id && /^[A-Za-z0-9][A-Za-z0-9._:/\-[\]]*$/.test(id)) return id
+  const display = String(model?.display_name || '').toLowerCase()
+  return ['opus', 'sonnet', 'haiku', 'fable'].find(alias => display.includes(alias)) || null
+}
+
 // Read the session's model from its transcript init record (first "model" field).
 function readModel(session) {
   if (providerOf(session) !== 'claude') return session.model || null
@@ -5110,6 +5131,7 @@ http.createServer(async (req, res) => {
       if (j.rate_limits) rateLimits = { at: Date.now(), buckets: j.rate_limits }
       if (j.session_id) {
         const prev = sessionMeta.get(j.session_id) || {}
+        const resumeModel = claudeModelForResume(j.model)
         const next = {
           ...prev,
           model: j.model?.display_name || prev.model,
@@ -5122,7 +5144,7 @@ http.createServer(async (req, res) => {
         if (session?.channel) {
           if (j.cwd) session.cwd = j.cwd // folder can change; keep it current
           if (j.effort?.level && session.effort !== j.effort.level) session.effort = j.effort.level // persist actual telemetry for topics
-          if (j.model?.display_name && session.model !== j.model.display_name) session.model = j.model.display_name // persist so topics survive restarts
+          if (resumeModel && session.model !== resumeModel) session.model = resumeModel // persist the latest native selection for resume
           const changed = prev.model !== next.model || prev.effort !== next.effort
           if (changed || Date.now() - (lastTopicAt.get(session.channel) || 0) > 6000) {
             lastTopicAt.set(session.channel, Date.now())

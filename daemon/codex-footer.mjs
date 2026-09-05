@@ -11,3 +11,8 @@ export function codexFooterSettings(pane) {
   }
   return null
 }
+
+export function shouldPromoteCodexFooter({ turnStartedAt = null, pollerActive = false,
+  restarting = false, updating = false } = {}) {
+  return !turnStartedAt && !pollerActive && !restarting && !updating
+}

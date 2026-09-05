@@ -77,10 +77,10 @@ test('Codex launch metadata excludes the optional resume prompt', () => {
   assert.equal(codexFlagsWithoutInitialPrompt('--search', sid), '--search')
 })
 
-test('Claude resume args keep legacy behavior', () => {
+test('Claude resume args preserve the latest model and effort', () => {
   assert.deepEqual(resumeArgsFor({
-    id: 'abc', launchFlags: '--chrome --continue --effort low', effort: 'high',
-  }), ['--chrome', '--effort', 'high', '--resume', 'abc'])
+    id: 'abc', launchFlags: '--chrome --continue --model fable --effort low', model: 'opus', effort: 'high',
+  }), ['--chrome', '--model', 'opus', '--effort', 'high', '--resume', 'abc'])
   assert.deepEqual(resumeArgsFor({ id: 'abc' }), ['--dangerously-skip-permissions', '--resume', 'abc'])
 })
 

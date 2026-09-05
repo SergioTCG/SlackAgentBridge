@@ -65,8 +65,11 @@ If Codex rejects a submitted turn because its selected model is at capacity,
 SAB replaces the working timer with that actionable failure instead of leaving
 the channel apparently busy. The detector requires the exact current TUI
 warning on a stable idle input surface and ignores stale terminal scrollback.
-If Codex starts a fallback model, SAB shows the actual model and posts a warning
-while retaining the requested model/effort for the next restart.
+If Codex starts a fallback model during a turn, SAB shows the actual model and
+posts a warning while retaining the requested model/effort for the next
+restart. A model/effort change made explicitly at the idle native TUI becomes
+the new durable selection. Claude and Pi likewise resume with their latest
+known native model/effort rather than their original launch values.
 Claude `AskUserQuestion` forms use their structured hook payload, so Slack keeps
 the question header, prompt, recommendation, option descriptions, and previews
 separate from concise answer buttons. A bounded terminal parser remains only as

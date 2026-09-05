@@ -362,7 +362,11 @@ sessions default to Codex's canonical dangerous flag (`--yolo`). Requested
 model/effort are durable launch intent, distinct from the actual model reported
 by Codex. A capacity fallback may update the actual model shown in the topic,
 but it cannot overwrite the requested model used on the next resume; a mismatch
-is reported visibly in the session channel.
+is reported visibly in the session channel. A stable footer change observed on
+an idle, authoritative TUI is an explicit native operator selection and becomes
+the new durable resume intent. Claude and Pi similarly rebuild resume arguments
+from their latest known native model and effort, stripping stale original
+model/effort flags first.
 
 ### Pi
 

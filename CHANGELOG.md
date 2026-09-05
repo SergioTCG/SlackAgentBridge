@@ -36,6 +36,11 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Provider update/restart now resumes Claude, Codex, and Pi with the latest
+  known model and effort. Codex promotes only stable idle-TUI changes to durable
+  intent, so an unexpected active-turn fallback remains visible without
+  replacing the requested settings.
+
 - Automatic team continuation now wakes for every authenticated worker reply,
   including ordinary progress and dispatch-healing idempotent retries, instead
   of relying on blocker keywords. Events remain durable, coalesced, and

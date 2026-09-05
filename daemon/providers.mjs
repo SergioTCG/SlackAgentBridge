@@ -193,10 +193,12 @@ export function resumeArgsFor(session, {
     const keep = []
     for (let i = 0; i < toks.length; i++) {
       const t = toks[i]
-      if (t === '--effort') { i++; continue }
+      if (t === '--effort' || t === '--model') { i++; continue }
+      if (t.startsWith('--effort=') || t.startsWith('--model=')) continue
       keep.push(t)
     }
     if (!keep.length) keep.push(...String(defaultClaudeFlags).split(/\s+/).filter(Boolean))
+    if (session.model) keep.push('--model', session.model)
     if (session.effort) keep.push('--effort', session.effort)
     return [...keep, '--resume', session.id]
   }
