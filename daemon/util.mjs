@@ -55,7 +55,11 @@ function writeState(state) {
 }
 export function saveState(state) {
   clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => { saveTimer = null; writeState(state) }, 300)
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    try { writeState(state) }
+    catch (error) { log('state persistence deferred:', error?.code || String(error?.message || error)) }
+  }, 300)
 }
 
 // Provider switches are a journaled cross-process transaction. Persist phase

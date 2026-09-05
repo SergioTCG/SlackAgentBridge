@@ -126,6 +126,7 @@ const { web } = slackRuntime
 const syncTopic = createTopicSync(web)
 const artifactGrants = createArtifactGrantStore()
 const state = loadState()
+const isNoSpaceError = error => error?.code === 'ENOSPC' || /no space left on device/i.test(String(error?.message || error))
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
 if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
 if (!state.channelTmux) state.channelTmux = {} // channel → tmux name last seen owning it (rebinding aid)
@@ -684,6 +685,15 @@ function startPoller(session) {
 // the Slack timer continues to update every 3 seconds in the same message.
 const codexPollers = new Map() // sid → { timer, baseline, current, ... }
 const CODEX_USAGE_REFRESH_MS = 12000
+const CODEX_EFFORT_WORDS = '(?:minimal|low|medium|high|xhigh)'
+function codexFooterSettings(pane) {
+  const rows = String(pane || '').split(/\r?\n/).slice(-12)
+  for (const row of rows.reverse()) {
+    const match = row.match(new RegExp(`\\b(gpt-[A-Za-z0-9._-]+)\\s+(${CODEX_EFFORT_WORDS})\\s+·`,'i'))
+    if (match) return { model: match[1], effort: match[2].toLowerCase() }
+  }
+  return null
+}
 
 async function codexUsageForSession(session) {
   const report = await ccusageJson('codex', 'session', ['--offline', '--no-cost'])
@@ -711,6 +721,15 @@ function startCodexPoller(session) {
       const now = Date.now()
       const pane = session.tmux ? await tmuxCapture(session.tmux) : ''
       if (p.stopped) return
+      const footer = codexFooterSettings(pane)
+      if (footer && (session.model !== footer.model || session.effort !== footer.effort)) {
+        session.model = footer.model
+        session.effort = footer.effort
+        sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), model: footer.model, effort: footer.effort })
+        await updateTopic(session)
+        await reportCodexModelMismatch(session)
+        saveState(state)
+      }
       const failureDecision = codexTerminalFailureDecision({
         pane,
         ready: targetStartupState('codex', pane) === 'ready',
@@ -5064,6 +5083,10 @@ http.createServer(async (req, res) => {
       }
     } catch (error) {
       log('Codex commentary rejected', String(error?.message || error))
+      // A full disk is transient and must remain retryable: the event proxy
+      // will redeliver the exact commentary after persistence recovers. Do not
+      // convert ENOSPC into a permanent 400 (which silently loses the reply).
+      if (isNoSpaceError(error)) { res.writeHead(503); res.end('state persistence unavailable'); return }
       res.writeHead(400); res.end('invalid commentary')
     }
     return
@@ -5101,14 +5124,18 @@ http.createServer(async (req, res) => {
         const session = state.sessions[j.session_id]
         if (session?.channel) {
           if (j.cwd) session.cwd = j.cwd // folder can change; keep it current
-          if (j.effort?.level && session.effort !== j.effort.level) { session.effort = j.effort.level; saveState(state) } // persist actual telemetry for topics
-          if (j.model?.display_name && session.model !== j.model.display_name) { session.model = j.model.display_name; saveState(state) } // persist so topics survive restarts
+          if (j.effort?.level && session.effort !== j.effort.level) session.effort = j.effort.level // persist actual telemetry for topics
+          if (j.model?.display_name && session.model !== j.model.display_name) session.model = j.model.display_name // persist so topics survive restarts
           const changed = prev.model !== next.model || prev.effort !== next.effort
           if (changed || Date.now() - (lastTopicAt.get(session.channel) || 0) > 6000) {
             lastTopicAt.set(session.channel, Date.now())
             await updateTopic(session)
             if (providerOf(session) === 'codex') await reportCodexModelMismatch(session)
           }
+          // Topic visibility is more important than a best-effort state flush:
+          // during ENOSPC, update Slack from the in-memory authoritative value
+          // and keep the process alive for the next retry.
+          try { saveState(state) } catch (error) { log('statusline state persistence deferred', String(error?.message || error)) }
         }
       }
     } catch {}
