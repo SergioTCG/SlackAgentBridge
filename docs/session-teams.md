@@ -128,10 +128,11 @@ work. If the claimed envelope was waiting in an in-memory provider queue, SAB
 removes that exact marker before reporting failure so a later reconnect cannot
 execute it.
 
-In automatic mode, multiple executor events accumulated while the coordinator
-is busy are represented by one durable wake; the coordinator always rereads the
-complete authenticated inbox, so old event payloads are neither replayed nor
-trusted. A resumed Codex TUI that omits lifecycle hooks is reconciled only after
+In automatic mode, every authenticated worker reply—including ordinary progress
+and idempotent retries that heal a dispatch—is a wake candidate. Multiple events
+accumulated while the coordinator is busy are represented by one durable wake;
+the coordinator always rereads the complete authenticated inbox, so old event
+payloads are neither replayed nor trusted. A resumed Codex TUI that omits lifecycle hooks is reconciled only after
 two unchanged, exact-process idle observations and a grace period. SAB then
 clears the stale coordinator fence and proceeds without scraping a final answer
 or assigning a worker result. A genuine busy wait is reported once after one

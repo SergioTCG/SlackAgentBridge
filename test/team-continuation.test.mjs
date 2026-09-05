@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   clearContinuationWaiting, coalesceContinuations, continuationFor, noteContinuationWaiting,
   observeIdleCodexCoordinator, setContinuationMode, queueContinuation, claimContinuation, settleContinuation,
+  shouldWakeForTeamReply,
 } from '../daemon/team-continuation.mjs'
 
 test('continuations remain disabled by default and duplicate events are idempotent', () => {
@@ -14,6 +15,16 @@ test('continuations remain disabled by default and duplicate events are idempote
   assert.equal(first.created, true)
   assert.equal(duplicate.created, false)
   assert.equal(continuationFor(team).pending.length, 1)
+})
+
+test('automatic coordination wakes for ordinary and dispatch-healing worker replies', () => {
+  const automatic = { continuation: { mode: 'auto-until-blocked' } }
+  const manual = { continuation: { mode: 'manual' } }
+  assert.equal(shouldWakeForTeamReply(automatic, { created: true, accepted: true }), true)
+  assert.equal(shouldWakeForTeamReply(automatic, { created: false, accepted: true }), true)
+  assert.equal(shouldWakeForTeamReply(automatic, { created: true, accepted: false }), true)
+  assert.equal(shouldWakeForTeamReply(automatic, { created: false, accepted: false }), false)
+  assert.equal(shouldWakeForTeamReply(manual, { created: true, accepted: true }), false)
 })
 
 test('continuation claim and settlement survive one event at a time', () => {

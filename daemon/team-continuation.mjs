@@ -52,6 +52,15 @@ export function queueContinuation(team, { taskId, kind = 'completed', replyId = 
   return { created: true, event }
 }
 
+// Every authenticated worker reply is actionable to an automatic coordinator.
+// Do not classify free-form status text with keywords: ordinary progress can
+// contain the next fact needed for dispatch, and retries that heal a
+// dispatching task must wake the coordinator too. The durable continuation
+// queue and coalescing provide the bounded/idempotent behavior.
+export function shouldWakeForTeamReply(team, { created = false, accepted = false } = {}) {
+  return team?.continuation?.mode === 'auto-until-blocked' && (created || accepted)
+}
+
 // A continuation prompt never trusts an event payload: it instructs the
 // coordinator to reread the complete authenticated inbox. Consequently every
 // event already queued at claim time can be represented by one durable wake.

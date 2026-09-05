@@ -242,8 +242,9 @@ owner-initiated coordinator turn dispatch authority; collaborator and local
 terminal turns clear it. A delegated worker task is narrower still: only its
 exact assigned live session may reply.
 
-Teams may opt into `auto-until-blocked` continuation. A terminal worker reply
-or task result is persisted and delivered before creating one deduplicated
+Teams may opt into `auto-until-blocked` continuation. Every authenticated
+worker reply—including ordinary progress and idempotent retries that heal a
+dispatch—or task result is persisted and delivered before creating one deduplicated
 continuation event. An idle authoritative coordinator receives a bounded,
 bridge-marked owner continuation and rereads the authoritative inbox and team
 context before dispatching. Existing teams remain `manual` by default;

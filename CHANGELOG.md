@@ -36,6 +36,11 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Automatic team continuation now wakes for every authenticated worker reply,
+  including ordinary progress and dispatch-healing idempotent retries, instead
+  of relying on blocker keywords. Events remain durable, coalesced, and
+  opt-in, so this cannot create duplicate dispatches.
+
 - Claude 2.1.258 can no longer strand headless starts and resumes at a detached
   development-channel confirmation. The runner now selects SAB's explicit local
   MCP server through the approved `--channels` path. Its changed workspace-trust

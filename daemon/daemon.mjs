@@ -86,7 +86,7 @@ import {
 import {
   claimContinuation, clearContinuationWaiting, coalesceContinuations, deferContinuation,
   noteContinuationWaiting, observeIdleCodexCoordinator, queueContinuation, setContinuationMode,
-  settleContinuation,
+  settleContinuation, shouldWakeForTeamReply,
 } from './team-continuation.mjs'
 import { createExecutionNodeRouter, createLocalExecutionNode } from './execution-nodes.mjs'
 import { LOCAL_NODE_ID, localSessionByChannel, localSessionByPid, nodeIdForSession } from './nodes.mjs'
@@ -2940,10 +2940,6 @@ function discardQueuedTeamTaskPrompt(session, taskId) {
   return true
 }
 
-function teamReplyNeedsContinuation(text) {
-  return /\b(blocked|blocker|cannot|can't|failed|failure|needs? (?:owner|decision|input)|waiting on|unavailable|unsafe)\b/i.test(String(text || ''))
-}
-
 function scheduleTeamContinuation(teamId, delay = 0) {
   if (teamContinuationTimers.has(teamId)) return
   const timer = setTimeout(() => {
@@ -3761,6 +3757,14 @@ const teamService = {
         await updateTeamTaskAudit(task).catch(error =>
           log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
       }
+      const team = state.teams?.[task.teamId]
+      if (team && shouldWakeForTeamReply(team, appended)) {
+        try {
+          queueContinuation(team, { taskId: task.id, replyId: appended.reply.id, kind: 'reply' })
+          saveStateNow(state)
+          scheduleTeamContinuation(task.teamId)
+        } catch (failure) { log('team continuation queue full', task.id, String(failure?.message || failure)) }
+      }
       await ensureTeamReplyDelivery(task, appended.reply)
       return {
         reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === appended.reply.id),
@@ -3807,7 +3811,7 @@ const teamService = {
         log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
     }
     const team = state.teams?.[task.teamId]
-    if (team && teamReplyNeedsContinuation(reply.text)) {
+    if (team && shouldWakeForTeamReply(team, appended)) {
       try {
         queueContinuation(team, { taskId: task.id, replyId: reply.id, kind: 'reply' })
         saveStateNow(state)
