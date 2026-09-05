@@ -1171,13 +1171,18 @@ async function validProviderRootClaim(pid, tname, provider) {
 
 async function reportCodexModelMismatch(session) {
   if (!session?.channel || providerOf(session) !== 'codex') return
-  if (session.requestedModel && session.model && session.requestedModel !== session.model) {
-    const mismatch = `${session.requestedModel}->${session.model}`
+  const actualEffort = sessionMeta.get(session.id)?.effort || session.effort
+  const modelMismatch = session.requestedModel && session.model && session.requestedModel !== session.model
+  const effortMismatch = session.requestedEffort && actualEffort && session.requestedEffort !== actualEffort
+  if (modelMismatch || effortMismatch) {
+    const mismatch = `${session.requestedModel || session.model}->${session.model || 'unknown'} / ${session.requestedEffort || actualEffort || 'unknown'}->${actualEffort || 'unknown'}`
     if (session.modelMismatch === mismatch) return
     session.modelMismatch = mismatch
     saveStateNow(state)
-    await post(session.channel, `⚠️ Codex started with *${session.model}* although *${session.requestedModel}* was requested. ` +
-      'The requested model remains durable for the next restart; this turn may be using a capacity fallback.')
+    await updateTopic(session)
+    await post(session.channel, `⚠️ Codex started with *${session.model || 'unknown'}* / *${actualEffort || 'unknown'}* although ` +
+      `*${session.requestedModel || 'unknown'}* / *${session.requestedEffort || 'unknown'}* was requested. ` +
+      'Work is not considered compliant; update/restart this exact session when the requested settings are available.')
   } else if (session.modelMismatch) {
     delete session.modelMismatch
     saveStateNow(state)
@@ -1352,8 +1357,11 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   if (acceptSettings && flags != null && flags !== '') {
     session.launchFlags = provider === 'codex' ? codexFlagsWithoutInitialPrompt(flags, sid) : flags
     if (provider === 'codex') {
-      session.requestedModel = codexModelFromArgs(session.launchFlags) || session.requestedModel
-      session.requestedEffort = resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd }) || session.requestedEffort
+      // Requested settings are operator intent and immutable once captured.
+      // A provider hook may report a capacity fallback or stale replacement
+      // flags; never let that overwrite the settings used to launch the leg.
+      if (!session.requestedModel) session.requestedModel = codexModelFromArgs(session.launchFlags) || session.requestedModel
+      if (!session.requestedEffort) session.requestedEffort = resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd }) || session.requestedEffort
     }
   }
   if (provider === 'codex' && ev === 'SessionStart') {
@@ -5093,12 +5101,13 @@ http.createServer(async (req, res) => {
         const session = state.sessions[j.session_id]
         if (session?.channel) {
           if (j.cwd) session.cwd = j.cwd // folder can change; keep it current
-          if (j.effort?.level && session.effort !== j.effort.level) { session.effort = j.effort.level; saveState(state) } // persist for resume
+          if (j.effort?.level && session.effort !== j.effort.level) { session.effort = j.effort.level; saveState(state) } // persist actual telemetry for topics
           if (j.model?.display_name && session.model !== j.model.display_name) { session.model = j.model.display_name; saveState(state) } // persist so topics survive restarts
           const changed = prev.model !== next.model || prev.effort !== next.effort
           if (changed || Date.now() - (lastTopicAt.get(session.channel) || 0) > 6000) {
             lastTopicAt.set(session.channel, Date.now())
             await updateTopic(session)
+            if (providerOf(session) === 'codex') await reportCodexModelMismatch(session)
           }
         }
       }
