@@ -295,7 +295,9 @@ switching. The default topology permits coordinator → worker tasks and worker 
 coordinator replies/results; worker-to-worker relay is disabled. File relay is
 off per worker until explicitly enabled. Automatic mode coalesces concurrent
 executor events into one coordinator wake because that wake rereads the complete
-authenticated inbox. If a resumed Codex coordinator omits its completion hook,
+authenticated inbox. If a long-lived coordinator consumes its 20-dispatch turn
+budget, a pending authenticated worker event renews one bounded continuation
+budget; it does not grant unlimited dispatch. If a resumed Codex coordinator omits its completion hook,
 SAB uses bounded exact-process idle confirmation to release only the stale turn
 fence; prolonged legitimate waits are reported once in the coordinator channel.
 

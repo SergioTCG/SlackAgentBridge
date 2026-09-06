@@ -104,10 +104,14 @@ mailboxes, active queues, task lifetime, replies, file count, and aggregate
 bytes are bounded. Agent-visible JSON contains aliases and authorized
 collaboration envelopes, not raw Slack destination IDs.
 
-The coordinator may send up to 20 tasks in one current owner turn. A team holds
-at most 64 active tasks and one worker at most eight queued/running tasks. Each
-task accepts at most 32 interim replies and expires after seven days. Overflow,
-expiry, revocation, and identity disagreement fail visibly.
+The coordinator may send up to 20 tasks in one current owner or automatic
+continuation budget. When that budget is exhausted, automatic mode can renew one
+bounded budget only by atomically claiming pending authenticated worker events
+for the same team. It cannot renew from a collaborator, another team, stale
+local input, or no event. A team holds at most 64 active tasks and one worker at
+most eight queued/running tasks. Each task accepts at most 32 interim replies and
+expires after seven days. Overflow, expiry, revocation, and identity disagreement
+fail visibly.
 
 ## Delivery and recovery
 
@@ -132,7 +136,10 @@ In automatic mode, every authenticated worker reply—including ordinary progres
 and idempotent retries that heal a dispatch—is a wake candidate. Multiple events
 accumulated while the coordinator is busy are represented by one durable wake;
 the coordinator always rereads the complete authenticated inbox, so old event
-payloads are neither replayed nor trusted. A resumed Codex TUI that omits lifecycle hooks is reconciled only after
+payloads are neither replayed nor trusted. If the same provider turn remains
+active long enough to spend its current dispatch budget, the queued event may
+instead be claimed to establish the next bounded continuation budget; SAB
+persists that claim before creating another task. A resumed Codex TUI that omits lifecycle hooks is reconciled only after
 two unchanged, exact-process idle observations and a grace period. SAB then
 clears the stale coordinator fence and proceeds without scraping a final answer
 or assigning a worker result. A genuine busy wait is reported once after one

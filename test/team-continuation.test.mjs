@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  clearContinuationWaiting, coalesceContinuations, continuationFor, noteContinuationWaiting,
+  claimContinuationDispatchAuthority, clearContinuationWaiting, coalesceContinuations, continuationFor, noteContinuationWaiting,
   observeIdleCodexCoordinator, setContinuationMode, queueContinuation, claimContinuation, settleContinuation,
   shouldWakeForTeamReply,
 } from '../daemon/team-continuation.mjs'
+import { assertCoordinatorDispatch, beginCollaboratorTeamTurn, beginOwnerTeamTurn } from '../daemon/teams.mjs'
 
 test('continuations remain disabled by default and duplicate events are idempotent', () => {
   const team = { id: 'team_1' }
@@ -63,6 +64,50 @@ test('one continuation wake durably subsumes the current event backlog', () => {
   queueContinuation(team, { taskId: 'task_3', kind: 'failed', now: 6000 })
   assert.equal(coalesceContinuations(team, { now: 7000 }).count, 4)
   assert.deepEqual(continuationFor(team).pending[0].coalescedTaskIds, ['task_1', 'task_2', 'task_3'])
+})
+
+test('an authenticated worker event renews one exhausted coordinator dispatch budget', () => {
+  const team = { id: 'team_1' }
+  setContinuationMode(team, 'auto-until-blocked', { now: 1000 })
+  queueContinuation(team, { taskId: 'task_1', kind: 'reply', replyId: 'reply_1', now: 2000 })
+  queueContinuation(team, { taskId: 'task_1', kind: 'completed', now: 3000 })
+  const session = {}
+  beginOwnerTeamTurn(session, { messageTs: '1.2' }, { now: 1500, budget: 1 })
+  session.teamTurn.remaining = 0
+
+  const claimed = claimContinuationDispatchAuthority(team, session, { now: 4000, budget: 20 })
+  assert.equal(claimed.coalescedCount, 2)
+  assert.equal(session.teamTurn.actor, 'continuation')
+  assert.equal(session.teamTurn.teamId, team.id)
+  assert.equal(session.teamTurn.eventId, claimed.event.id)
+  assert.equal(session.teamTurn.remaining, 20)
+  assert.equal(continuationFor(team).pending.length, 0)
+  assert.equal(continuationFor(team).active, null)
+  assert.doesNotThrow(() => assertCoordinatorDispatch(session, {
+    now: 5000, teamId: team.id, allowContinuation: true,
+  }))
+  assert.equal(claimContinuationDispatchAuthority(team, session, { now: 6000 }), null)
+})
+
+test('continuation events cannot renew collaborator, unrelated-team, or manual authority', () => {
+  const automatic = { id: 'team_1' }
+  setContinuationMode(automatic, 'auto-until-blocked', { now: 1000 })
+  queueContinuation(automatic, { taskId: 'task_1', now: 2000 })
+  const collaborator = {}
+  beginCollaboratorTeamTurn(collaborator, { messageTs: '1.3' }, { now: 1500 })
+  assert.equal(claimContinuationDispatchAuthority(automatic, collaborator, { now: 3000 }), null)
+
+  const unrelated = { teamTurn: {
+    actor: 'continuation', teamId: 'team_other', eventId: 'team_event_old',
+    startedAt: new Date(1000).toISOString(), expiresAt: new Date(2000).toISOString(), remaining: 0,
+  } }
+  assert.equal(claimContinuationDispatchAuthority(automatic, unrelated, { now: 3000 }), null)
+
+  const manual = { id: 'team_manual', continuation: { mode: 'manual', pending: [{ id: 'team_event_queued' }] } }
+  const owner = {}
+  beginOwnerTeamTurn(owner, { messageTs: '1.4' }, { now: 1000, budget: 1 })
+  owner.teamTurn.remaining = 0
+  assert.equal(claimContinuationDispatchAuthority(manual, owner, { now: 3000 }), null)
 })
 
 test('idle Codex coordinator release requires aged fences and two identical ready observations', () => {

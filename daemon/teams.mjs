@@ -578,16 +578,46 @@ export function beginCollaboratorTeamTurn(session, request, { now = Date.now() }
   return session.teamTurn
 }
 
-export function assertCoordinatorDispatch(session, { now = Date.now() } = {}) {
+export function beginContinuationTeamTurn(session, { teamId, eventId } = {}, {
+  now = Date.now(), budget = 20,
+} = {}) {
+  const team = String(teamId || '')
+  const event = String(eventId || '')
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(team) || !/^[A-Za-z0-9_-]{1,128}$/.test(event)) {
+    throw new TeamError('invalid_continuation_turn', 'Automatic continuation identity is invalid.', 500)
+  }
+  session.teamTurn = {
+    actor: 'continuation',
+    teamId: team,
+    eventId: event,
+    messageTs: `team-continuation:${event}`,
+    startedAt: nowIso(now),
+    expiresAt: nowIso(now + TEAM_TURN_TTL_MS),
+    remaining: Math.max(1, Math.min(Number(budget) || 20, 50)),
+  }
+  return session.teamTurn
+}
+
+export function assertCoordinatorDispatch(session, {
+  now = Date.now(), teamId = null, allowContinuation = false,
+} = {}) {
   const turn = session?.teamTurn
-  if (!turn || turn.actor !== 'owner' || Date.parse(turn.expiresAt || 0) <= now || !(turn.remaining > 0)) {
-    throw new TeamError('owner_turn_required', 'Team delegation is available only during a current owner-initiated turn.', 403)
+  const authorizedActor = turn?.actor === 'owner' || (
+    allowContinuation && turn?.actor === 'continuation' && turn.teamId === teamId
+  )
+  if (!turn || !authorizedActor || Date.parse(turn.expiresAt || 0) <= now) {
+    throw new TeamError('owner_turn_required',
+      'Team delegation is available only during a current owner or authorized automatic-continuation turn.', 403)
+  }
+  if (!(turn.remaining > 0)) {
+    throw new TeamError('dispatch_budget_exhausted',
+      'This turn used its bounded team dispatch budget. Automatic mode can renew it from the next authenticated worker event.', 429)
   }
   return turn
 }
 
-export function consumeCoordinatorDispatch(session, { now = Date.now() } = {}) {
-  const turn = assertCoordinatorDispatch(session, { now })
+export function consumeCoordinatorDispatch(session, options = {}) {
+  const turn = assertCoordinatorDispatch(session, options)
   turn.remaining--
   return turn
 }

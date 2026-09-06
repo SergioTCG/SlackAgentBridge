@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { beginContinuationTeamTurn } from './teams.mjs'
 
 // Continuations are deliberately opt-in. Existing teams without this record
 // remain manual, preserving the owner-turn safety boundary.
@@ -84,6 +85,32 @@ export function coalesceContinuations(team, { now = Date.now() } = {}) {
   latest.updatedAt = nowIso(now)
   continuation.pending = [latest]
   return { changed: true, event: latest, count }
+}
+
+// A long-running coordinator may legitimately consume its bounded dispatch
+// budget before its provider turn ends. In automatic mode, an authenticated
+// worker event is the only thing that can renew that authority. Claim the
+// durable event and replace the exhausted/expired turn atomically in memory;
+// callers persist the combined mutation before any provider or Slack effect.
+export function claimContinuationDispatchAuthority(team, session, {
+  now = Date.now(), budget = 20,
+} = {}) {
+  const continuation = continuationFor(team)
+  const prior = session?.teamTurn
+  if (!team?.id || continuation?.mode !== 'auto-until-blocked' || !prior) return null
+  const chained = prior.actor === 'owner' || (
+    prior.actor === 'continuation' && prior.teamId === team.id
+  )
+  if (!chained) return null
+  const current = Date.parse(prior.expiresAt || 0) > now && prior.remaining > 0
+  if (current) return null
+
+  const coalesced = coalesceContinuations(team, { now })
+  const event = claimContinuation(team, { now })
+  if (!event) return null
+  beginContinuationTeamTurn(session, { teamId: team.id, eventId: event.id }, { now, budget })
+  settleContinuation(team, event.id, { status: 'succeeded', now })
+  return { event, coalescedCount: coalesced.count || 1 }
 }
 
 const parsedTimestamp = value => {

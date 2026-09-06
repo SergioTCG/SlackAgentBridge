@@ -122,7 +122,9 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Session teams are channel-level, owner-created, bounded star graphs. Only a
   current owner coordinator turn—or an explicitly enabled, bounded
   `auto-until-blocked` continuation turn—may dispatch to linked workers; collaborators
-  have no lateral authority. Worker replies/finals bind to one exact task and
+  have no lateral authority. An exhausted automatic turn may renew one bounded
+  dispatch budget only by atomically claiming an authenticated pending worker
+  event for that exact team. Worker replies/finals bind to one exact task and
   authoritative native session. Journal before Slack/provider side effects,
   never retry an uncertain dispatch after restart, and keep every transfer
   visible in both affected channels. Worker-to-worker relay and arbitrary

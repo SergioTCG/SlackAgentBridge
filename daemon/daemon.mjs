@@ -78,14 +78,14 @@ import {
 } from './team-files.mjs'
 import {
   TeamError, activeTeamForChannel, addTeamWorker, appendTeamTaskReply, assertCoordinatorDispatch, assertTeamTaskRetry,
-  beginCollaboratorTeamTurn, beginOwnerTeamTurn, claimTeamTask, clearTeamTurn, closeTeam,
+  beginCollaboratorTeamTurn, beginContinuationTeamTurn, beginOwnerTeamTurn, claimTeamTask, clearTeamTurn, closeTeam,
   completeTeamTask, consumeCoordinatorDispatch, coordinatorPromptContext, createTeam, createTeamTask,
   delegatedTaskPrompt, failTeamTask, markTeamTaskRunning, normalizeTeamAlias, publicTeamTask,
   removeTeamWorker, resolveTeamPeer, setTeamWorkerFiles, taskMarker, tasksForChannel, teamById,
   teamContext, teamTask, teamTaskDeliverySettled, teamTaskForRequest, withoutDelegatedTaskPrompt,
 } from './teams.mjs'
 import {
-  claimContinuation, clearContinuationWaiting, coalesceContinuations, deferContinuation,
+  claimContinuation, claimContinuationDispatchAuthority, clearContinuationWaiting, coalesceContinuations, deferContinuation,
   noteContinuationWaiting, observeIdleCodexCoordinator, queueContinuation, setContinuationMode,
   settleContinuation, shouldWakeForTeamReply,
 } from './team-continuation.mjs'
@@ -3103,7 +3103,7 @@ async function runTeamContinuation(teamId) {
   if (!event) return false
   saveStateNow(state)
   try {
-    beginOwnerTeamTurn(coordinator, { messageTs: `team-continuation:${event.id}` }, { budget: 20 })
+    beginContinuationTeamTurn(coordinator, { teamId: team.id, eventId: event.id }, { budget: 20 })
     saveStateNow(state)
     const eventDescription = Number(event.coalescedCount) > 1
       ? `${event.coalescedCount} queued team events (latest task ${event.taskId})`
@@ -3117,6 +3117,9 @@ async function runTeamContinuation(teamId) {
     saveStateNow(state)
     return true
   } catch (error) {
+    if (coordinator.teamTurn?.actor === 'continuation' && coordinator.teamTurn.eventId === event.id) {
+      clearTeamTurn(coordinator)
+    }
     deferContinuation(team, event.id)
     team.continuation.pending[0].error = String(error?.message || error).slice(0, 1000)
     saveStateNow(state)
@@ -3714,6 +3717,11 @@ const teamService = {
     const context = requireTeamCallerContext(session)
     if (context.role !== 'coordinator') throw new TeamError('dispatch_not_allowed', 'Only the team coordinator may create worker tasks.', 403)
     if (activeTransition(session.channel) || switchingSids.has(session.id)) throw new TeamError('source_switching', 'The coordinator is switching providers.', 409)
+    const team = teamById(state, context.id)
+    const authority = {
+      teamId: team.id,
+      allowContinuation: team.continuation?.mode === 'auto-until-blocked',
+    }
     const destination = resolveTeamPeer(state, context.id, request.to)
     const destinationSession = sessionByChannel(destination.channel)
     if (!destinationSession || state.channels?.[destination.channel] !== destinationSession.id ||
@@ -3733,7 +3741,17 @@ const teamService = {
       assertTeamTaskRetry(state, prior, { teamId: context.id, target: request.to, text: request.text, files: retryFiles })
       return { task: publicTeamTask(prior, session.channel), created: false }
     }
-    assertCoordinatorDispatch(session)
+    try {
+      assertCoordinatorDispatch(session, authority)
+    } catch (error) {
+      if (!['dispatch_budget_exhausted', 'owner_turn_required'].includes(error?.code)) throw error
+      const renewed = claimContinuationDispatchAuthority(team, session)
+      if (!renewed) throw error
+      saveStateNow(state)
+      log('renewed coordinator dispatch authority', team.id, renewed.event.id,
+        `${renewed.coalescedCount} event(s)`)
+      assertCoordinatorDispatch(session, authority)
+    }
     const taskId = `task_${crypto.randomBytes(12).toString('base64url')}`
     let files = []
     try { files = stageTeamFiles(session, request.paths || [], taskId) }
@@ -3759,7 +3777,7 @@ const teamService = {
       if (files.length) removeTeamFiles(taskId)
       throw error
     }
-    consumeCoordinatorDispatch(session)
+    consumeCoordinatorDispatch(session, authority)
     saveStateNow(state)
     for (const removed of result.pruned || []) removeTeamTaskFiles(removed)
     await ensureTeamTaskAudit(result.task)

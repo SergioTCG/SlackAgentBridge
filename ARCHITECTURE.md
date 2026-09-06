@@ -252,6 +252,15 @@ automatic continuation is serialized per team, survives daemon restart through
 the state journal, and pauses with an actionable owner notification when the
 coordinator is missing, busy, or a safety/product decision is required.
 
+The same coordinator provider turn may remain active across many worker refill
+cycles. Its dispatch budget is never made unlimited: after the current budget is
+exhausted, SAB can renew exactly one bounded budget only by atomically claiming
+pending authenticated worker events for that exact automatic team. The claimed
+event and replacement continuation authority are persisted together before a
+new task, file staging, Slack audit, or provider injection. Manual teams,
+collaborator turns, unrelated-team events, and an exhausted turn with no new
+worker event remain denied.
+
 Because the inbox is authoritative, all events pending when a continuation is
 claimed are durably coalesced into one wake rather than replayed as separate
 model turns. Covered event keys remain in the bounded record for retry

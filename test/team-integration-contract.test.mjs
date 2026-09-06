@@ -76,6 +76,15 @@ test('automatic continuation recovers a hookless idle Codex coordinator without 
   assert.match(daemon, /Team continuation is queued while the coordinator remains busy/)
 })
 
+test('automatic continuation renews exhausted dispatch authority before task side effects', () => {
+  assert.match(daemon, /beginContinuationTeamTurn\(coordinator, \{ teamId: team\.id, eventId: event\.id \}/)
+  const claim = daemon.indexOf('const renewed = claimContinuationDispatchAuthority(team, session)')
+  const persist = daemon.indexOf('saveStateNow(state)', claim)
+  const create = daemon.indexOf('result = createTeamTask(state', claim)
+  assert.ok(claim > 0 && persist > claim && create > persist)
+  assert.match(daemon, /consumeCoordinatorDispatch\(session, authority\)/)
+})
+
 test('completion, pruning, and retry side effects remain durable and idempotent', () => {
   assert.match(daemon, /completionDeliveryStatus = 'delivering'[\s\S]*client_msg_id: teamAuditClientId\(task, 'completion'\)/)
   assert.match(daemon, /ensureTeamCompletionDelivery\(task\)/)

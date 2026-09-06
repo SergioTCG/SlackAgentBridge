@@ -7,6 +7,7 @@ import {
   appendTeamTaskReply,
   assertTeamTaskRetry,
   beginCollaboratorTeamTurn,
+  beginContinuationTeamTurn,
   beginOwnerTeamTurn,
   claimTeamTask,
   clearTeamTurn,
@@ -320,11 +321,35 @@ test('owner turn authority is bounded and collaborator turns fail closed', () =>
   beginOwnerTeamTurn(session, { messageTs: '1.2' }, { now: 1000, budget: 2 })
   consumeCoordinatorDispatch(session, { now: 2000 })
   consumeCoordinatorDispatch(session, { now: 3000 })
-  assert.throws(() => consumeCoordinatorDispatch(session, { now: 4000 }), error => error.code === 'owner_turn_required')
+  assert.throws(() => consumeCoordinatorDispatch(session, { now: 4000 }), error => error.code === 'dispatch_budget_exhausted')
   beginCollaboratorTeamTurn(session, { messageTs: '1.3' }, { now: 5000 })
   assert.throws(() => consumeCoordinatorDispatch(session, { now: 6000 }), error => error.code === 'owner_turn_required')
   clearTeamTurn(session)
   assert.equal(session.teamTurn, undefined)
+})
+
+test('automatic continuation authority is bounded and exact-team only', () => {
+  const session = {}
+  beginContinuationTeamTurn(session, {
+    teamId: 'team_hexagonal', eventId: 'team_event_reply_1',
+  }, { now: 1000, budget: 2 })
+
+  assert.throws(() => consumeCoordinatorDispatch(session, {
+    now: 2000, teamId: 'team_hexagonal', allowContinuation: false,
+  }), error => error.code === 'owner_turn_required')
+  assert.throws(() => consumeCoordinatorDispatch(session, {
+    now: 2000, teamId: 'team_other', allowContinuation: true,
+  }), error => error.code === 'owner_turn_required')
+
+  consumeCoordinatorDispatch(session, {
+    now: 2000, teamId: 'team_hexagonal', allowContinuation: true,
+  })
+  consumeCoordinatorDispatch(session, {
+    now: 3000, teamId: 'team_hexagonal', allowContinuation: true,
+  })
+  assert.throws(() => consumeCoordinatorDispatch(session, {
+    now: 4000, teamId: 'team_hexagonal', allowContinuation: true,
+  }), error => error.code === 'dispatch_budget_exhausted')
 })
 
 test('delegated prompts carry immutable provenance and a task marker', () => {

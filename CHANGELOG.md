@@ -36,6 +36,11 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Long-running automatic team coordinators no longer stall after exactly 20
+  delegations. Once the current bounded dispatch budget is exhausted, a pending
+  authenticated worker event can atomically establish one new exact-team
+  continuation budget; manual teams, collaborators, unrelated events, and
+  eventless retries remain fail-closed.
 - Provider update/restart now resumes Claude, Codex, and Pi with the latest
   known model and effort. Codex promotes only stable idle-TUI changes to durable
   intent, so an unexpected active-turn fallback remains visible without

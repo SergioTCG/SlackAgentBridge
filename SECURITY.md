@@ -251,7 +251,10 @@ Slack when its scope or progress is no longer appropriate.
   whose coordination work is finished, and leave file relay off unless needed.
 - Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
   replies create only durable event identifiers; the coordinator rereads the
-  authenticated team inbox before acting. Disable with `/sab-team manual` when
+  authenticated team inbox before acting. An exhausted coordinator turn can
+  renew one bounded dispatch budget only by atomically claiming a pending event
+  for the same automatic team; manual teams, collaborators, unrelated teams,
+  and eventless retries remain denied. Disable with `/sab-team manual` when
   every dispatch requires human approval. Missing Codex lifecycle hooks may
   release only stale coordinator fences after repeated idle proof from the exact
   authoritative PID/tmux; the bridge does not scrape terminal answers, infer a
