@@ -1,6 +1,6 @@
 {
   "name": "slack-agent-bridge",
-  "version": "2.1.0-rc.6",
+  "version": "2.1.0-rc.7",
   "description": "Control, hand off, and coordinate headless-capable Claude Code, Codex CLI, and Pi sessions from private Slack channels.",
   "private": true,
   "type": "module",

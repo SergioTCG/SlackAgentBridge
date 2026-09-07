@@ -14,7 +14,8 @@ policy turns the recurring production failures into explicit gates.
 
 A lower-priority operation must never delay or mutate a higher-priority one.
 In particular, status `chat.update` traffic is cosmetic and may coalesce or be
-dropped; provider commentary and finals are critical and bypass that queue.
+dropped; provider commentary and finals are critical, bypass that queue, and
+retain their provider source order across retries.
 
 ## Change classes
 

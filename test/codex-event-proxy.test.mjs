@@ -27,7 +27,14 @@ test('event proxy forwards every frame and reports commentary plus completed fin
   const daemon = http.createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request) body += chunk
-    deliveries.push({ url: request.url, provider: request.headers['x-ccs-provider'], body: JSON.parse(body) })
+    const parsed = JSON.parse(body)
+    // Hold the first final response open long enough for a later completion to
+    // overtake it if the proxy launches daemon deliveries independently. SAB
+    // must preserve App Server source order across commentary and finals.
+    if (request.url.startsWith('/codex/final') && parsed.turnId === 'turn-1') {
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    deliveries.push({ url: request.url, provider: request.headers['x-ccs-provider'], body: parsed })
     response.writeHead(202); response.end('accepted')
   })
   const daemonPort = await listen(daemon)

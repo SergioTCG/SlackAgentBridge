@@ -31,13 +31,20 @@ daemonUrl.searchParams.set('tmux', tmux)
 const finalDaemonUrl = new URL(daemonUrl)
 finalDaemonUrl.pathname = '/codex/final'
 const deliveries = new Map()
+let deliveryTail = Promise.resolve()
 const retryDelays = [0, 250, 1000, 3000, 7000, 15000]
 const pendingFinalAnswers = new Map()
 const MAX_PENDING_FINALS = 128
 
-async function deliver({ key, payload, endpoint, label }) {
+function deliver({ key, payload, endpoint, label }) {
   if (deliveries.has(key)) return deliveries.get(key)
-  const pending = (async () => {
+  // App Server frames arrive in semantic order, but independent fetches can
+  // complete out of order under Slack backoff or daemon latency. That can put a
+  // later final ahead of an earlier final—or a final ahead of its commentary—
+  // and make the daemon reject the delayed event as stale. Reserve the key
+  // synchronously, then serialize stable commentary/final deliveries in the
+  // exact order in which inspectFrame accepted them.
+  const pending = deliveryTail.then(async () => {
     for (const delay of retryDelays) {
       if (delay) await new Promise(resolve => setTimeout(resolve, delay))
       try {
@@ -52,8 +59,13 @@ async function deliver({ key, payload, endpoint, label }) {
       } catch {}
     }
     process.stderr.write(`sab Codex event proxy: ${label} delivery timed out (${payload.itemId.slice(0, 12)})\n`)
-  })().finally(() => deliveries.delete(key))
+  })
   deliveries.set(key, pending)
+  deliveryTail = pending.catch(() => {})
+  void pending.then(
+    () => { if (deliveries.get(key) === pending) deliveries.delete(key) },
+    () => { if (deliveries.get(key) === pending) deliveries.delete(key) },
+  )
   return pending
 }
 
@@ -86,14 +98,14 @@ function inspectFrame(data, isBinary) {
     const message = JSON.parse(data.toString('utf8'))
     const commentary = commentaryFromAppServerMessage(message)
     if (commentary) void deliver({
-      key: `commentary:${commentary.itemId}`,
+      key: `commentary:${commentary.threadId}\u0000${commentary.turnId}\u0000${commentary.itemId}`,
       payload: commentary,
       endpoint: daemonUrl,
       label: 'commentary',
     })
     const final = finalFromFrame(message)
     if (final) void deliver({
-      key: `final:${final.turnId}`,
+      key: `final:${finalKey(final)}`,
       payload: final,
       endpoint: finalDaemonUrl,
       label: 'final',

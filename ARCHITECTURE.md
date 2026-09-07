@@ -71,9 +71,11 @@ them.
   lifecycle and stable transcript/status integration.
 - `scripts/codex-event-proxy.mjs` transparently forwards the loopback App Server
   WebSocket to the Codex TUI while extracting completed semantic commentary
-  and a completed-turn final fallback. Codex hooks remain authoritative for
-  native identity and permissions; Stop and the exact App Server turn share one
-  durable final-delivery claim.
+  and a completed-turn final fallback. Accepted commentary and finals are
+  serialized in App Server source order before entering the daemon, preventing
+  a delayed earlier delivery from being overtaken and rejected as stale. Codex
+  hooks remain authoritative for native identity and permissions; Stop and the
+  exact App Server turn share one durable final-delivery claim.
 - `pi/sab-extension.ts` provides Pi lifecycle, inbound text, model/thinking
   settings, image support, usage, project trust, safe-mode permissions, and
   managed-run coordination. It is loaded explicitly and never installed into a
@@ -409,7 +411,9 @@ marked `commentary`, and holds one `final_answer` until its matching successful
 `turn/completed`. That final uses the same durable turn claim as a late Stop
 hook, addressing Codex App Server releases that omit Stop without parsing the
 transcript or terminal. It never emits commands, command output, diffs, plans,
-reasoning, or deltas. Before applying the exact-process fence, the daemon
+reasoning, or deltas. Stable commentary/final deliveries retain their App
+Server source order across loopback retries, so a later final cannot overtake
+an earlier response. Before applying the exact-process fence, the daemon
 canonicalizes npm's persistent App Server launcher to its direct matching
 native child—the identity emitted by lifecycle hooks—and then revalidates that
 child against the exact tmux. If either sidecar cannot start, the runner falls

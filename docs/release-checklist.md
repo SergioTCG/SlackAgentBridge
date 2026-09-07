@@ -75,8 +75,9 @@
       trigger restart notifications.
 - [ ] A new message or real topic change re-anchors the single working status
       without resetting its timer.
-- [ ] Codex mirrors semantic interim commentary but excludes commands, output,
-      diffs, reasoning, plans, and final events; direct fallback works.
+- [ ] Codex mirrors semantic interim commentary and exactly one completed final
+      in App Server source order, while excluding commands, output, diffs,
+      reasoning, plans, deltas, and failed-turn finals; direct fallback works.
 - [ ] Claude login expiry and overload failures surface promptly and deduplicate.
 - [ ] `/sab-model`, `/sab-effort`, `/sab-flags`, `/sab-update`, `/sab-stop`,
       `/sab-kill`, `/sab-status`, and `/sab-usage` work for each provider.

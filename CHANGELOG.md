@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.6] — 2026-09-07
+## [2.1.0-rc.7] — 2026-09-07
 
 ### Added
 
@@ -49,6 +49,10 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex semantic commentary and completed finals now cross the loopback event
+  proxy in their exact App Server source order. A delayed earlier Slack/daemon
+  delivery can no longer be overtaken by a later final and then rejected as
+  stale; per-event deduplication and bounded retries remain intact.
 - Provider commentary and final responses no longer wait behind rate-limited
   working-status edits or deletes. Status cleanup invalidates queued stale
   timers and replacement bumps at the final Slack boundary, takes priority over
@@ -208,7 +212,7 @@ Notable changes to this project. Format based on
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
 
-[2.1.0-rc.6]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.6
+[2.1.0-rc.7]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.7
 
 ## [2.0.1] — 2026-08-26
 

@@ -170,8 +170,10 @@ accounts, and the Mac user running the daemon.
   native child, then requires that exact Codex process, tmux, native session,
   active channel, and lineage state before posting. Command lines, command
   output, diffs, plans, reasoning, and partial deltas never enter either
-  endpoint. Private transition finals resolve only their exact waiter and never
-  enter Slack.
+  endpoint. Accepted commentary and finals are serialized in App Server source
+  order before loopback delivery; a delayed earlier event therefore cannot be
+  made stale by a later final. Private transition finals resolve only their
+  exact waiter and never enter Slack.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
   `sab new pi` from the checked-out release and is not installed globally or into a
   project. Its inbound stream and permission endpoints require matching Pi
