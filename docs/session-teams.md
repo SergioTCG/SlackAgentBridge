@@ -152,8 +152,9 @@ persists the change, and wakes queued-task reconciliation. A delegated task,
 changed PID/tmux/session, queued input, or failed historical task resets the
 proof, so a fresh task is claimed at most once and old work is never replayed.
 
-Claude transcript completion, the Codex Stop hook, or the Pi extension supplies
-the stable final result. SAB persists completion plus an idempotent Slack
+Claude transcript completion, the Codex Stop hook or exact successful App Server
+turn, or the Pi extension supplies the stable final result. SAB persists
+completion plus an idempotent Slack
 delivery claim before reporting it in the coordinator channel. Restart
 reconciliation either proves the original turn is still active or visibly
 releases it without attributing a later final. Deleted or otherwise uneditable

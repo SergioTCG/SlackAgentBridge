@@ -160,15 +160,18 @@ accounts, and the Mac user running the daemon.
   length-capped, and converted to fixed-destination Slack blocks; arbitrary tool
   inputs are ignored. Answers still travel only to the authoritative session's
   existing tmux identity.
-- **Bounded Codex commentary egress:** the per-session App Server and transparent
+- **Bounded Codex semantic egress:** the per-session App Server and transparent
   event proxy bind only to random loopback ports. The proxy forwards every frame
-  unchanged to the TUI but submits only completed `agentMessage` events
-  explicitly marked `commentary` to port `8877`. The daemon independently
+  unchanged to the TUI but submits only completed `agentMessage` commentary and
+  one `final_answer` after its exact successful `turn/completed` to port `8877`.
+  Stop and App Server completion share one durable native-turn claim, so a late
+  hook cannot duplicate the final. The daemon independently
   canonicalizes a retained npm App Server launcher only to its direct matching
   native child, then requires that exact Codex process, tmux, native session,
   active channel, and lineage state before posting. Command lines, command
-  output, diffs, plans, reasoning, partial deltas, and final answers never enter
-  this endpoint.
+  output, diffs, plans, reasoning, and partial deltas never enter either
+  endpoint. Private transition finals resolve only their exact waiter and never
+  enter Slack.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
   `sab new pi` from the checked-out release and is not installed globally or into a
   project. Its inbound stream and permission endpoints require matching Pi

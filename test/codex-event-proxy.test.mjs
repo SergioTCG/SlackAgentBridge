@@ -22,7 +22,7 @@ const waitFor = async (condition, timeoutMs = 5000) => {
   throw new Error('timed out waiting for proxy activity')
 }
 
-test('event proxy forwards every frame but reports only completed commentary', async () => {
+test('event proxy forwards every frame and reports commentary plus completed final answers', async () => {
   const deliveries = []
   const daemon = http.createServer(async (request, response) => {
     let body = ''
@@ -57,18 +57,42 @@ test('event proxy forwards every frame but reports only completed commentary', a
       { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { id: 'final-1', type: 'agentMessage', phase: 'final_answer', text: 'Done.' } } },
       { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { id: 'command-1', type: 'commandExecution', command: 'git diff' } } },
       { method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'comment-1', delta: 'partial' } },
+      // Some App Server clients receive a summary completion without the full
+      // item list. The proxy must correlate the already completed final item
+      // and release it only once the whole turn is complete.
+      { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } } },
+      { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-2', item: { id: 'final-2', type: 'agentMessage', phase: 'final_answer', text: 'Must not escape.' } } },
+      { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-2', status: 'failed', items: [] } } },
+      // A later duplicate completion cannot recover the discarded failed turn.
+      { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-2', status: 'completed', items: [] } } },
+      { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-3', status: 'completed', items: [
+        { id: 'final-3', type: 'agentMessage', phase: 'final_answer', text: 'Direct completion.' },
+      ] } } },
     ]
     const received = []
     client.on('message', data => received.push(JSON.parse(data.toString())))
-    for (const frame of frames) serverSocket.send(JSON.stringify(frame))
+    for (const frame of frames.slice(0, 4)) serverSocket.send(JSON.stringify(frame))
+    await waitFor(() => deliveries.length === 1 && received.length === 4)
+    assert.equal(deliveries.some(delivery => delivery.url.startsWith('/codex/final')), false,
+      'a final item must remain staged until its turn completes')
+    for (const frame of frames.slice(4)) serverSocket.send(JSON.stringify(frame))
 
-    await waitFor(() => deliveries.length === 1 && received.length === frames.length)
+    await waitFor(() => deliveries.length === 3 && received.length === frames.length)
     assert.deepEqual(received, frames)
-    assert.equal(deliveries[0].provider, 'codex')
-    assert.match(deliveries[0].url, /^\/codex\/commentary\?ppid=\d+&tmux=ccs-test$/)
-    assert.deepEqual(deliveries[0].body, {
+    const commentary = deliveries.find(delivery => delivery.url.startsWith('/codex/commentary'))
+    const finals = deliveries.filter(delivery => delivery.url.startsWith('/codex/final'))
+    assert.equal(commentary.provider, 'codex')
+    assert.match(commentary.url, /^\/codex\/commentary\?ppid=\d+&tmux=ccs-test$/)
+    assert.deepEqual(commentary.body, {
       threadId: 'thread-1', turnId: 'turn-1', itemId: 'comment-1', text: 'The remote job remains healthy.',
     })
+    assert.equal(finals[0].provider, 'codex')
+    assert.match(finals[0].url, /^\/codex\/final\?ppid=\d+&tmux=ccs-test$/)
+    assert.deepEqual(finals.map(delivery => delivery.body), [{
+      threadId: 'thread-1', turnId: 'turn-1', itemId: 'final-1', text: 'Done.',
+    }, {
+      threadId: 'thread-1', turnId: 'turn-3', itemId: 'final-3', text: 'Direct completion.',
+    }])
   } finally {
     client?.terminate()
     proxy.kill('SIGTERM')

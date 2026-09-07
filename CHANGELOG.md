@@ -36,6 +36,13 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex App Server turns no longer lose their final Slack response when Codex
+  omits the configured Stop hook. The transparent proxy now releases only a
+  completed `final_answer` after its exact successful `turn/completed`; the
+  daemon revalidates PID/tmux/session/channel authority and atomically shares a
+  bounded turn claim with late Stop hooks. Private handoff finals remain private,
+  and tools, output, diffs, plans, reasoning, deltas, transcript JSONL, and
+  failed/interrupted turns remain excluded.
 - Codex turns that omit lifecycle hooks no longer lose their bridge status
   tracking when input was accepted through tmux or a daemon restart. SAB now
   re-adopts a verified rendered `Working (...)` turn, coalesces and rate-limits

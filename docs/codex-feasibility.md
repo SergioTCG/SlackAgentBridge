@@ -30,8 +30,8 @@ mappings retain their current shape, so activation needs no state migration.
 | New session/channel | `SessionStart` hook (`session_id`, `cwd`, `model`) | Implemented |
 | Terminal prompt → Slack | `UserPromptSubmit.prompt` | Implemented |
 | Slack prompt → terminal | Existing bracketed tmux paste | Implemented |
-| Final response → Slack | `Stop.last_assistant_message` | Implemented without parsing Codex JSONL |
-| Interim progress → Slack | App Server `item/completed` for `agentMessage.phase=commentary` | Implemented through a transparent loopback proxy; tools, diffs, reasoning, plans, deltas, and final answers are excluded |
+| Final response → Slack | `Stop.last_assistant_message`, with matching successful App Server `turn/completed` + `final_answer` fallback | Implemented with shared turn deduplication and without parsing Codex JSONL |
+| Interim progress → Slack | App Server `item/completed` for `agentMessage.phase=commentary` | Implemented through a transparent loopback proxy; tools, diffs, reasoning, plans, and deltas are excluded |
 | Dormant-session resume | `codex resume <UUID>` in a new detached tmux session | Implemented |
 | Approve/deny from Slack | Synchronous `PermissionRequest` hook; daemon holds the response until a Slack verdict | Implemented for non-yolo sessions; local prompt is the failure fallback |
 | Interrupt turn | Launcher binds Codex `interrupt_turn` to F12; daemon sends F12, then confirms `Stop` or the idle input surface before clearing live status | Implemented |
@@ -45,18 +45,21 @@ mappings retain their current shape, so activation needs no state migration.
 ## Why hooks + tmux remain authoritative
 
 Codex App Server provides the semantic distinction needed for useful interim
-commentary, but its WebSocket transport remains experimental. SAB therefore
-does not make App Server its lifecycle or input control plane. Each bridged
-launch keeps hooks authoritative for session identity, permission decisions,
-and final text, and keeps tmux authoritative for input, interrupt, and
-resurrection. A per-session loopback proxy transparently forwards the protocol
-between the TUI and App Server while observing only completed, user-facing
-commentary events. If either sidecar cannot start, `sab new codex`
+commentary and completed turns, but its WebSocket transport remains
+experimental. SAB therefore does not make App Server its identity, permission,
+or input control plane. Each bridged launch keeps hooks authoritative for
+session identity and permission decisions, and keeps tmux authoritative for
+input, interrupt, and resurrection. A per-session loopback proxy transparently
+forwards the protocol between the TUI and App Server while observing only
+completed user-facing commentary and one final answer after the exact successful
+turn completion. Stop and App Server completion atomically claim the same turn,
+because affected Codex releases can complete a turn without dispatching Stop.
+If either sidecar cannot start, `sab new codex`
 executes the prior direct TUI path instead.
 
 Codex documents its transcript path as a convenience rather than a stable wire
-format. The bridge consequently uses `Stop.last_assistant_message` and never
-parses Codex JSONL directly. The bundled, independently maintained `ccusage`
+format. The bridge consequently uses the supported Stop or App Server completed
+turn payload and never parses Codex JSONL directly. The bundled, independently maintained `ccusage`
 adapter owns usage-file discovery and exposes normalized JSON to the bridge.
 This keeps transcript independence and bounded token telemetry while adding
 typed mid-turn prose without terminal scraping.
@@ -73,9 +76,9 @@ typed mid-turn prose without terminal scraping.
   does not alter `~/.codex`.
 - The Codex installer does not restart the daemon. Activation is a deliberate
   maintenance action.
-- The commentary proxy uses random loopback ports and the daemon accepts an
+- The semantic event proxy uses random loopback ports and the daemon accepts an
   event only when App Server PID, tmux, session ID, active channel, and lineage
-  all agree. It never receives command output, diffs, plans, or reasoning.
+  all agree. It never submits command output, diffs, plans, or reasoning.
 - To mirror Claude's remote-control posture, flagless Slack spawns default to
   `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Operators can replace
   it with explicit sandbox/approval flags or `CCS_CODEX_NEW_FLAGS`; the Slack
@@ -104,8 +107,8 @@ during a safe window. Claude sessions and state need no conversion.
    Slack channel, permission prompt, and resume should be smoke-tested only
    after the operator approves a daemon restart.
 6. App Server's WebSocket transport is experimental. A Codex upgrade requires a
-   controlled commentary and direct-fallback canary; existing direct sessions
-   must restart or resume to gain the proxy.
+   controlled commentary, completed-final, and direct-fallback canary; existing
+   direct sessions must restart or resume to gain the proxy.
 
 ## Primary references
 

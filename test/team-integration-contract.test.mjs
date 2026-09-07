@@ -15,6 +15,7 @@ test('all provider-stable final paths complete the exact delegated team task', (
   }
   assert.match(daemon, /await failTeamTaskForSession\(session, 'The worker session ended/)
   assert.match(daemon, /session\.teamActiveTaskId.*delegated team task in progress|teamActiveTaskId/s)
+  assert.match(daemon, /codexFinalDeliveries\.has\(deliveryKey\)[\s\S]*codexFinalDeliveries\.set\(deliveryKey, delivery\)/)
 })
 
 test('team tools remain provider-neutral and cannot acquire Slack credentials or history', () => {

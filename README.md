@@ -59,8 +59,10 @@ duplicating the native conversation.
 
 While a turn runs, its status and elapsed timer remain the newest channel item.
 Daemon restarts re-adopt active turns and their original duration. Codex's
-loopback event proxy mirrors only completed semantic commentary; it excludes
-commands, output, diffs, plans, reasoning, deltas, and final-answer events.
+loopback event proxy mirrors completed semantic commentary and uses a completed
+App Server turn as an exact final-answer fallback when Codex omits its Stop
+hook. It excludes commands, output, diffs, plans, reasoning, and deltas; Stop
+and App Server completion share a durable turn-level deduplication claim.
 If Codex rejects a submitted turn because its selected model is at capacity,
 SAB replaces the working timer with that actionable failure instead of leaving
 the channel apparently busy. The detector requires the exact current TUI
@@ -73,12 +75,12 @@ mismatch is treated as a possible capacity fallback and never changes the next
 resume. Claude and Pi likewise resume with their latest known native
 model/effort rather than their original launch values.
 If Codex omits `UserPromptSubmit`, SAB starts tracking a bridge-injected turn at
-the tmux boundary. If a resumed turn omits its `Stop` hook, two unchanged idle
-observations after the grace period clear only the exact provider/task fences.
-An owner turn is released for normal input; a delegated task is marked failed
-and released without replay, because the stable final response was not
-authenticated. Replacement sessions and historical failed tasks are never
-mutated. Status edits share a workspace-wide rate-safe, coalescing queue so a
+the tmux boundary. If it also omits `Stop`, the correlated App Server
+`turn/completed` final completes the exact owner or delegated turn. When neither
+stable completion source arrives, two unchanged idle observations after the
+grace period clear only the exact provider/task fences; a delegated task is
+failed and released without replay. Replacement sessions and historical failed
+tasks are never mutated. Status edits share a workspace-wide rate-safe, coalescing queue so a
 long-running timer cannot starve ordinary Slack responses.
 Claude `AskUserQuestion` forms use their structured hook payload, so Slack keeps
 the question header, prompt, recommendation, option descriptions, and previews

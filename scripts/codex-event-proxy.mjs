@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { WebSocket, WebSocketServer } from 'ws'
-import { commentaryFromAppServerMessage } from '../daemon/codex-commentary.mjs'
+import {
+  codexFinalFromAppServerMessage,
+  commentaryFromAppServerMessage,
+  finalAnswerItemFromAppServerMessage,
+} from '../daemon/codex-commentary.mjs'
 
 function fail(message) {
   process.stderr.write(`sab Codex event proxy: ${message}\n`)
@@ -24,36 +28,76 @@ if (!/^http:\/\/127\.0\.0\.1:\d+\/codex\/commentary$/.test(daemonEndpoint)) fail
 const daemonUrl = new URL(daemonEndpoint)
 daemonUrl.searchParams.set('ppid', String(agentPid))
 daemonUrl.searchParams.set('tmux', tmux)
+const finalDaemonUrl = new URL(daemonUrl)
+finalDaemonUrl.pathname = '/codex/final'
 const deliveries = new Map()
 const retryDelays = [0, 250, 1000, 3000, 7000, 15000]
+const pendingFinalAnswers = new Map()
+const MAX_PENDING_FINALS = 128
 
-async function deliver(commentary) {
-  if (deliveries.has(commentary.itemId)) return deliveries.get(commentary.itemId)
+async function deliver({ key, payload, endpoint, label }) {
+  if (deliveries.has(key)) return deliveries.get(key)
   const pending = (async () => {
     for (const delay of retryDelays) {
       if (delay) await new Promise(resolve => setTimeout(resolve, delay))
       try {
-        const response = await fetch(daemonUrl, {
+        const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-ccs-provider': 'codex' },
-          body: JSON.stringify(commentary),
+          body: JSON.stringify(payload),
           signal: AbortSignal.timeout(15000),
         })
         if (response.ok) return
         if (![409, 429, 503].includes(response.status)) return
       } catch {}
     }
-    process.stderr.write(`sab Codex event proxy: commentary delivery timed out (${commentary.itemId.slice(0, 12)})\n`)
-  })().finally(() => deliveries.delete(commentary.itemId))
-  deliveries.set(commentary.itemId, pending)
+    process.stderr.write(`sab Codex event proxy: ${label} delivery timed out (${payload.itemId.slice(0, 12)})\n`)
+  })().finally(() => deliveries.delete(key))
+  deliveries.set(key, pending)
   return pending
+}
+
+function finalKey(value) {
+  return `${value.threadId}\u0000${value.turnId}`
+}
+
+function finalFromFrame(message) {
+  const item = finalAnswerItemFromAppServerMessage(message)
+  if (item) {
+    const key = finalKey(item)
+    pendingFinalAnswers.delete(key)
+    pendingFinalAnswers.set(key, item)
+    while (pendingFinalAnswers.size > MAX_PENDING_FINALS) pendingFinalAnswers.delete(pendingFinalAnswers.keys().next().value)
+    return null
+  }
+  if (message?.method !== 'turn/completed') return null
+  const threadId = message.params?.threadId
+  const turnId = message.params?.turn?.id
+  const key = finalKey({ threadId, turnId })
+  const staged = pendingFinalAnswers.get(key) || null
+  pendingFinalAnswers.delete(key)
+  return codexFinalFromAppServerMessage(message) ||
+    (message.params?.turn?.status === 'completed' ? staged : null)
 }
 
 function inspectFrame(data, isBinary) {
   if (isBinary) return
   try {
-    const commentary = commentaryFromAppServerMessage(JSON.parse(data.toString('utf8')))
-    if (commentary) void deliver(commentary)
+    const message = JSON.parse(data.toString('utf8'))
+    const commentary = commentaryFromAppServerMessage(message)
+    if (commentary) void deliver({
+      key: `commentary:${commentary.itemId}`,
+      payload: commentary,
+      endpoint: daemonUrl,
+      label: 'commentary',
+    })
+    const final = finalFromFrame(message)
+    if (final) void deliver({
+      key: `final:${final.turnId}`,
+      payload: final,
+      endpoint: finalDaemonUrl,
+      label: 'final',
+    })
   } catch {}
 }
 

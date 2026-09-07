@@ -67,8 +67,10 @@ them.
 - `channel/server.mjs` implements the Claude Channels path. Claude hooks provide
   lifecycle and stable transcript/status integration.
 - `scripts/codex-event-proxy.mjs` transparently forwards the loopback App Server
-  WebSocket to the Codex TUI while extracting completed semantic commentary.
-  Codex hooks remain authoritative for lifecycle, permissions, and final text.
+  WebSocket to the Codex TUI while extracting completed semantic commentary
+  and a completed-turn final fallback. Codex hooks remain authoritative for
+  native identity and permissions; Stop and the exact App Server turn share one
+  durable final-delivery claim.
 - `pi/sab-extension.ts` provides Pi lifecycle, inbound text, model/thinking
   settings, image support, usage, project trust, safe-mode permissions, and
   managed-run coordination. It is loaded explicitly and never installed into a
@@ -303,8 +305,8 @@ Task delivery is journal-first:
    marker, or when the exact process-bound worker successfully journals a reply
    for that task. The latter is durable acceptance proof when a provider omits
    its prompt hook; it is not final-result proof. Claude's completed transcript
-   path, Codex's Stop hook, or Pi's extension final event may complete only the
-   same task/session binding.
+   path, Codex's Stop hook or matching successful App Server turn, or Pi's
+   extension final event may complete only the same task/session binding.
 6. Persist completion and a delivery claim before updating both audit cards and
    idempotently posting the stable result in the coordinator channel. A missing
    or uneditable audit card is reported with the result but cannot suppress it;
@@ -354,12 +356,15 @@ is Claude-specific.
 
 ### Codex
 
-Codex inbound text and interrupts use tmux. Hooks provide native IDs, stable
-final assistant text, turn boundaries, and permission decisions. The App Server
-proxy is a bounded supplementary egress path: it forwards every protocol frame
-unchanged but submits only completed `agentMessage` values explicitly marked
-`commentary`. It never emits commands, command output, diffs, plans, reasoning,
-deltas, or final answers. Before applying the exact-process fence, the daemon
+Codex inbound text and interrupts use tmux. Hooks provide native IDs, turn
+boundaries, permission decisions, and normally the stable final assistant text.
+The App Server proxy is a bounded supplementary egress path: it forwards every
+protocol frame unchanged, submits completed `agentMessage` values explicitly
+marked `commentary`, and holds one `final_answer` until its matching successful
+`turn/completed`. That final uses the same durable turn claim as a late Stop
+hook, addressing Codex App Server releases that omit Stop without parsing the
+transcript or terminal. It never emits commands, command output, diffs, plans,
+reasoning, or deltas. Before applying the exact-process fence, the daemon
 canonicalizes npm's persistent App Server launcher to its direct matching
 native child—the identity emitted by lifecycle hooks—and then revalidates that
 child against the exact tmux. If either sidecar cannot start, the runner falls
@@ -412,8 +417,10 @@ timer edits are coalesced before Slack I/O so they cannot starve final or
 ordinary messages.
 
 Final text comes only from provider-stable sources. Claude reads completed
-transcript records, Codex uses the Stop hook's final field, and Pi uses its
-extension event. Codex turns that omit `UserPromptSubmit` are tracked from the
+transcript records, Codex uses either the Stop hook's final field or the exact
+App Server `final_answer` after a successful matching `turn/completed`, and Pi
+uses its extension event. The two Codex sources atomically claim the same native
+turn before Slack delivery. Codex turns that omit `UserPromptSubmit` are tracked from the
 successful bridge injection, and a rendered `Working (...)` footer allows
 restart re-adoption when the timestamp was lost. Two unchanged idle-surface
 observations can release an owner turn; for a delegated task they fail only

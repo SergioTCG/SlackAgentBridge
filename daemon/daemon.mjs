@@ -28,8 +28,11 @@ import { createSessionChannelGate, pruneSessionChannelAliases } from './channel-
 import { createTopicSync } from './topic.mjs'
 import { createStatusMessages, recoverCodexTurnStartedAt } from './status.mjs'
 import {
-  claimCodexCommentary, codexCommentaryDisposition, commentaryFromAppServerMessage, releaseCodexCommentary,
+  claimCodexCommentary, claimCodexFinal, codexCommentaryDisposition,
+  codexFinalLifecycleFingerprint, codexFinalLifecycleStillCurrent,
+  commentaryFromAppServerMessage, releaseCodexCommentary, releaseCodexFinal,
 } from './codex-commentary.mjs'
+import { handleCodexFinalHttp } from './codex-final-http.mjs'
 import { codexTerminalFailure, codexTerminalFailureDecision } from './codex-terminal.mjs'
 import { codexFooterSettings, shouldPromoteCodexFooter } from './codex-footer.mjs'
 import {
@@ -692,6 +695,7 @@ function startPoller(session) {
 // adapter. The expensive transcript scan is bounded to once every 12 seconds;
 // the Slack timer continues to update every 3 seconds in the same message.
 const codexPollers = new Map() // sid → { timer, baseline, current, ... }
+const codexFinalDeliveries = new Map() // sid + turn → one shared Stop/App Server delivery
 const CODEX_USAGE_REFRESH_MS = 12000
 async function reconcileCodexFooter(session, pane = null) {
   if (!session?.channel || providerOf(session) !== 'codex' ||
@@ -1001,19 +1005,47 @@ async function finalizeTurn(session, { terminalFailure = null } = {}) {
   }, 5000)
 }
 
-// Codex exposes the stable final assistant text directly on Stop. Its JSONL
-// transcript is explicitly not a stable hook interface, so never parse it.
+// Codex exposes stable final text on Stop and on the supported App Server's
+// successful turn completion. Both enter here; JSONL and terminal output never do.
 async function finalizeCodexTurn(session, body) {
-  stopPoller(session)
-  await clearStatus(session)
   const turnId = body.turn_id || null
-  if (turnId && session.lastMirroredTurn === turnId) return
-  const text = String(body.last_assistant_message || '').trim()
-  if (text && session.channel) await postMd(session.channel, text)
-  await finishTeamTaskForSession(session, text)
-  clearTeamInputReservation(session)
-  if (turnId) session.lastMirroredTurn = turnId
-  saveState(state)
+  const deliveryKey = turnId ? `${session.id}\u0000${turnId}` : null
+  if (deliveryKey && codexFinalDeliveries.has(deliveryKey)) return codexFinalDeliveries.get(deliveryKey)
+  const delivery = (async () => {
+    if (turnId && !claimCodexFinal(session, turnId)) return false
+    // Claim before Slack or team side effects. App Server completion and a late
+    // Stop hook can race; only one may own this exact native turn.
+    if (turnId) {
+      try { saveStateNow(state) }
+      catch (error) { releaseCodexFinal(session, turnId); throw error }
+    }
+    const expected = codexFinalLifecycleFingerprint(session)
+    stopPoller(session)
+    await clearStatus(session)
+    const text = String(body.last_assistant_message || '').trim()
+    try {
+      if (text && session.channel) await postMd(session.channel, text)
+    } catch (error) {
+      // A known Slack failure remains retryable by the App Server proxy.
+      if (turnId) releaseCodexFinal(session, turnId)
+      saveStateNow(state)
+      throw error
+    }
+    if (codexFinalLifecycleStillCurrent(session, expected)) {
+      await finishTeamTaskForSession(session, text)
+      clearTeamInputReservation(session)
+    } else {
+      log('Codex final arrived after a newer turn started; preserved newer lifecycle state', session.id.slice(0, 8), turnId)
+    }
+    saveState(state)
+    return true
+  })()
+  if (deliveryKey) codexFinalDeliveries.set(deliveryKey, delivery)
+  try {
+    return await delivery
+  } finally {
+    if (deliveryKey && codexFinalDeliveries.get(deliveryKey) === delivery) codexFinalDeliveries.delete(deliveryKey)
+  }
 }
 
 async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt) {
@@ -5190,6 +5222,10 @@ http.createServer(async (req, res) => {
   if (await handleTeamHttp(req, res, url, teamService)) return
   if (await handleAutomationHttp(req, res, url, automationLifecycle)) return
   if (await handleTerminalHttp(req, res, url, terminalControl)) return
+  if (await handleCodexFinalHttp(req, res, url, {
+    state, execFile, internalTurns, resolveAgentPid, codexAppServerProcessPid, validTmuxClaim,
+    transitionForTarget, completePrivateTurn, finalizeCodexTurn, isNoSpaceError, log,
+  })) return
   if (url.pathname === '/codex/commentary' && req.method === 'POST') {
     if (req.headers['x-ccs-provider'] !== 'codex' || !String(req.headers['content-type'] || '').startsWith('application/json')) {
       res.writeHead(403); res.end('forbidden'); return

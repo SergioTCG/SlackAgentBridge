@@ -92,13 +92,16 @@ generated MCP configuration. Do not print secrets during diagnostics.
   migration.
 - Claude inbound messages use its MCP Channel server; hooks mirror lifecycle and
   outbound content. Preserve the channel consent and account-switching paths.
-- Codex inbound messages use tmux; lifecycle hooks provide stable outbound final
-  text and permission decisions. A transparent loopback App Server proxy may
-  mirror only completed `agentMessage.phase=commentary` events; it must not take
+- Codex inbound messages use tmux; lifecycle hooks provide native identity and
+  permission decisions. A transparent loopback App Server proxy may relay only
+  completed `agentMessage.phase=commentary` events and one
+  `agentMessage.phase=final_answer` after the matching successful
+  `turn/completed`. The final is an exact-turn fallback for Codex releases that
+  omit `Stop`; it shares the Stop path's durable deduplication and must not take
   over lifecycle/input control or emit tools, output, diffs, plans, reasoning,
-  deltas, or final answers. Preserve direct-TUI fallback. Never parse Codex
-  transcript JSONL directly; usage telemetry may enter only through `ccusage`'s
-  public JSON adapter.
+  or deltas. Preserve direct-TUI fallback. Never parse Codex transcript JSONL
+  directly; usage telemetry may enter only through `ccusage`'s public JSON
+  adapter.
 - Keep Codex requested model/effort separate from the actual model reported by
   lifecycle hooks. Capacity fallback must be visible and must not silently
   rewrite the durable settings used for the next resume.
