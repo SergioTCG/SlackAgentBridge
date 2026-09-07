@@ -76,6 +76,15 @@ test('automatic continuation recovers a hookless idle Codex coordinator without 
   assert.match(daemon, /Team continuation is queued while the coordinator remains busy/)
 })
 
+test('hookless resumed Codex workers release stale owner fences before queued dispatch', () => {
+  assert.match(daemon, /observeIdleCodexTurn\(session,/)
+  assert.match(daemon, /Codex idle fallback released owner turn \(Stop hook missing\)/)
+  assert.match(daemon, /state\.sessions\?\.\[expected\.sid\] !== session[\s\S]*state\.channels\?\.\[session\.channel\] !== expected\.sid/)
+  assert.match(daemon, /validProviderRootClaim\(expected\.pid, expected\.tmux, 'codex'\)/)
+  assert.match(daemon, /clearTeamInputReservation\(session\)[\s\S]*saveStateNow\(state\)[\s\S]*reconcileTeamTasks\(\)/)
+  assert.match(daemon, /teamActiveTaskId \|\| session\.teamInputReservation[\s\S]*pollers\.has\(session\.id\)[\s\S]*codexPollers\.has\(session\.id\)/)
+})
+
 test('automatic continuation renews exhausted dispatch authority before task side effects', () => {
   assert.match(daemon, /beginContinuationTeamTurn\(coordinator, \{ teamId: team\.id, eventId: event\.id \}/)
   const claim = daemon.indexOf('const renewed = claimContinuationDispatchAuthority(team, session)')

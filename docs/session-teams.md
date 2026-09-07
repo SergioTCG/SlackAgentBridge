@@ -145,6 +145,13 @@ clears the stale coordinator fence and proceeds without scraping a final answer
 or assigning a worker result. A genuine busy wait is reported once after one
 minute and continues to retry safely.
 
+The same fallback covers an ordinary owner turn in a resumed Codex worker. Once
+the exact authoritative worker process has shown the unchanged idle input
+surface twice, SAB clears only that worker's stale owner-turn/input fences,
+persists the change, and wakes queued-task reconciliation. A delegated task,
+changed PID/tmux/session, queued input, or failed historical task resets the
+proof, so a fresh task is claimed at most once and old work is never replayed.
+
 Claude transcript completion, the Codex Stop hook, or the Pi extension supplies
 the stable final result. SAB persists completion plus an idempotent Slack
 delivery claim before reporting it in the coordinator channel. Restart

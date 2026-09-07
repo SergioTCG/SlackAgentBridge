@@ -119,11 +119,12 @@ const parsedTimestamp = value => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-// Codex resume can expose a working TUI yet omit both UserPromptSubmit and Stop.
-// Releasing its bridge-owned coordinator fences is safe only after the exact
-// authoritative process has shown a ready input surface twice, after a grace
-// period, with the same immutable turn fingerprint on both observations.
-export function observeIdleCodexCoordinator(session, {
+// Codex can expose a working TUI yet omit both UserPromptSubmit and Stop.
+// Releasing bridge-owned turn fences is safe only after the exact authoritative
+// process has shown a ready input surface twice, after a grace period, with the
+// same immutable turn fingerprint on both observations. This is shared by
+// coordinator continuation recovery and ordinary worker-turn recovery.
+export function observeIdleCodexTurn(session, {
   ready = false,
   previous = null,
   now = Date.now(),
@@ -154,6 +155,9 @@ export function observeIdleCodexCoordinator(session, {
     ? { action: 'release', observation }
     : { action: 'confirm', observation }
 }
+
+// Compatibility name retained for callers and existing state-team tests.
+export const observeIdleCodexCoordinator = observeIdleCodexTurn
 
 export function noteContinuationWaiting(team, reason, {
   now = Date.now(), noticeAfterMs = TEAM_CONTINUATION_WAIT_NOTICE_MS,

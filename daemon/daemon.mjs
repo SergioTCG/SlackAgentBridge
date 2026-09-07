@@ -86,7 +86,7 @@ import {
 } from './teams.mjs'
 import {
   claimContinuation, claimContinuationDispatchAuthority, clearContinuationWaiting, coalesceContinuations, deferContinuation,
-  noteContinuationWaiting, observeIdleCodexCoordinator, queueContinuation, setContinuationMode,
+  noteContinuationWaiting, observeIdleCodexCoordinator, observeIdleCodexTurn, queueContinuation, setContinuationMode,
   settleContinuation, shouldWakeForTeamReply,
 } from './team-continuation.mjs'
 import { createExecutionNodeRouter, createLocalExecutionNode } from './execution-nodes.mjs'
@@ -731,6 +731,7 @@ function startCodexPoller(session) {
     current: null,
     failureKey: null,
     failureConfirmations: 0,
+    idleObservation: null,
     turnStartedAt: session.codexTurnStartedAt,
   }
   const tick = async () => {
@@ -753,6 +754,51 @@ function startCodexPoller(session) {
         p.stopped = true
         log('Codex terminal failure finalize (Stop hook missing)', session.id.slice(0, 8), failureDecision.failure.key)
         await finalizeCodexTerminalFailure(session, failureDecision.failure, p.turnStartedAt)
+        return
+      }
+      const idleDecision = observeIdleCodexTurn(session, {
+        ready: targetStartupState('codex', pane) === 'ready',
+        previous: p.idleObservation,
+      })
+      p.idleObservation = idleDecision.observation
+      if (idleDecision.action === 'release' && !session.teamActiveTaskId && session.teamInputReservation) {
+        // A resumed ordinary owner turn can omit Codex's Stop hook. Never let
+        // that stale poller fence a worker forever: require the exact current
+        // turn, channel mapping, and provider root before releasing it, then
+        // wake the reconciler so queued work can claim the worker once.
+        const expected = {
+          sid: session.id,
+          pid: session.pid,
+          tmux: session.tmux,
+          teamTurn: session.teamTurn?.startedAt || null,
+          input: session.teamInputReservation?.acceptedAt || null,
+          turn: p.turnStartedAt,
+        }
+        if (!Number.isFinite(expected.turn) || expected.turn <= 0 || !(expected.pid > 1) || !expected.tmux ||
+            session.codexTurnStartedAt !== expected.turn ||
+            (session.teamTurn?.startedAt || null) !== expected.teamTurn ||
+            (session.teamInputReservation?.acceptedAt || null) !== expected.input ||
+            state.sessions?.[expected.sid] !== session ||
+            !session.channel || state.channels?.[session.channel] !== expected.sid ||
+            !(await validProviderRootClaim(expected.pid, expected.tmux, 'codex'))) {
+          p.idleObservation = null
+          return
+        }
+        if (session.codexTurnStartedAt !== expected.turn || session.pid !== expected.pid || session.tmux !== expected.tmux ||
+            (session.teamTurn?.startedAt || null) !== expected.teamTurn ||
+            (session.teamInputReservation?.acceptedAt || null) !== expected.input ||
+            session.teamActiveTaskId || !session.teamInputReservation) {
+          p.idleObservation = null
+          return
+        }
+        p.stopped = true
+        stopPoller(session)
+        clearTeamTurn(session)
+        clearTeamInputReservation(session)
+        saveStateNow(state)
+        log('Codex idle fallback released owner turn (Stop hook missing)', session.id.slice(0, 8))
+        setImmediate(() => reconcileTeamTasks().catch(error => log('team follow-up dispatch failed', String(error))))
+        await clearStatus(session)
         return
       }
       if (now >= p.nextUsageAt) {

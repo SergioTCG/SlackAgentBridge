@@ -70,6 +70,11 @@ posts a warning while retaining the requested model/effort for the next
 restart. A model/effort change made explicitly at the idle native TUI becomes
 the new durable selection. Claude and Pi likewise resume with their latest
 known native model/effort rather than their original launch values.
+If a resumed Codex owner turn omits its `Stop` hook, SAB also applies the
+bounded idle-surface fallback to ordinary team workers: two unchanged idle
+observations after the grace period clear only the stale owner fences and wake
+queued-task reconciliation. Delegated task claims, replacement sessions, and
+historical failed tasks are never released or replayed by this fallback.
 Claude `AskUserQuestion` forms use their structured hook payload, so Slack keeps
 the question header, prompt, recommendation, option descriptions, and previews
 separate from concise answer buttons. A bounded terminal parser remains only as

@@ -273,6 +273,15 @@ turn fingerprint, queued input, permission, transition, or task resets the proof
 Ordinary busy waits receive one delayed visible notice instead of remaining
 silent indefinitely.
 
+The same hookless-resume fence applies to an ordinary owner turn in a worker
+channel. Its Codex poller records the immutable session/PID/tmux/turn
+fingerprint, requires the exact authoritative root process, and releases the
+bridge-owned input and turn markers only after the repeated idle proof. It then
+persists the cleanup before waking team reconciliation. Because the guard
+requires no delegated task and the exact channel/session mapping, a fresh
+queued task can claim that worker once without replaying a failed pre-reboot
+task or mutating a replacement session.
+
 The process claim also requires the provider to be the root provider process
 under the SAB tmux pane. Nested utilities such as `codex review` inherit the
 parent environment but are rejected before SessionStart registration and before

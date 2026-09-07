@@ -36,6 +36,11 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Hookless Codex worker recovery no longer leaves resumed team workers
+  permanently busy after a daemon restart. The exact authoritative worker
+  process must show the same idle input surface twice after a grace period
+  before SAB clears stale owner-turn fences, persists the cleanup, and wakes
+  queued dispatch; delegated tasks and failed pre-reboot work remain protected.
 - Long-running automatic team coordinators no longer stall after exactly 20
   delegations. Once the current bounded dispatch budget is exhausted, a pending
   authenticated worker event can atomically establish one new exact-team

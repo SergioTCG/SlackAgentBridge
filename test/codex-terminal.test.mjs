@@ -67,4 +67,7 @@ test('Codex live and restart paths finalize capacity failures visibly', () => {
   assert.match(daemon, /Codex terminal failure finalize \(Stop hook missing\)[\s\S]*finalizeCodexTerminalFailure/)
   assert.match(daemon, /finalizeCodexTerminalFailure[\s\S]*clearStatus\(session\)[\s\S]*Codex turn failed/)
   assert.match(daemon, /recovered Codex terminal failure/)
+  const failure = daemon.indexOf('const failureDecision = codexTerminalFailureDecision(')
+  const idle = daemon.indexOf('const idleDecision = observeIdleCodexTurn(')
+  assert.ok(failure > 0 && idle > failure, 'capacity failures must win before idle worker recovery')
 })

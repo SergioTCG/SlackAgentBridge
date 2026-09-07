@@ -217,6 +217,12 @@ accounts, and the Mac user running the daemon.
   tmux ancestry immediately before the atomic state repair. Boot recovery uses
   the same checks and cannot adopt a standby, rebound, cross-channel, or
   unrelated Codex process.
+- **Hookless worker availability fencing:** an ordinary owner turn in a resumed
+  Codex worker may clear its bridge-owned busy markers only after two unchanged
+  idle-surface observations following the grace period. The fallback proves the
+  exact session, channel, PID/tmux ancestry, and turn fingerprint, persists
+  cleanup before waking queued dispatch, and is disabled for delegated tasks;
+  it cannot replay failed work or release a replacement session.
 - **Claude resume readiness:** a detached tmux appearing is not enough to revive
   a Claude session. Only the exact `SessionStart` PID/tmux claim makes it active.
   Failed attempts retain only a mode-0600 numeric exit code under the private

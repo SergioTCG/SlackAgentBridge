@@ -2,10 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   claimContinuationDispatchAuthority, clearContinuationWaiting, coalesceContinuations, continuationFor, noteContinuationWaiting,
-  observeIdleCodexCoordinator, setContinuationMode, queueContinuation, claimContinuation, settleContinuation,
+  observeIdleCodexCoordinator, observeIdleCodexTurn, setContinuationMode, queueContinuation, claimContinuation, settleContinuation,
   shouldWakeForTeamReply,
 } from '../daemon/team-continuation.mjs'
-import { assertCoordinatorDispatch, beginCollaboratorTeamTurn, beginOwnerTeamTurn } from '../daemon/teams.mjs'
+import {
+  addTeamWorker, assertCoordinatorDispatch, beginCollaboratorTeamTurn, beginOwnerTeamTurn,
+  claimTeamTask, createTeam, createTeamTask, failTeamTask, markTeamTaskRunning,
+} from '../daemon/teams.mjs'
 
 test('continuations remain disabled by default and duplicate events are idempotent', () => {
   const team = { id: 'team_1' }
@@ -140,6 +143,69 @@ test('idle Codex coordinator release requires aged fences and two identical read
   delete session.teamActiveTaskId
   assert.equal(observeIdleCodexCoordinator(session, { ready: false, now: 50_000 }).action, 'reset')
   assert.equal(observeIdleCodexCoordinator({ teamTurn: {} }, { ready: true, now: 50_000 }).action, 'blocked')
+})
+
+test('hookless resumed worker releases stale owner busy state and claims only the fresh queued task', () => {
+  const state = { channels: { CCOORD: 'coord', CWORKER: 'worker' }, sessions: {} }
+  const team = createTeam(state, {
+    id: 'team_reboot', name: 'reboot-recovery', coordinatorChannel: 'CCOORD', createdBy: 'owner', now: 1,
+  })
+  addTeamWorker(state, team.id, { channel: 'CWORKER', alias: 'worker-1', now: 2 })
+  const worker = {
+    id: 'worker', provider: 'codex', channel: 'CWORKER', pid: 111, tmux: 'sab-worker-old',
+  }
+  state.sessions.worker = worker
+
+  const historical = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'CCOORD', sourceSessionId: 'coord', sourceProvider: 'codex',
+    target: 'worker-1', text: 'historical task', requestId: 'reboot-old', now: 3,
+  }).task
+  claimTeamTask(state, historical.id, { targetSessionId: worker.id, targetProvider: 'codex', now: 4 })
+  markTeamTaskRunning(state, historical.id, { now: 5 })
+  worker.teamActiveTaskId = historical.id
+
+  // Host reboot kills the provider. Restart reconciliation fails the old task;
+  // it must never become eligible for replay after the worker returns.
+  worker.pid = null
+  delete worker.teamActiveTaskId
+  failTeamTask(state, historical.id, 'worker terminated during host reboot', { now: 6 })
+
+  const fresh = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'CCOORD', sourceSessionId: 'coord', sourceProvider: 'codex',
+    target: 'worker-1', text: 'fresh queued task', requestId: 'reboot-new', now: 7,
+  }).task
+  assert.equal(fresh.status, 'queued')
+
+  // The resumed worker receives an ordinary owner prompt. Its Stop hook is
+  // missing, so this is the only durable availability signal left to SAB.
+  worker.pid = 222
+  worker.tmux = 'sab-worker-new'
+  worker.teamInputReservation = { source: 'provider', acceptedAt: new Date(1000).toISOString() }
+  worker.codexTurnStartedAt = 1000
+  const first = observeIdleCodexTurn(worker, { ready: true, now: 20_000 })
+  assert.equal(first.action, 'confirm')
+  const second = observeIdleCodexTurn(worker, {
+    ready: true, now: 25_000, previous: first.observation,
+  })
+  assert.equal(second.action, 'release')
+
+  // Persisted cleanup is the same mutation the poller performs before waking
+  // reconciliation. The exact queued task can then be claimed once.
+  delete worker.codexTurnStartedAt
+  delete worker.teamInputReservation
+  const claimed = claimTeamTask(state, fresh.id, {
+    targetSessionId: worker.id, targetProvider: 'codex', now: 26_000,
+  })
+  worker.teamActiveTaskId = claimed.id
+  assert.equal(claimed.startedAt, undefined)
+  assert.equal(claimed.targetSessionId, worker.id)
+  markTeamTaskRunning(state, claimed.id, { now: 27_000 })
+  assert.equal(claimed.status, 'running')
+  assert.equal(state.teamTasks[historical.id].status, 'failed')
+  assert.throws(() => claimTeamTask(state, fresh.id, {
+    targetSessionId: worker.id, targetProvider: 'codex', now: 28_000,
+  }), /Only a queued task may be claimed/)
+  assert.equal(worker.teamActiveTaskId, fresh.id)
 })
 
 test('coordinator wait notices are delayed, deduplicated, and clearable', () => {
