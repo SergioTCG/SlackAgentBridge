@@ -12,6 +12,11 @@ test('argument-free management commands render controls through existing command
   assert.match(daemon, /name === 'new'[\s\S]*!rest\.length[\s\S]*postNewSessionManagement/)
 })
 
+test('Claude interactive model controls carry exact provider model identities', () => {
+  assert.match(daemon, /return claudeModelPickerOptions\(models\)/)
+  assert.doesNotMatch(daemon, /value: model\.alias \|\| model\.id/)
+})
+
 test('textual management forms remain routed for automation and muscle memory', () => {
   assert.match(daemon, /\['current', 'here'\]\.includes\(rest\[0\]\.toLowerCase\(\)\)/)
   assert.match(daemon, /if \(all\) return updateAllSessions\(channel\)/)

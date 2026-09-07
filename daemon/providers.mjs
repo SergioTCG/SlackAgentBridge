@@ -2,6 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi'])
+export const PI_EXACT_SESSION_CONTROL_CAPABILITY = 'exact-session-controls-v1'
+const PI_STREAM_CAPABILITY_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
 const PROVIDER_META = Object.freeze({
   claude: Object.freeze({ label: 'Claude Code', command: 'claude' }),
@@ -38,6 +40,29 @@ export function executableCacheKey(command) {
   } catch {
     return requested
   }
+}
+
+export function parsePiStreamCapabilities(value) {
+  return [...new Set(String(value || '').split(',')
+    .map(capability => capability.trim())
+    .filter(capability => PI_STREAM_CAPABILITY_RE.test(capability)))]
+    .slice(0, 16)
+}
+
+export function piMutableControlAllowed(capabilities, action, expectedSessionId) {
+  if (action !== 'model' && action !== 'effort') return true
+  return Boolean(expectedSessionId && Array.isArray(capabilities) &&
+    capabilities.includes(PI_EXACT_SESSION_CONTROL_CAPABILITY))
+}
+
+export function claudeModelPickerOptions(models) {
+  return (Array.isArray(models) ? models : []).map(model => ({
+    // Slack controls are exact selections. Bare textual family aliases keep
+    // their deliberate long-context preference in the command dispatcher.
+    value: model.id,
+    label: model.alias || model.name || model.id,
+    description: model.name && model.name !== model.alias ? model.name : model.id,
+  }))
 }
 
 export function parseSlackCommand(command) {

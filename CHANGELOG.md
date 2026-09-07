@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.5] — 2026-09-07
+## [2.1.0-rc.6] — 2026-09-07
 
 ### Added
 
@@ -91,6 +91,14 @@ Notable changes to this project. Format based on
   owner messages—including question-shaped replies—queue for the replacement
   process. A staged Pi extension fails closed with an actionable activation
   message when the older daemon cannot supply its native-session fence.
+- A running Pi extension must now advertise exact-session setting support on
+  its authenticated local stream before the daemon will send model or effort
+  controls. Active Pi processes preserved across a daemon-only upgrade therefore
+  fail closed with an actionable `/sab-update current` instruction instead of
+  relying on an older extension to understand a new control field.
+- Interactive Claude model choices now carry the exact provider model ID.
+  Standard and 1M-context siblings remain distinct selections, while deliberate
+  bare textual family aliases retain their documented long-context preference.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the
@@ -200,7 +208,7 @@ Notable changes to this project. Format based on
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
 
-[2.1.0-rc.5]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.5
+[2.1.0-rc.6]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.6
 
 ## [2.0.1] — 2026-08-26
 

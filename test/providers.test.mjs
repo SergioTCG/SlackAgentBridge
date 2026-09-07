@@ -6,12 +6,37 @@ import path from 'node:path'
 import {
   acceptHookSettings, codexEffortFromArgs, codexEffortFromToml,
   CODEX_DANGEROUS_FLAG, codexFlagsWithoutInitialPrompt, codexPermissionDecision,
+  PI_EXACT_SESSION_CONTROL_CAPABILITY, claudeModelPickerOptions,
   codexStatusRecoveryDecision, defaultNewFlagsFor, displayFlagsFor, executableCacheKey, isPathWithin,
+  parsePiStreamCapabilities, piMutableControlAllowed,
   isSupersededHook, normalizeLaunchFlag,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
   submitTargetValidation, waitForCodexInterrupt,
 } from '../daemon/providers.mjs'
+
+test('Claude picker values select exact standard and long-context model identities', () => {
+  assert.deepEqual(claudeModelPickerOptions([
+    { alias: 'opus', id: 'claude-opus-5', name: 'Opus 5' },
+    { alias: 'opus-1m', id: 'claude-opus-5[1m]', name: 'Opus 5 (1M context)' },
+  ]), [
+    { value: 'claude-opus-5', label: 'opus', description: 'Opus 5' },
+    { value: 'claude-opus-5[1m]', label: 'opus-1m', description: 'Opus 5 (1M context)' },
+  ])
+})
+
+test('Pi mutable controls require an advertised exact-session protocol capability', () => {
+  const legacy = parsePiStreamCapabilities('')
+  const current = parsePiStreamCapabilities(`${PI_EXACT_SESSION_CONTROL_CAPABILITY},status-v1`)
+  assert.equal(piMutableControlAllowed(legacy, 'models', null), true)
+  assert.equal(piMutableControlAllowed(legacy, 'model', 'native-session'), false)
+  assert.equal(piMutableControlAllowed(current, 'model', null), false)
+  assert.equal(piMutableControlAllowed(current, 'model', 'native-session'), true)
+  assert.equal(piMutableControlAllowed(current, 'effort', 'native-session'), true)
+  assert.deepEqual(parsePiStreamCapabilities('bad value,ok\nforged,' + PI_EXACT_SESSION_CONTROL_CAPABILITY), [
+    PI_EXACT_SESSION_CONTROL_CAPABILITY,
+  ])
+})
 
 test('legacy sessions remain Claude without a state migration', () => {
   assert.equal(providerOf({ id: 'old-session' }), 'claude')

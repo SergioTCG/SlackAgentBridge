@@ -238,8 +238,13 @@ native `/clear` rebrands the in-memory session object. Team actions also carry
 the exact team ID so controls from a closed team cannot mutate its replacement.
 Stale controls fail visibly. Broad update and team-close actions require Slack
 confirmation. Mutable Pi controls are fenced again inside the native extension,
-before model or effort mutation, and an exact session reserved for provider
-maintenance rejects overlapping lifecycle/settings changes until it resumes.
+before model or effort mutation. The extension advertises that capability on
+its authenticated local stream; a daemon-only rollout refuses mutable controls
+for a preserved legacy Pi process until that exact session is updated. An exact
+session reserved for provider maintenance rejects overlapping
+lifecycle/settings changes until it resumes. Claude picker entries carry exact
+provider model IDs so standard and 1M-context siblings cannot collapse through
+the textual alias preference.
 Account, flag, and restart-based Codex setting changes acquire that reservation
 before their first Slack call; owner input then queues ahead of question-form
 routing for the replacement process. Status reanchors and their provisional

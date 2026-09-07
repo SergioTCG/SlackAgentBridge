@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import type { ExtensionAPI, ExtensionContext, ProjectTrustContext } from "@earendil-works/pi-coding-agent";
+import { PI_EXACT_SESSION_CONTROL_CAPABILITY } from "../daemon/providers.mjs";
 import { createManagedRunner } from "./managed-run.ts";
 
 const ENDPOINT = process.env.CCS_ENDPOINT || "http://127.0.0.1:8877";
@@ -205,7 +206,9 @@ async function handleBridgeMessage(pi: ExtensionAPI, managed: any, message: Brid
 }
 
 async function consumeSse(pi: ExtensionAPI, managed: any, signal: AbortSignal) {
-  const response = await fetch(eventUrl("/pi/stream"), { signal });
+  const url = eventUrl("/pi/stream");
+  url.searchParams.set("capabilities", PI_EXACT_SESSION_CONTROL_CAPABILITY);
+  const response = await fetch(url, { signal });
   if (!response.ok || !response.body) throw new Error(`stream returned HTTP ${response.status}`);
   const decoder = new TextDecoder();
   let buffer = "";

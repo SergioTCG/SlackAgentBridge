@@ -16,9 +16,11 @@ import {
 import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } from './slackout.mjs'
 import {
   CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, PI_EFFORTS, PROVIDERS, acceptHookSettings, allowedFlags,
+  claudeModelPickerOptions,
   codexFlagsWithoutInitialPrompt, codexModelFromArgs, codexPermissionDecision, codexStatusRecoveryDecision,
   defaultNewFlagsFor, displayFlagsFor, executableCacheKey,
-  isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, normalizeRemoteLaunchFlags, parseSlackCommand,
+  isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, normalizeRemoteLaunchFlags,
+  parsePiStreamCapabilities, parseSlackCommand, piMutableControlAllowed,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   submitTargetValidation, switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
   waitForCodexInterrupt,
@@ -1956,6 +1958,11 @@ function sendPiControl(session, action, value = null, timeoutMs = 15000, expecte
   if (providerOf(session) !== 'pi') return Promise.reject(new Error('not a Pi session'))
   const stream = streams.get(session.pid)
   if (!stream || stream.provider !== 'pi') return Promise.reject(new Error('Pi control stream is not connected'))
+  if (!piMutableControlAllowed(stream.capabilities, action, expectedSessionId)) {
+    return Promise.reject(new Error(
+      'This running Pi extension predates exact-session setting controls. Run `/sab-update current` to activate the staged extension before changing model or effort.',
+    ))
+  }
   const requestId = crypto.randomUUID()
   const result = new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -4620,13 +4627,7 @@ async function managementModelCatalog(session) {
   }
   const models = await getModels()
   if (models.length) {
-    return models.map(model => ({
-      // Keep the public family aliases where possible: dispatch deliberately
-      // resolves them to the preferred long-context variant.
-      value: model.alias || model.id,
-      label: model.alias || model.name || model.id,
-      description: model.name && model.name !== model.alias ? model.name : model.id,
-    }))
+    return claudeModelPickerOptions(models)
   }
   return ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: value }))
 }
@@ -5939,7 +5940,11 @@ http.createServer(async (req, res) => {
     }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
     res.write(': connected\n\n')
-    streams.set(pid, { res, provider: 'pi' })
+    streams.set(pid, {
+      res,
+      provider: 'pi',
+      capabilities: parsePiStreamCapabilities(url.searchParams.get('capabilities')),
+    })
     log('Pi extension stream attached pid', pid)
     if (session) {
       const queued = pendingBySid.get(session.id) || []

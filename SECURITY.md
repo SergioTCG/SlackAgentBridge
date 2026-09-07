@@ -221,12 +221,14 @@ accounts, and the Mac user running the daemon.
   effort values are validated again at action time; broad update and team-close
   actions require Slack confirmation. Pi model/effort controls also carry the
   expected native session into the extension, which rejects the control before
-  mutation if Pi has changed conversations. A staged extension also rejects a
-  mutable control from an older daemon that cannot provide this identity, with
-  an explicit activation-required error. Once any provider maintenance restart
-  is reserved, overlapping lifecycle or setting mutations are rejected while
-  owner prompts queue and status, usage, and terminal-view operations remain
-  available.
+  mutation if Pi has changed conversations. The daemon first requires the live
+  Pi stream to advertise that exact-session capability, so a preserved legacy
+  extension cannot silently ignore the fence after a daemon-only rollout. A
+  staged extension likewise rejects a mutable control from an older daemon that
+  cannot provide the identity. Both mixed-version directions fail closed with
+  an explicit activation instruction. Once any provider maintenance restart is
+  reserved, overlapping lifecycle or setting mutations are rejected while owner
+  prompts queue and status, usage, and terminal-view operations remain available.
 - **Owner-private App Home:** `app_home_opened` may arrive for any workspace
   user, but only the configured owner receives bridge/session metadata or
   actions. Other users receive a static restricted view. Owner actions reuse
