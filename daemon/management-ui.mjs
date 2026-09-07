@@ -12,15 +12,20 @@ function token(value, field) {
   return normalized
 }
 
-export function managementActionId(kind, target = 'bridge', action = 'open') {
-  return [ACTION_PREFIX, token(kind, 'kind'), token(target, 'target'), token(action, 'action')].join(':')
+export function managementActionId(kind, target = 'bridge', action = 'open', binding = null) {
+  const parts = [ACTION_PREFIX, token(kind, 'kind'), token(target, 'target'), token(action, 'action')]
+  if (binding) parts.push(token(binding, 'binding'))
+  return parts.join(':')
 }
 
 export function parseManagementActionId(value) {
   const parts = String(value || '').split(':')
-  if (parts.length !== 4 || parts[0] !== ACTION_PREFIX ||
+  if (![4, 5].includes(parts.length) || parts[0] !== ACTION_PREFIX ||
       !parts.slice(1).every(part => TOKEN_RE.test(part))) return null
-  return { kind: parts[1], target: parts[2], action: parts[3] }
+  return {
+    kind: parts[1], target: parts[2], action: parts[3],
+    ...(parts[4] ? { binding: parts[4] } : {}),
+  }
 }
 
 export function authoritativeManagementBinding(state, channel, target) {
@@ -30,11 +35,11 @@ export function authoritativeManagementBinding(state, channel, target) {
   return session
 }
 
-function button(label, kind, target, action, { style, confirm } = {}) {
+function button(label, kind, target, action, { style, confirm, binding } = {}) {
   return {
     type: 'button',
     text: { type: 'plain_text', text: text(label) },
-    action_id: managementActionId(kind, target, action),
+    action_id: managementActionId(kind, target, action, binding),
     value: action,
     ...(style ? { style } : {}),
     ...(confirm ? { confirm } : {}),
@@ -224,14 +229,16 @@ export function bridgeDashboardBlocks() {
 export function teamPickerBlocks({ sessionId, team }) {
   const target = token(sessionId, 'session')
   if (!team) return []
+  const binding = token(team.id, 'team')
   const coordinator = Boolean(team.coordinator)
-  const elements = [button('Refresh', 'team', target, 'status')]
+  const elements = [button('Refresh', 'team', target, 'status', { binding })]
   if (coordinator) {
-    elements.push(button('Add worker', 'team', target, 'add'))
+    elements.push(button('Add worker', 'team', target, 'add', { binding }))
     elements.push(button(team.continuation === 'auto-until-blocked' ? 'Use manual mode' : 'Enable auto mode',
-      'team', target, team.continuation === 'auto-until-blocked' ? 'manual' : 'auto'))
-    elements.push(button('Permissions', 'team', target, 'permissions'))
+      'team', target, team.continuation === 'auto-until-blocked' ? 'manual' : 'auto', { binding }))
+    elements.push(button('Permissions', 'team', target, 'permissions', { binding }))
     elements.push(button('Close team', 'team', target, 'close', {
+      binding,
       style: 'danger',
       confirm: confirmation({
         title: 'Close this team?',

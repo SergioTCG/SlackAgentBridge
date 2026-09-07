@@ -185,13 +185,33 @@ export function createStatusMessages(web, {
       }
 
       try {
-        await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: oldTs }))
+        const deleted = await scheduleApi(
+          () => web.chat.delete({ channel: session.channel, ts: oldTs }),
+          { priority: true, valid },
+        )
+        if (deleted === SKIPPED || !valid()) {
+          // A final invalidated this move after the replacement became visible.
+          // Remove the provisional copy through the cleanup lane; clear() will
+          // delete oldTs as soon as this per-session mutation releases it.
+          try {
+            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+          } catch {}
+          return false
+        }
       } catch (error) {
         if (error?.data?.error !== 'message_not_found') {
           // Keep the old authoritative status if replacement could not be made
           // atomic. Best-effort cleanup avoids leaving two live status lines.
-          try { await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts })) } catch {}
+          try {
+            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+          } catch {}
           log('bumpStatus delete error:', error?.data?.error || String(error))
+          return false
+        }
+        if (!valid()) {
+          try {
+            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+          } catch {}
           return false
         }
       }

@@ -2435,11 +2435,15 @@ function scheduleSwitchPreviewExpiry(channel, transitionId, expectedUpdatedAt) {
   }, 30 * 60000)
 }
 
-async function beginProviderSwitch(channel, source, { replaceMissing = false, targetProvider = null } = {}) {
+async function beginProviderSwitch(channel, source, {
+  replaceMissing = false, targetProvider = null, expectedSessionId = null,
+} = {}) {
   const blocker = switchBlockReason(source, channel)
   if (blocker) return post(channel, `⚠️ ${blocker}`)
   if (!(await tmuxAlive(source.tmux))) return post(channel, '⚠️ The source terminal is gone. Write a message to resume it, then retry the switch.')
-  if (state.sessions?.[source.id] !== source || source.channel !== channel || state.channels?.[channel] !== source.id) {
+  if ((expectedSessionId && source.id !== expectedSessionId) ||
+      state.sessions?.[expectedSessionId || source.id] !== source || source.channel !== channel ||
+      state.channels?.[channel] !== (expectedSessionId || source.id)) {
     return post(channel, '⚠️ The channel changed provider or session while the switch was being checked. No action was taken; run `/sab-status` and retry from fresh controls.')
   }
   const lineage = ensureLineage(state, channel, source)
@@ -2740,13 +2744,16 @@ function scheduleUpdateGuardCleanup(session) {
   timer.unref?.()
 }
 
-async function stopSessionForUpdate(session, message) {
+async function stopSessionForUpdate(session, message, { expectedSessionId = null } = {}) {
   // Reserve synchronously after the caller's final liveness/busy check. Any
   // prompt arriving while the Slack notice or process stop is in flight is then
   // queued for this exact native session instead of racing a second wake.
+  if (message) await post(session.channel, message).catch(error => log('update notice failed', session.id.slice(0, 8), String(error)))
+  if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
+    throw new Error('the session changed while the update notice was being posted; no provider was stopped')
+  }
   restarting.add(session.id)
   updatingSessions.add(session.id)
-  if (message) await post(session.channel, message).catch(error => log('update notice failed', session.id.slice(0, 8), String(error)))
   const oldPid = session.pid
   if (session.tmux) await tmuxKill(session.tmux)
   if (oldPid && pidAlive(oldPid)) { try { process.kill(oldPid) } catch {} }
@@ -2770,14 +2777,15 @@ async function resumeUpdatedSession(session, update, updateError = null) {
 
 // /sab-update: stop this session's agent, update the CLI if a newer build exists,
 // then resume the same conversation with identical launch flags.
-async function updateAndRestart(session) {
+async function updateAndRestart(session, { expectedSessionId = null } = {}) {
   if (bulkUpdateRunning) return post(session.channel, '⏳ A bridge-wide session update is already running. This session will be included if it is idle.')
   if (updatingSessions.has(session.id)) return post(session.channel, '⏳ This session is already updating.')
   const provider = providerOf(session)
   const label = providerLabel(provider)
   try {
     await stopSessionForUpdate(session,
-      `🔄 *Restarting ${path.basename(session.cwd)}* — stopping ${label}, checking for updates, then resuming with the same flags.`)
+      `🔄 *Restarting ${path.basename(session.cwd)}* — stopping ${label}, checking for updates, then resuming with the same flags.`,
+      { expectedSessionId })
     const update = await updateProviderCli(provider)
     await resumeUpdatedSession(session, update)
   } catch (error) {
@@ -4445,20 +4453,27 @@ async function setFlags(session, flags) {
   setTimeout(() => restarting.delete(session.id), 60000)
 }
 
-async function setCodexSetting(session, name, value) {
+async function setCodexSetting(session, name, value, { expectedSessionId = null } = {}) {
+  const alive = session.pid && pidAlive(session.pid)
+  if (!alive) {
+    session[name] = value
+    if (name === 'model') session.requestedModel = value
+    if (name === 'effort') session.requestedEffort = value
+    sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), [name]: value })
+    saveStateNow(state)
+    return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
+  }
+  await post(session.channel, `🔧 *Setting ${name}* → \`${value}\`. Restarting Codex and resuming this conversation…`)
+  if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
+    return post(session.channel, '⚠️ The native session changed while the setting notice was being posted. No setting was changed; use fresh controls.')
+  }
   session[name] = value
   if (name === 'model') session.requestedModel = value
   if (name === 'effort') session.requestedEffort = value
   sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), [name]: value })
-  // Journal the operator's requested settings before any Slack call or
-  // provider teardown. A daemon crash in the restart window must not restore
-  // the previous model/effort on the next resume.
+  // Journal operator intent immediately before teardown. A daemon crash in the
+  // restart window must not restore the previous model/effort.
   saveStateNow(state)
-  const alive = session.pid && pidAlive(session.pid)
-  if (!alive) {
-    return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
-  }
-  await post(session.channel, `🔧 *Setting ${name}* → \`${value}\`. Restarting Codex and resuming this conversation…`)
   restarting.add(session.id)
   if (session.tmux) await tmuxKill(session.tmux)
   if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
@@ -4472,7 +4487,7 @@ async function setCodexSetting(session, name, value) {
   setTimeout(() => restarting.delete(session.id), 60000)
 }
 
-async function setPiSetting(session, name, value) {
+async function setPiSetting(session, name, value, { expectedSessionId = null } = {}) {
   const field = name === 'effort' ? 'effort' : 'model'
   if (!(session.pid && pidAlive(session.pid))) {
     session[field] = value
@@ -4480,8 +4495,16 @@ async function setPiSetting(session, name, value) {
     return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
   }
   let result
-  try { result = await sendPiControl(session, name, value) }
+  try {
+    if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
+      return post(session.channel, '⚠️ The native session changed before the setting could be sent. No setting was changed; use fresh controls.')
+    }
+    result = await sendPiControl(session, name, value)
+  }
   catch (error) { return post(session.channel, `⚠️ Pi could not change ${name}: ${String(error?.message || error).slice(0, 300)}`) }
+  if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
+    return post(session.channel, '⚠️ The native session changed while Pi was applying the setting. Refresh the session status before retrying.')
+  }
   if (!result?.ok) return post(session.channel, `❌ Pi rejected ${name}: ${String(result?.error || 'unknown error').slice(0, 300)}`)
   if (result.model) session.model = result.model
   if (result.model_name) session.modelName = result.model_name
@@ -4533,17 +4556,21 @@ async function managementModelCatalog(session) {
   return ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: value }))
 }
 
-async function postModelManagement(channel, session) {
-  const meta = sessionMeta.get(session.id) || {}
+async function postModelManagement(channel, session, expectedSessionId = session.id) {
+  const meta = sessionMeta.get(expectedSessionId) || {}
   const current = meta.model || readModel(session) || 'unknown'
   const models = await managementModelCatalog(session)
+  const authoritative = authoritativeManagementSession(channel, expectedSessionId)
+  if (!authoritative) {
+    return post(channel, '⚠️ The native session changed while its model controls were loading. Run `/sab-model` again for fresh controls.')
+  }
   if (!models.length) {
-    return post(channel, `⚠️ The ${providerLabel(providerOf(session))} model catalog is unavailable. ` +
+    return post(channel, `⚠️ The ${providerLabel(providerOf(authoritative))} model catalog is unavailable. ` +
       'The session was not changed; retry shortly or use `/sab-model <id>`.')
   }
   return postSlackMessage(channel, {
-    text: `Choose a ${providerLabel(providerOf(session))} model`,
-    blocks: modelPickerBlocks({ sessionId: session.id, provider: providerOf(session), current, models }),
+    text: `Choose a ${providerLabel(providerOf(authoritative))} model`,
+    blocks: modelPickerBlocks({ sessionId: expectedSessionId, provider: providerOf(authoritative), current, models }),
   })
 }
 
@@ -4598,12 +4625,18 @@ async function postTeamManagement(channel, session, team) {
   if (!team) {
     return post(channel, 'This channel is not in an active session team. Create one with `/sab-team create <name>` from the intended coordinator channel.')
   }
+  const sessionId = session.id
+  const teamId = team.id
   await postMd(channel, teamStatusMarkdown(team))
+  if (!authoritativeManagementSession(channel, sessionId) || activeTeamForChannel(state, channel)?.id !== teamId) {
+    return post(channel, '⚠️ The session or team changed while its controls were loading. Run `/sab-team` again for fresh controls.')
+  }
   return postSlackMessage(channel, {
     text: `Manage session team ${team.name}`,
     blocks: teamPickerBlocks({
-      sessionId: session.id,
+      sessionId,
       team: {
+        id: teamId,
         coordinator: team.coordinatorChannel === channel,
         continuation: team.continuation?.mode || 'manual',
       },
@@ -4646,22 +4679,36 @@ async function buildAppHomeView(userId, { sessionId = null, notice = '' } = {}) 
     const session = state.sessions?.[sessionId]
     const authoritative = session?.channel ? authoritativeManagementSession(session.channel, sessionId) : null
     if (authoritative) {
-      const meta = sessionMeta.get(session.id) || {}
       const rows = await terminalControl.list().catch(() => [])
-      const terminalOpen = Boolean(rows.find(row => row.sessionId === session.id)?.attached)
-      const models = await managementModelCatalog(session)
-      const provider = providerOf(session)
+      const afterTerminal = authoritativeManagementSession(authoritative.channel, sessionId)
+      if (!afterTerminal) {
+        return appHomeOverviewView({
+          authorized: true, stats: appHomeStats(), sessions: appHomeSessions(),
+          notice: '⚠️ The native session changed while App Home was loading. Select the current session again.',
+        })
+      }
+      const models = await managementModelCatalog(afterTerminal)
+      const current = authoritativeManagementSession(authoritative.channel, sessionId)
+      if (!current) {
+        return appHomeOverviewView({
+          authorized: true, stats: appHomeStats(), sessions: appHomeSessions(),
+          notice: '⚠️ The native session changed while App Home was loading. Select the current session again.',
+        })
+      }
+      const meta = sessionMeta.get(sessionId) || {}
+      const terminalOpen = Boolean(rows.find(row => row.sessionId === sessionId)?.attached)
+      const provider = providerOf(current)
       const efforts = provider === 'codex' ? CODEX_EFFORTS
         : provider === 'pi' ? PI_EFFORTS : ['low', 'medium', 'high', 'max']
       return appHomeSessionView({
         session: {
-          id: session.id,
-          channel: session.channel,
-          cwd: session.cwd,
+          id: sessionId,
+          channel: current.channel,
+          cwd: current.cwd,
           provider,
-          model: meta.model || session.modelName || session.model || readModel(session) || 'unknown',
-          effort: meta.effort || session.effort || 'unknown',
-          active: Boolean(session.pid && pidAlive(session.pid)),
+          model: meta.model || current.modelName || current.model || readModel(current) || 'unknown',
+          effort: meta.effort || current.effort || 'unknown',
+          active: Boolean(current.pid && pidAlive(current.pid)),
           terminalOpen,
         },
         models,
@@ -4886,6 +4933,7 @@ function commandHelp(provider = null) {
 // A migration-only legacy prefix may still supply an ingress provider while an
 // older Slack manifest is being replaced.
 async function dispatch(name, rest, channel, ingressProvider = null, request = null) {
+  const expectedSessionId = request?.expectedSessionId || null
   const channelSession = channel !== state.control ? sessionByChannel(channel) : null
   if (request?.expectedSessionId && !managementTargetStillAuthoritative(channel, channelSession, request)) {
     return post(channel, '⚠️ This management request belongs to a session which is no longer authoritative. No action was taken; run `/sab-status` for fresh controls.')
@@ -4899,7 +4947,13 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   if (ingressProvider && ingressProvider !== 'claude' && (CLAUDE_ONLY_COMMANDS.has(name) || BRIDGE_COMMANDS.has(name))) {
     return post(channel, `${BRIDGE_COMMANDS.has(name) ? `Use the bridge-wide \`/sab-${name}\`.` : `\`/sab-${name}\` is Claude-only.`}`)
   }
-  if (name === 'team') return handleTeamCommand(channel, rest)
+  if (name === 'team') {
+    const expectedTeamId = request?.expectedTeamId
+    if (expectedTeamId && activeTeamForChannel(state, channel)?.id !== expectedTeamId) {
+      return post(channel, '⚠️ This team control belongs to a team which is no longer active. No action was taken; run `/sab-team` for fresh controls.')
+    }
+    return handleTeamCommand(channel, rest)
+  }
   if (channelSession && ingressProvider && SESSION_SCOPED_COMMANDS.has(name) && providerOf(channelSession) !== ingressProvider) {
     const actualProvider = providerOf(channelSession)
     return post(channel, `This is a ${providerLabel(actualProvider)} session. Use \`${slackCommand(actualProvider, name === 'restart' ? 'update' : name)}\` here.`)
@@ -4921,7 +4975,15 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       const rows = await terminalControl.list()
       await postMd(channel, `| Session | Provider | Terminal | Folder |\n|---|---|---|---|\n${rows.map(row =>
         `| ${row.session} | ${providerLabel(row.provider)} | ${row.attached ? '🖥️ open' : '▫️ closed'} | ${String(row.cwd || '—').replace(/\|/g, '\\|')} |`).join('\n') || '| _none_ | | | |'}`)
-      if (interactive) return postTerminalManagement(channel, channelSession)
+      if (interactive) {
+        const panelSession = expectedSessionId
+          ? authoritativeManagementSession(channel, expectedSessionId)
+          : sessionByChannel(channel)
+        if (expectedSessionId && !panelSession) {
+          return post(channel, '⚠️ The native session changed while terminal state was loading. Run `/sab-terminal` again for fresh controls.')
+        }
+        return postTerminalManagement(channel, panelSession)
+      }
       return
     }
     const all = action === 'open-all' || action === 'close-all'
@@ -4929,7 +4991,9 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       : action === 'close' || action === 'close-all' ? 'close' : null
     if (!operation || rest.length > 1) return post(channel, 'Usage: `/sab-terminal list|open|close|open-all|close-all`')
     if (!all && !channelSession) return post(channel, `Use \`/sab-terminal ${operation}\` in an active session channel, or use \`${operation}-all\`.`)
-    const result = await terminalControl.act(operation, { all, channel: all ? null : channel })
+    const result = await terminalControl.act(operation, {
+      all, channel: all ? null : channel, expectedSessionId: all ? null : expectedSessionId,
+    })
     const failures = result.failures.map(item => `\`${item.session}\`: ${item.error}`).join('\n')
     return post(channel, `${operation === 'open' ? '🖥️' : '🌑'} ${result.message}${failures ? `\n${failures}` : ''}`)
   }
@@ -5025,7 +5089,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       return post(channel, `Usage: \`${cmd('switch')} <${choices}> [new]\`` +
         (legacyTarget ? ` (without a target, defaults to ${providerLabel(legacyTarget)})` : ''))
     }
-    return beginProviderSwitch(channel, channelSession, { replaceMissing, targetProvider })
+    return beginProviderSwitch(channel, channelSession, { replaceMissing, targetProvider, expectedSessionId })
   }
   if (name === 'status') {
     const session = channelSession
@@ -5138,13 +5202,15 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     return post(channel, `🧹 Archived ${n} dormant channel(s).${teamProtected.length ? ` Preserved ${teamProtected.length} dormant team channel(s).` : ''} Note: archived channels can’t auto-resume — unarchive manually in Slack if you need one back.`)
   }
   if (name === 'model' || name === 'effort') {
-    const session = sessionByChannel(channel)
+    const session = expectedSessionId
+      ? authoritativeManagementSession(channel, expectedSessionId)
+      : sessionByChannel(channel)
     if (!session) return post(channel, `Use \`${cmd(name)}\` in a ${providerLabel(commandProvider)} session channel.`)
     const provider = providerOf(session)
     const meta = sessionMeta.get(session.id) || {}
     if (!rest.length) {
       return name === 'model'
-        ? postModelManagement(channel, session)
+        ? postModelManagement(channel, session, expectedSessionId || session.id)
         : postEffortManagement(channel, session)
     }
     if (provider === 'codex') {
@@ -5152,14 +5218,14 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       if (name === 'effort' && !CODEX_EFFORTS.includes(val)) {
         return post(channel, `❌ Unsupported Codex effort \`${val}\`. Use: ${CODEX_EFFORTS.join(' · ')}`)
       }
-      return setCodexSetting(session, name, val)
+      return setCodexSetting(session, name, val, { expectedSessionId })
     }
     if (provider === 'pi') {
       const val = name === 'effort' ? rest.join(' ').toLowerCase() : rest.join(' ')
       if (name === 'effort' && !PI_EFFORTS.includes(val)) {
         return post(channel, `❌ Unsupported Pi thinking level \`${val}\`. Use: ${PI_EFFORTS.join(' · ')}`)
       }
-      return setPiSetting(session, name, val)
+      return setPiSetting(session, name, val, { expectedSessionId })
     }
     if (!(session.pid && pidAlive(session.pid))) return post(channel, 'Session not active — send a message first to wake it.')
     let val = rest.join(' ')
@@ -5170,7 +5236,9 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       // the standard variant, so we translate to the full id ourselves. Passing a
       // full id (e.g. `claude-opus-5`) still selects exactly that.
       const models = await getModels()
-      if (sessionByChannel(channel) !== session || state.channels?.[channel] !== session.id || session.channel !== channel) {
+      if ((expectedSessionId && session.id !== expectedSessionId) ||
+          sessionByChannel(channel) !== session || state.channels?.[channel] !== (expectedSessionId || session.id) ||
+          session.channel !== channel) {
         return post(channel, '⚠️ The authoritative session changed while its model catalog was loading. No setting was changed; run `/sab-model` again.')
       }
       const want = val.toLowerCase()
@@ -5280,7 +5348,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     if (all) return updateAllSessions(channel)
     const session = sessionByChannel(channel)
     if (!session) return post(channel, 'Use `/sab-update` in a session channel, or `/sab-update all` to update every idle active session.')
-    return updateAndRestart(session)
+    return updateAndRestart(session, { expectedSessionId })
   }
   if (name === 'flags') {
     const session = sessionByChannel(channel)
@@ -5983,6 +6051,7 @@ function managementTargetStillAuthoritative(channel, session, request) {
 async function handleAppHomeAction(body, action, parsed) {
   const userId = body.user?.id
   if (!userId || userId !== USER || body.view?.callback_id !== APP_HOME_CALLBACK) return
+  const expectedSessionId = parsed.target === 'bridge' ? null : parsed.target
   const session = parsed.target === 'bridge' ? null : authoritativeAppHomeSession(parsed.target)
   if (parsed.target !== 'bridge' && !session) {
     return publishAppHome(userId, { notice: '⚠️ That control belonged to a session which is no longer authoritative. No action was taken.' })
@@ -6009,7 +6078,7 @@ async function handleAppHomeAction(body, action, parsed) {
     const allowed = session ? ['open', 'close'] : ['open-all', 'close-all']
     if (!allowed.includes(parsed.action)) return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid terminal control.' })
     await dispatch('terminal', [parsed.action], destination, null, {
-      userId, ...(session ? { expectedSessionId: session.id } : {}),
+      userId, ...(session ? { expectedSessionId } : {}),
     })
     return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Terminal request processed. Its authoritative result was posted to Slack.' })
   }
@@ -6019,7 +6088,7 @@ async function handleAppHomeAction(body, action, parsed) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid update control.' })
     }
     await dispatch('update', [parsed.action], destination, null, {
-      userId, ...(session ? { expectedSessionId: session.id } : {}),
+      userId, ...(session ? { expectedSessionId } : {}),
     })
     return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Update request processed. Its authoritative result remains visible in Slack.' })
   }
@@ -6029,10 +6098,10 @@ async function handleAppHomeAction(body, action, parsed) {
     if (!session || parsed.action !== 'select' || !value) return publishAppHome(userId, { notice: '⚠️ Invalid model control.' })
     const supported = await managementModelCatalog(session)
     if (!supported.some(model => model.value === value)) {
-      return publishAppHome(userId, { sessionId: session.id, notice: '⚠️ That model is no longer in the current provider catalog. No setting was changed.' })
+      return publishAppHome(userId, { sessionId: expectedSessionId, notice: '⚠️ That model is no longer in the current provider catalog. No setting was changed.' })
     }
-    await dispatch('model', [value], destination, null, { userId, expectedSessionId: session.id })
-    return publishAppHome(userId, { sessionId: session.id, notice: 'ℹ️ Model request processed. The session channel contains the authoritative result.' })
+    await dispatch('model', [value], destination, null, { userId, expectedSessionId })
+    return publishAppHome(userId, { sessionId: expectedSessionId, notice: 'ℹ️ Model request processed. The session channel contains the authoritative result.' })
   }
 
   if (parsed.kind === 'effort') {
@@ -6042,8 +6111,8 @@ async function handleAppHomeAction(body, action, parsed) {
     if (!session || parsed.action !== 'select' || !supported.includes(value)) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid or stale effort control. No setting was changed.' })
     }
-    await dispatch('effort', [value], destination, null, { userId, expectedSessionId: session.id })
-    return publishAppHome(userId, { sessionId: session.id, notice: 'ℹ️ Effort request processed. The session channel contains the authoritative result.' })
+    await dispatch('effort', [value], destination, null, { userId, expectedSessionId })
+    return publishAppHome(userId, { sessionId: expectedSessionId, notice: 'ℹ️ Effort request processed. The session channel contains the authoritative result.' })
   }
 
   if (parsed.kind === 'switch') {
@@ -6051,15 +6120,15 @@ async function handleAppHomeAction(body, action, parsed) {
     if (!session || !provider || provider === providerOf(session)) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid provider-switch control.' })
     }
-    await dispatch('switch', [provider], destination, null, { userId, expectedSessionId: session.id })
-    return publishAppHome(userId, { sessionId: session.id, notice: '🔀 Provider-switch review started. Continue from the session channel.' })
+    await dispatch('switch', [provider], destination, null, { userId, expectedSessionId })
+    return publishAppHome(userId, { sessionId: expectedSessionId, notice: '🔀 Provider-switch review started. Continue from the session channel.' })
   }
 
   if (parsed.kind === 'dispatch') {
     const allowed = session ? ['usage', 'team'] : ['usage', 'health']
     if (!allowed.includes(parsed.action)) return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid App Home command.' })
     await dispatch(parsed.action, [], destination, null, {
-      userId, ...(session ? { expectedSessionId: session.id } : {}),
+      userId, ...(session ? { expectedSessionId } : {}),
     })
     return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Report request processed. Its authoritative result was posted to Slack.' })
   }
@@ -6090,6 +6159,7 @@ async function handleAppHomeSubmission(body) {
 async function handleManagementAction(body, action, parsed) {
   const channel = body.channel?.id
   if (!channel) return
+  const expectedSessionId = parsed.target === 'bridge' ? null : parsed.target
   const session = parsed.target === 'bridge' ? null : authoritativeManagementSession(channel, parsed.target)
   if (parsed.target !== 'bridge' && !session) {
     return post(channel, '⚠️ This management control is stale: the channel is no longer bound to that exact active session. Run `/sab-status` for fresh controls.')
@@ -6112,7 +6182,7 @@ async function handleManagementAction(body, action, parsed) {
     if (!session || !['model', 'effort', 'terminal', 'switch', 'update', 'usage', 'team'].includes(parsed.action)) {
       return post(channel, '❌ Invalid session-management control.')
     }
-    return dispatch(parsed.action, [], channel, null, { userId: body.user.id, expectedSessionId: session.id })
+    return dispatch(parsed.action, [], channel, null, { userId: body.user.id, expectedSessionId })
   }
 
   if (parsed.kind === 'model') {
@@ -6122,7 +6192,7 @@ async function handleManagementAction(body, action, parsed) {
     if (!supported.some(model => model.value === value)) {
       return post(channel, '⚠️ That model is no longer in the provider’s current catalog. No setting was changed; run `/sab-model` for a fresh list.')
     }
-    return dispatch('model', [value], channel, null, { userId: body.user.id, expectedSessionId: session.id })
+    return dispatch('model', [value], channel, null, { userId: body.user.id, expectedSessionId })
   }
 
   if (parsed.kind === 'effort') {
@@ -6131,7 +6201,7 @@ async function handleManagementAction(body, action, parsed) {
     const provider = providerOf(session)
     const supported = provider === 'codex' ? CODEX_EFFORTS : provider === 'pi' ? PI_EFFORTS : ['low', 'medium', 'high', 'max']
     if (!supported.includes(value)) return post(channel, '⚠️ That effort is no longer supported. No setting was changed; run `/sab-effort` for a fresh list.')
-    return dispatch('effort', [value], channel, null, { userId: body.user.id, expectedSessionId: session.id })
+    return dispatch('effort', [value], channel, null, { userId: body.user.id, expectedSessionId })
   }
 
   if (parsed.kind === 'terminal') {
@@ -6140,7 +6210,7 @@ async function handleManagementAction(body, action, parsed) {
       return post(channel, '❌ Invalid terminal control.')
     }
     return dispatch('terminal', [parsed.action], channel, null, {
-      userId: body.user.id, ...(session ? { expectedSessionId: session.id } : {}),
+      userId: body.user.id, ...(session ? { expectedSessionId } : {}),
     })
   }
 
@@ -6149,21 +6219,23 @@ async function handleManagementAction(body, action, parsed) {
       return post(channel, '❌ Invalid update control.')
     }
     return dispatch('update', [parsed.action], channel, null, {
-      userId: body.user.id, ...(session ? { expectedSessionId: session.id } : {}),
+      userId: body.user.id, ...(session ? { expectedSessionId } : {}),
     })
   }
 
   if (parsed.kind === 'switch') {
     const provider = normalizeProvider(parsed.action, null)
     if (!session || !provider || provider === providerOf(session)) return post(channel, '❌ Invalid provider-switch control.')
-    return dispatch('switch', [provider], channel, null, { userId: body.user.id, expectedSessionId: session.id })
+    return dispatch('switch', [provider], channel, null, { userId: body.user.id, expectedSessionId })
   }
 
   if (parsed.kind === 'team') {
-    if (!session || !['status', 'add', 'auto', 'manual', 'permissions', 'close'].includes(parsed.action)) {
+    if (!session || !parsed.binding || !['status', 'add', 'auto', 'manual', 'permissions', 'close'].includes(parsed.action)) {
       return post(channel, '❌ Invalid team-management control.')
     }
-    return dispatch('team', [parsed.action], channel, null, { userId: body.user.id, expectedSessionId: session.id })
+    return dispatch('team', [parsed.action], channel, null, {
+      userId: body.user.id, expectedSessionId, expectedTeamId: parsed.binding,
+    })
   }
 
   return post(channel, '❌ Unknown SAB management control. Run `/sab-status` for fresh controls.')

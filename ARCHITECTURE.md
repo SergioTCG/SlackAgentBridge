@@ -230,6 +230,9 @@ effort selectors come from the authoritative provider adapter. Every action
 carries the exact session identity that rendered it and revalidates the owner,
 immutable channel mapping, current native leg, provider catalog, transition,
 delegated-work state, and the ordinary command's safety gates before mutation.
+The rendered identity remains immutable across asynchronous lookups even when a
+native `/clear` rebrands the in-memory session object. Team actions also carry
+the exact team ID so controls from a closed team cannot mutate its replacement.
 Stale controls fail visibly. Broad update and team-close actions require Slack
 confirmation. Explicit text forms remain available; `/sab-update current`
 directly updates the current session while no-argument `/sab-update` opens its

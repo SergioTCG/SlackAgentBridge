@@ -244,6 +244,63 @@ test('clear invalidates a bump waiting inside the channel delivery queue', async
   assert.deepEqual(slack.calls.filter(call => call[0] === 'delete').map(call => call[1].ts), ['10.000001'])
 })
 
+test('clear promotes bump cleanup ahead of unrelated cosmetic queue pressure', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  const ending = { id: 'S1', channel: 'C1' }
+  const occupied = { id: 'S2', channel: 'C2' }
+  const unrelated = { id: 'S3', channel: 'C3' }
+  await status.set(ending, 'ending')
+  await status.set(occupied, 'occupied')
+  await status.set(unrelated, 'unrelated')
+
+  let releasePost
+  let postStartedResolve
+  const postGate = new Promise(resolve => { releasePost = resolve })
+  const postStarted = new Promise(resolve => { postStartedResolve = resolve })
+  let replacement = true
+  const originalPost = slack.web.chat.postMessage
+  slack.web.chat.postMessage = async args => {
+    if (args.channel === 'C1' && replacement) {
+      replacement = false
+      postStartedResolve()
+      await postGate
+    }
+    return originalPost(args)
+  }
+
+  let releaseOccupied
+  let occupiedStartedResolve
+  const occupiedGate = new Promise(resolve => { releaseOccupied = resolve })
+  const occupiedStarted = new Promise(resolve => { occupiedStartedResolve = resolve })
+  const originalUpdate = slack.web.chat.update
+  slack.web.chat.update = async args => {
+    if (args.channel === 'C2' && args.text === 'occupied newer') {
+      occupiedStartedResolve()
+      await occupiedGate
+    }
+    return originalUpdate(args)
+  }
+
+  const bumped = status.bump(ending, { afterTs: '99.000000' })
+  await postStarted
+  const blocker = status.set(occupied, 'occupied newer')
+  const queuedCosmetic = status.set(unrelated, 'unrelated newer')
+  releasePost()
+  await occupiedStarted
+  const cleared = status.clear(ending)
+  releaseOccupied()
+  await Promise.all([bumped, blocker, queuedCosmetic, cleared])
+
+  const afterBlocker = slack.calls.slice(slack.calls.findIndex(call =>
+    call[0] === 'update' && call[1].text === 'occupied newer') + 1)
+  const cleanupIndex = afterBlocker.findIndex(call => call[0] === 'delete' && call[1].channel === 'C1')
+  const cosmeticIndex = afterBlocker.findIndex(call => call[0] === 'update' && call[1].text === 'unrelated newer')
+  assert.ok(cleanupIndex >= 0)
+  assert.ok(cosmeticIndex >= 0)
+  assert.ok(cleanupIndex < cosmeticIndex, 'completed-turn cleanup must preempt unrelated cosmetic traffic')
+})
+
 test('status scheduler exposes bounded operational queue depth', async () => {
   const slack = fakeSlack()
   const status = createStatusMessages(slack.web)

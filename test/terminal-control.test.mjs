@@ -69,3 +69,32 @@ test('terminal selectors fail closed on missing or non-authoritative sessions', 
   await assert.rejects(control.act('open', { selector: 'standby' }), /no active session/)
   await assert.rejects(control.act('close', { channel: 'STALE' }), /no active session/)
 })
+
+test('an interactive terminal action cannot follow a mutable session through native identity replacement', async () => {
+  const session = { id: 'native-old', pid: 11, tmux: 'sab-one', cwd: '/work/one', channel: 'C1' }
+  const state = { channels: { C1: 'native-old' }, sessions: { 'native-old': session } }
+  const calls = []
+  let release
+  let checkedResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const checked = new Promise(resolve => { checkedResolve = resolve })
+  const control = createTerminalControl({
+    state,
+    pidAlive: () => true,
+    tmuxAlive: async () => { checkedResolve(); await gate; return true },
+    tmuxClientPids: async () => [],
+    openTmuxTerminal: async tmux => { calls.push(tmux); return { action: 'opened' } },
+    closeTmuxTerminal: async () => ({ action: 'already-closed' }),
+  })
+
+  const opening = control.act('open', { channel: 'C1', expectedSessionId: 'native-old' })
+  await checked
+  delete state.sessions['native-old']
+  session.id = 'native-new'
+  state.sessions['native-new'] = session
+  state.channels.C1 = 'native-new'
+  release()
+
+  await assert.rejects(opening, /no longer authoritative/)
+  assert.deepEqual(calls, [])
+})

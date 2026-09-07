@@ -82,7 +82,9 @@
       `/sab-kill`, `/sab-status`, and `/sab-usage` work for each provider.
 - [ ] No-argument model, effort, terminal, update, switch, new-session, team,
       and status controls work; equivalent parameterized forms behave the same.
-      A panel posted before a switch/rebind fails without mutating the new leg.
+      A panel posted before a switch, native `/clear`, or rebind fails without
+      mutating the new leg; controls from a closed team cannot affect a newly
+      created team in the same channel.
 - [ ] Interactive update-all and team-close require confirmation; cancellation
       has no side effect.
 - [ ] Owner App Home shows fresh bridge/session state, opens exact session

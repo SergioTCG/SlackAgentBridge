@@ -254,7 +254,9 @@ health, and usage controls. Parameterized forms such as `/sab-terminal open`,
 Every click is rechecked against the immutable channel ID, exact authoritative
 session/provider, current provider catalog, transition state, and the existing
 team/update safety gates. A stale control therefore fails visibly instead of
-acting on a replacement leg. Broad update and team-close actions require Slack
+acting on a replacement leg. Session identity is held unchanged across slow
+lookups, and team buttons are tied to the exact team that rendered them. Broad
+update and team-close actions require Slack
 confirmation. These panels are only a presentation layer over the normal
 `/sab-*` dispatcher.
 

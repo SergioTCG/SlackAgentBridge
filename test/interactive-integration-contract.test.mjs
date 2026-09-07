@@ -15,9 +15,9 @@ test('argument-free management commands render controls through existing command
 test('textual management forms remain routed for automation and muscle memory', () => {
   assert.match(daemon, /\['current', 'here'\]\.includes\(rest\[0\]\.toLowerCase\(\)\)/)
   assert.match(daemon, /if \(all\) return updateAllSessions\(channel\)/)
-  assert.match(daemon, /return setCodexSetting\(session, name, val\)/)
-  assert.match(daemon, /return setPiSetting\(session, name, val\)/)
-  assert.match(daemon, /return beginProviderSwitch\(channel, channelSession, \{ replaceMissing, targetProvider \}\)/)
+  assert.match(daemon, /return setCodexSetting\(session, name, val, \{ expectedSessionId \}\)/)
+  assert.match(daemon, /return setPiSetting\(session, name, val, \{ expectedSessionId \}\)/)
+  assert.match(daemon, /return beginProviderSwitch\(channel, channelSession, \{ replaceMissing, targetProvider, expectedSessionId \}\)/)
   assert.match(daemon, /return spawnNew\(channel, rest\[0\], rest\.slice\(1\), commandProvider\)/)
 })
 
@@ -29,9 +29,20 @@ test('interactive actions are owner-only and revalidate exact authoritative bind
   assert.match(handler, /parseManagementActionId/)
   assert.match(daemon, /authoritativeManagementBinding\(state, channel, target\)/)
   assert.match(daemon, /authoritative\.id !== target/)
-  assert.match(daemon, /expectedSessionId: session\.id/)
   assert.match(daemon, /request\?\.expectedSessionId/)
   assert.match(daemon, /managementTargetStillAuthoritative\(channel, session, request\)/)
+  assert.match(daemon, /const expectedSessionId = request\?\.expectedSessionId \|\| null/)
+  assert.match(daemon, /const expectedSessionId = parsed\.target === 'bridge' \? null : parsed\.target/)
+  assert.doesNotMatch(daemon, /await managementModelCatalog\(session\)[\s\S]{0,600}expectedSessionId: session\.id/)
+  assert.match(daemon, /terminalControl\.act\(operation, \{[\s\S]{0,160}expectedSessionId/)
+  assert.match(daemon, /beginProviderSwitch\(channel, channelSession, \{ replaceMissing, targetProvider, expectedSessionId \}\)/)
+  assert.match(daemon, /updateAndRestart\(session, \{ expectedSessionId \}\)/)
+})
+
+test('team management actions reject a panel rendered for a replaced team', () => {
+  assert.match(daemon, /request\?\.expectedTeamId/)
+  assert.match(daemon, /activeTeamForChannel\(state, channel\)\?\.id !== expectedTeamId/)
+  assert.match(daemon, /expectedTeamId: parsed\.binding/)
 })
 
 test('App Home uses the sole Socket Mode coordinator and hides data from non-owners', () => {

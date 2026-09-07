@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.1] — 2026-09-07
+## [2.1.0-rc.2] — 2026-09-07
 
 ### Added
 
@@ -59,9 +59,15 @@ Notable changes to this project. Format based on
   unrelated hooks and registering the live checkout exactly once. The provider
   staging helpers also make `--help` side-effect-free and reject unknown
   arguments.
-- Interactive session controls carry their exact session identity through
-  asynchronous provider-catalog lookups and revalidate it at the mutation
-  boundary, so a stale panel cannot change a replacement provider leg.
+- Interactive session controls carry their immutable rendered session identity
+  through asynchronous provider-catalog, terminal, update, and switch checks,
+  then revalidate it at every mutation boundary. Team controls additionally
+  bind the exact rendered team generation, so neither `/clear` identity changes
+  nor close-and-recreate races can redirect an old panel to replacement state.
+- A completed turn now promotes every provisional status-reanchor cleanup ahead
+  of unrelated cosmetic Slack traffic. A final that crosses the replacement
+  post boundary invalidates both the old and provisional working lines instead
+  of waiting behind the workspace timer queue.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the
@@ -171,7 +177,7 @@ Notable changes to this project. Format based on
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
 
-[2.1.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.1
+[2.1.0-rc.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.2
 
 ## [2.0.1] — 2026-08-26
 

@@ -66,7 +66,7 @@ test('effort, terminal, update, switch, new, and dashboard panels use only SAB a
     newSessionBlocks(['claude', 'codex', 'pi']),
     bridgeDashboardBlocks(),
     sessionDashboardBlocks({ sessionId: SID, provider: 'codex' }),
-    teamPickerBlocks({ sessionId: SID, team: { coordinator: true, continuation: 'manual' } }),
+    teamPickerBlocks({ sessionId: SID, team: { id: 'team_one', coordinator: true, continuation: 'manual' } }),
   ]
   const actions = panels.flatMap(blocks => blocks)
     .flatMap(block => block.type === 'actions' ? block.elements : block.accessory ? [block.accessory] : [])
@@ -90,11 +90,12 @@ test('dangerous update-all button requires an explicit Slack confirmation', () =
 })
 
 test('team close is coordinator-only and confirmed', () => {
-  const worker = teamPickerBlocks({ sessionId: SID, team: { coordinator: false, continuation: 'manual' } })
+  const worker = teamPickerBlocks({ sessionId: SID, team: { id: 'team_old', coordinator: false, continuation: 'manual' } })
   assert.equal(worker.find(block => block.type === 'actions').elements.length, 1)
-  const coordinator = teamPickerBlocks({ sessionId: SID, team: { coordinator: true, continuation: 'manual' } })
+  const coordinator = teamPickerBlocks({ sessionId: SID, team: { id: 'team_old', coordinator: true, continuation: 'manual' } })
   const close = coordinator.find(block => block.type === 'actions').elements
     .find(action => parseManagementActionId(action.action_id)?.action === 'close')
   assert.equal(close.style, 'danger')
   assert.match(close.confirm.title.text, /close/i)
+  assert.equal(parseManagementActionId(close.action_id).binding, 'team_old')
 })
