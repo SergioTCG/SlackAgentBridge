@@ -37,6 +37,8 @@
 - [ ] Re-running each installer is idempotent.
 - [ ] `install-codex.sh` and `install-pi.sh` do not reload or rewrite the live
       LaunchAgent.
+- [ ] A no-reload installer invoked from a different worktree fails before
+      changing provider hooks, configuration, Git state, or the `sab` link.
 - [ ] Only `sab` is linked on `PATH`; legacy symlinks are removed.
 - [ ] Historical `both` still means Claude + Codex.
 - [ ] No scenario creates a second daemon, control channel, or hook entry.
@@ -65,6 +67,8 @@
 - [ ] An in-progress turn for every provider regains its working line and
       original elapsed duration after restart.
 - [ ] Existing and fresh sessions send and receive Slack text and attachments.
+- [ ] Closing Codex while commentary delivery is backing off still drains its
+      accepted App Server fallback final before the proxy exits.
 - [ ] New sessions are headless; Slack interaction works with no Ghostty window.
 - [ ] `/sab-terminal open` opens or focuses one exact session, `close` detaches
       without stopping it, and a Slack prompt continues afterward.

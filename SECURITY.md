@@ -172,8 +172,10 @@ accounts, and the Mac user running the daemon.
   output, diffs, plans, reasoning, and partial deltas never enter either
   endpoint. Accepted commentary and finals are serialized in App Server source
   order before loopback delivery; a delayed earlier event therefore cannot be
-  made stale by a later final. Private transition finals resolve only their
-  exact waiter and never enter Slack.
+  made stale by a later final. Shutdown interrupts commentary backoff and gives
+  every already accepted stable final a bounded drain before the proxy exits;
+  drain exhaustion is explicit rather than silent. Private transition finals
+  resolve only their exact waiter and never enter Slack.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
   `sab new pi` from the checked-out release and is not installed globally or into a
   project. Its inbound stream and permission endpoints require matching Pi
@@ -209,6 +211,10 @@ accounts, and the Mac user running the daemon.
   interactive startup update check; Codex binary changes remain explicit
   `/sab-update` maintenance rather than an unattended session-start side
   effect.
+- **Live-checkout staging fence:** no-reload provider activation compares its
+  checkout with the historical LaunchAgent's working directory before any
+  mutation. A development worktree cannot silently replace provider hooks,
+  configuration, Git state, or the public executable used by the live daemon.
 - **Fail-closed session sweeps:** `/sab-update all` operates only on exact
   authoritative live mappings and skips interactive, transitional, managed,
   automation-owned, delegated-team, waking, or restarting sessions. It never touches dormant

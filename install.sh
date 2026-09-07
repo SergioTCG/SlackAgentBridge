@@ -75,6 +75,45 @@ wants_claude() { [ "$INSTALL_PROVIDER" = claude ] || [ "$INSTALL_PROVIDER" = bot
 wants_codex() { [ "$INSTALL_PROVIDER" = codex ] || [ "$INSTALL_PROVIDER" = both ] || [ "$INSTALL_PROVIDER" = all ]; }
 wants_pi() { [ "$INSTALL_PROVIDER" = pi ] || [ "$INSTALL_PROVIDER" = all ]; }
 
+plist_working_directory() {
+  awk '
+    /<key>WorkingDirectory<\/key>/ {
+      line = $0
+      sub(/^.*<key>WorkingDirectory<\/key>[[:space:]]*/, "", line)
+      if (line ~ /<string>[^<]*<\/string>/) {
+        sub(/^.*<string>/, "", line); sub(/<\/string>.*$/, "", line)
+        print line; exit
+      }
+      wanted = 1; next
+    }
+    wanted && /<string>[^<]*<\/string>/ {
+      line = $0; sub(/^.*<string>/, "", line); sub(/<\/string>.*$/, "", line)
+      print line; exit
+    }
+  ' "$1" 2>/dev/null
+}
+
+canonical_directory() {
+  (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+}
+
+# A no-reload activation still rewrites provider hooks and the public `sab`
+# link, so it is safe only from the checkout already owned by launchd. Refuse a
+# disposable development worktree before touching Git, config, hooks, or PATH.
+if [ "$RELOAD_DAEMON" = 0 ] && [ -f "$PLIST" ]; then
+  LIVE_BRIDGE="$(plist_working_directory "$PLIST")"
+  if [ -z "$LIVE_BRIDGE" ]; then
+    say "Refusing staged activation: unable to determine the live installation from $PLIST."
+    say "Repair or replace the LaunchAgent during an approved maintenance step; no files were changed."
+    exit 1
+  fi
+  if [ "$(canonical_directory "$LIVE_BRIDGE")" != "$(canonical_directory "$BRIDGE")" ]; then
+    say "Refusing staged activation from $BRIDGE: the live installation is $LIVE_BRIDGE."
+    say "Run this installer from the live installation during its approved staging step; no files were changed."
+    exit 1
+  fi
+fi
+
 say "Installing Slack Agent Bridge ($INSTALL_PROVIDER) from $BRIDGE"
 
 # Migrate only the known historical upstream; never rewrite a contributor's fork.

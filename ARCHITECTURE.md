@@ -413,7 +413,10 @@ hook, addressing Codex App Server releases that omit Stop without parsing the
 transcript or terminal. It never emits commands, command output, diffs, plans,
 reasoning, or deltas. Stable commentary/final deliveries retain their App
 Server source order across loopback retries, so a later final cannot overtake
-an earlier response. Before applying the exact-process fence, the daemon
+an earlier response. On proxy shutdown, commentary backoff is curtailed and
+the accepted delivery tail is drained for up to 30 seconds, ensuring a stable
+fallback final gets its bounded local retry opportunity before the sidecar
+exits. Before applying the exact-process fence, the daemon
 canonicalizes npm's persistent App Server launcher to its direct matching
 native child—the identity emitted by lifecycle hooks—and then revalidates that
 child against the exact tmux. If either sidecar cannot start, the runner falls
@@ -559,7 +562,10 @@ correlated process/tmux, and optionally archives only that immutable channel.
 `si.sergej.claudeslackproxy` LaunchAgent label. It installs only the `sab`
 symlink and removes old launcher symlinks. Existing `CCS_*`,
 `~/.config/ccs`, old checkout paths, control channels, state records, and local
-port remain compatible.
+port remain compatible. A no-reload staged activation reads the installed
+LaunchAgent working directory and refuses a different checkout before any
+mutation, so development worktrees cannot replace live hooks or the public
+executable.
 
 Self-update and release rollout must occur from a clean release commit during a
 maintenance window. The prior tag and config backup remain available until

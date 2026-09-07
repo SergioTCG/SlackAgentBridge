@@ -70,6 +70,117 @@ test('live daemon reload retries the transient launchd bootstrap race', () => {
   assert.match(installer, /LaunchAgent failed to load after 3 attempts/)
 })
 
+test('staged activation refuses to redirect a live install into a disposable worktree', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-live-target-'))
+  try {
+    const worktree = path.join(temp, 'Code', 'SlackAgentBridge-staging')
+    const liveBridge = path.join(temp, '.slack-agent-bridge')
+    const fakeBin = path.join(temp, 'fake-bin')
+    const config = path.join(temp, 'config')
+    const linkedBin = path.join(temp, 'linked-bin')
+    const codexHome = path.join(temp, 'codex')
+    const launchAgents = path.join(temp, 'Library', 'LaunchAgents')
+    fs.mkdirSync(path.join(worktree, 'daemon'), { recursive: true })
+    fs.mkdirSync(path.join(worktree, 'bin'), { recursive: true })
+    fs.mkdirSync(fakeBin, { recursive: true })
+    fs.mkdirSync(config, { recursive: true })
+    fs.mkdirSync(linkedBin, { recursive: true })
+    fs.mkdirSync(launchAgents, { recursive: true })
+    fs.copyFileSync(new URL('../install.sh', import.meta.url), path.join(worktree, 'install.sh'))
+    fs.writeFileSync(path.join(worktree, 'daemon', 'daemon.mjs'), '// staged fixture\n')
+    fs.writeFileSync(path.join(worktree, 'bin', 'sab'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    for (const command of ['codex', 'tmux']) {
+      fs.writeFileSync(path.join(fakeBin, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    }
+    fs.writeFileSync(path.join(config, 'env'), [
+      'SLACK_BOT_TOKEN=xoxb-test',
+      'SLACK_APP_TOKEN=xapp-test',
+      'SLACK_TEAM_ID=TTEST',
+      '',
+    ].join('\n'), { mode: 0o600 })
+    fs.writeFileSync(path.join(launchAgents, 'si.sergej.claudeslackproxy.plist'), [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0"><dict>',
+      '<key>WorkingDirectory</key>',
+      `<string>${liveBridge}</string>`,
+      '</dict></plist>',
+      '',
+    ].join('\n'))
+
+    const run = spawnSync('bash', [path.join(worktree, 'install.sh'), '--provider', 'codex', '--no-daemon-reload'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: temp,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        CCS_CONFIG_DIR: config,
+        CCS_BIN_DIR: linkedBin,
+        CODEX_HOME: codexHome,
+        CCS_SKIP_DEPENDENCY_INSTALL: '1',
+        CCS_SKIP_GIT_REMOTE_MIGRATION: '1',
+      },
+    })
+    assert.notEqual(run.status, 0)
+    assert.match(`${run.stdout}\n${run.stderr}`, /live installation.*staged activation|staged activation.*live installation/i)
+    assert.equal(fs.existsSync(path.join(linkedBin, 'sab')), false)
+    assert.equal(fs.existsSync(path.join(codexHome, 'hooks.json')), false)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('staged activation fails closed when the live install path cannot be verified', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-unverified-target-'))
+  try {
+    const worktree = path.join(temp, 'Code', 'SlackAgentBridge-staging')
+    const fakeBin = path.join(temp, 'fake-bin')
+    const config = path.join(temp, 'config')
+    const linkedBin = path.join(temp, 'linked-bin')
+    const codexHome = path.join(temp, 'codex')
+    const launchAgents = path.join(temp, 'Library', 'LaunchAgents')
+    fs.mkdirSync(path.join(worktree, 'daemon'), { recursive: true })
+    fs.mkdirSync(path.join(worktree, 'bin'), { recursive: true })
+    fs.mkdirSync(fakeBin, { recursive: true })
+    fs.mkdirSync(config, { recursive: true })
+    fs.mkdirSync(linkedBin, { recursive: true })
+    fs.mkdirSync(launchAgents, { recursive: true })
+    fs.copyFileSync(new URL('../install.sh', import.meta.url), path.join(worktree, 'install.sh'))
+    fs.writeFileSync(path.join(worktree, 'daemon', 'daemon.mjs'), '// staged fixture\n')
+    fs.writeFileSync(path.join(worktree, 'bin', 'sab'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    for (const command of ['codex', 'tmux']) {
+      fs.writeFileSync(path.join(fakeBin, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    }
+    fs.writeFileSync(path.join(config, 'env'), 'SLACK_BOT_TOKEN=xoxb-test\nSLACK_APP_TOKEN=xapp-test\n', { mode: 0o600 })
+    fs.writeFileSync(path.join(launchAgents, 'si.sergej.claudeslackproxy.plist'), [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0"><dict>',
+      '<key>ProgramArguments</key><array><string>node</string></array>',
+      '</dict></plist>',
+      '',
+    ].join('\n'))
+
+    const run = spawnSync('bash', [path.join(worktree, 'install.sh'), '--provider', 'codex', '--no-daemon-reload'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: temp,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        CCS_CONFIG_DIR: config,
+        CCS_BIN_DIR: linkedBin,
+        CODEX_HOME: codexHome,
+        CCS_SKIP_DEPENDENCY_INSTALL: '1',
+        CCS_SKIP_GIT_REMOTE_MIGRATION: '1',
+      },
+    })
+    assert.notEqual(run.status, 0)
+    assert.match(`${run.stdout}\n${run.stderr}`, /cannot verify|unable to determine/i)
+    assert.equal(fs.existsSync(path.join(linkedBin, 'sab')), false)
+    assert.equal(fs.existsSync(path.join(codexHome, 'hooks.json')), false)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('provider hook installation is idempotent and no-restart is isolated', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-install-'))
   try {

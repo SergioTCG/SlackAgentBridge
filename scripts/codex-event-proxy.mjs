@@ -32,9 +32,45 @@ const finalDaemonUrl = new URL(daemonUrl)
 finalDaemonUrl.pathname = '/codex/final'
 const deliveries = new Map()
 let deliveryTail = Promise.resolve()
+let shuttingDown = false
+let activeRequest = null
+let resolveShutdownSignal
+const shutdownSignal = new Promise(resolve => { resolveShutdownSignal = resolve })
 const retryDelays = [0, 250, 1000, 3000, 7000, 15000]
+const SHUTDOWN_DRAIN_MS = 30000
 const pendingFinalAnswers = new Map()
 const MAX_PENDING_FINALS = 128
+
+async function waitForRetry(delay, label) {
+  if (!delay) return true
+  if (!shuttingDown) {
+    await Promise.race([
+      new Promise(resolve => setTimeout(resolve, delay)),
+      shutdownSignal,
+    ])
+  }
+  // Commentary is useful progress, but must not strand a stable fallback final
+  // behind backoff when the TUI is exiting. Finals retain bounded fast retries.
+  return !(shuttingDown && label === 'commentary')
+}
+
+async function postDelivery(endpoint, payload, label) {
+  const controller = new AbortController()
+  const request = { controller, label }
+  activeRequest = request
+  const timeout = setTimeout(() => controller.abort(), shuttingDown ? 3000 : 15000)
+  try {
+    return await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-ccs-provider': 'codex' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+    if (activeRequest === request) activeRequest = null
+  }
+}
 
 function deliver({ key, payload, endpoint, label }) {
   if (deliveries.has(key)) return deliveries.get(key)
@@ -46,17 +82,13 @@ function deliver({ key, payload, endpoint, label }) {
   // exact order in which inspectFrame accepted them.
   const pending = deliveryTail.then(async () => {
     for (const delay of retryDelays) {
-      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
+      if (!(await waitForRetry(delay, label))) return
       try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-ccs-provider': 'codex' },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(15000),
-        })
+        const response = await postDelivery(endpoint, payload, label)
         if (response.ok) return
         if (![409, 429, 503].includes(response.status)) return
       } catch {}
+      if (shuttingDown && label === 'commentary') return
     }
     process.stderr.write(`sab Codex event proxy: ${label} delivery timed out (${payload.itemId.slice(0, 12)})\n`)
   })
@@ -163,11 +195,26 @@ server.on('listening', () => {
 })
 server.on('error', error => fail(error.message))
 
+let shutdownPromise = null
 function shutdown() {
+  if (shutdownPromise) return shutdownPromise
+  shuttingDown = true
+  resolveShutdownSignal()
+  if (activeRequest?.label === 'commentary') activeRequest.controller.abort()
   if (activeClient?.readyState === WebSocket.OPEN) activeClient.close(1001, 'bridge stopping')
   if (activeUpstream?.readyState === WebSocket.OPEN) activeUpstream.close(1001, 'bridge stopping')
-  server.close(() => process.exit(0))
-  setTimeout(() => process.exit(0), 1000).unref()
+  server.close()
+  const timeout = new Promise(resolve => setTimeout(() => resolve(false), SHUTDOWN_DRAIN_MS))
+  shutdownPromise = Promise.race([
+    deliveryTail.then(() => true),
+    timeout,
+  ]).then(drained => {
+    if (!drained) {
+      process.stderr.write('sab Codex event proxy: shutdown drain timed out; a stable delivery may require daemon recovery\n')
+    }
+    process.exit(drained ? 0 : 1)
+  })
+  return shutdownPromise
 }
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)

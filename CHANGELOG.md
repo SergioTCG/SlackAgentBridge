@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.8] — 2026-09-07
+## [2.1.0-rc.9] — 2026-09-07
 
 ### Added
 
@@ -49,6 +49,14 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex proxy shutdown now interrupts expendable commentary backoff and drains
+  already accepted stable finals before exiting, with a bounded visible failure
+  if local delivery cannot recover. A missing Codex `Stop` can therefore no
+  longer lose its App Server fallback final merely because the TUI closes.
+- Staged provider activation now refuses to run from a checkout different from
+  the LaunchAgent's live working directory. It fails before touching Git,
+  provider hooks, configuration, or the public `sab` link, preventing an
+  isolated release worktree from becoming a disposable runtime dependency.
 - Interactive team Refresh and auto/manual actions now render a fresh team
   status and control panel after they run, so state-dependent buttons cannot
   remain stale and strand the owner on the previous continuation mode.

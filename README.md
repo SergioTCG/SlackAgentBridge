@@ -152,7 +152,10 @@ The staged `install-codex.sh` and `install-pi.sh` helpers can add provider
 support without restarting the live daemon. Activation still belongs in a
 controlled maintenance window. If a newly staged Pi extension meets an older
 daemon, model and effort changes fail closed with a restart-required message;
-they do not mutate an unverified native session.
+they do not mutate an unverified native session. A staged activation must be
+run from the checkout already named by the live LaunchAgent; invoking it from
+an isolated development worktree fails before changing hooks, configuration,
+Git state, or the public `sab` link.
 
 ## Local CLI
 

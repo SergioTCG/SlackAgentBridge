@@ -64,6 +64,10 @@ state, and Slack API results remain authoritative in that order.
 8. Promote that exact commit to a final semantic-version tag. Any code change
    creates a new candidate and restarts the affected gates.
 
+No-reload provider staging is still a live-install mutation. Run it only from
+the checkout recorded in the LaunchAgent; an isolated worktree must be refused
+before hooks, configuration, Git state, or the public executable can change.
+
 ## Stop-the-line conditions
 
 Do not promote or continue adding features when any of these occurs:

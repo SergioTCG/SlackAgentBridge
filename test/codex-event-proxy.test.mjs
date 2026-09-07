@@ -109,3 +109,62 @@ test('event proxy forwards every frame and reports commentary plus completed fin
   }
   assert.equal(stderr, '')
 })
+
+test('event proxy drains a queued fallback final when shutdown interrupts commentary backoff', async () => {
+  const deliveries = []
+  const daemon = http.createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += chunk
+    deliveries.push({ url: request.url, body: JSON.parse(body) })
+    if (request.url.startsWith('/codex/commentary')) {
+      response.writeHead(503); response.end('retry')
+    } else {
+      response.writeHead(202); response.end('accepted')
+    }
+  })
+  const daemonPort = await listen(daemon)
+  const upstream = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await once(upstream, 'listening')
+  const upstreamPort = upstream.address().port
+  const proxy = spawn(process.execPath, [proxyScript.pathname,
+    '--upstream', `ws://127.0.0.1:${upstreamPort}`,
+    '--agent-pid', String(process.pid),
+    '--tmux', 'ccs-shutdown-test',
+    '--daemon', `http://127.0.0.1:${daemonPort}/codex/commentary`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = ''
+  proxy.stdout.on('data', chunk => { stdout += chunk })
+
+  let client
+  try {
+    const proxyUrl = await waitFor(() => stdout.match(/ws:\/\/127\.0\.0\.1:\d+/)?.[0])
+    const serverConnection = once(upstream, 'connection')
+    client = new WebSocket(proxyUrl)
+    await once(client, 'open')
+    const [serverSocket] = await serverConnection
+    const frames = [
+      { method: 'item/completed', params: { threadId: 'thread-shutdown', turnId: 'turn-shutdown', item: { id: 'comment-shutdown', type: 'agentMessage', phase: 'commentary', text: 'Still working.' } } },
+      { method: 'item/completed', params: { threadId: 'thread-shutdown', turnId: 'turn-shutdown', item: { id: 'final-shutdown', type: 'agentMessage', phase: 'final_answer', text: 'Stable final.' } } },
+      { method: 'turn/completed', params: { threadId: 'thread-shutdown', turn: { id: 'turn-shutdown', status: 'completed', items: [] } } },
+    ]
+    const received = []
+    client.on('message', data => received.push(JSON.parse(data.toString())))
+    for (const frame of frames) serverSocket.send(JSON.stringify(frame))
+    await waitFor(() => received.length === frames.length &&
+      deliveries.some(delivery => delivery.url.startsWith('/codex/commentary')))
+
+    proxy.kill('SIGTERM')
+    await waitFor(() => deliveries.some(delivery =>
+      delivery.url.startsWith('/codex/final') && delivery.body.itemId === 'final-shutdown'))
+    await Promise.race([
+      once(proxy, 'exit'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('proxy did not finish its shutdown drain')), 5000)),
+    ])
+  } finally {
+    client?.terminate()
+    if (proxy.exitCode === null) proxy.kill('SIGKILL')
+    await Promise.race([once(proxy, 'exit'), new Promise(resolve => setTimeout(resolve, 500))]).catch(() => {})
+    upstream.close()
+    daemon.close()
+  }
+})
