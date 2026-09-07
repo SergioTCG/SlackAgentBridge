@@ -39,6 +39,8 @@
       LaunchAgent.
 - [ ] A no-reload installer invoked from a different worktree fails before
       changing provider hooks, configuration, Git state, or the `sab` link.
+- [ ] The same no-reload fence rejects a differently rooted loaded LaunchAgent
+      when its plist is missing, and allows a genuinely unloaded fresh install.
 - [ ] Only `sab` is linked on `PATH`; legacy symlinks are removed.
 - [ ] Historical `both` still means Claude + Codex.
 - [ ] No scenario creates a second daemon, control channel, or hook entry.
@@ -68,7 +70,8 @@
       original elapsed duration after restart.
 - [ ] Existing and fresh sessions send and receive Slack text and attachments.
 - [ ] Closing Codex while commentary delivery is backing off still drains its
-      accepted App Server fallback final before the proxy exits.
+      accepted App Server fallback final before the proxy exits, while the
+      correlated App Server remains alive for daemon ancestry validation.
 - [ ] New sessions are headless; Slack interaction works with no Ghostty window.
 - [ ] `/sab-terminal open` opens or focuses one exact session, `close` detaches
       without stopping it, and a Slack prompt continues afterward.
@@ -103,6 +106,9 @@
       arriving mid-relaunch, and explicitly skips a busy turn, permission,
       switch, managed run, automation, delegated worker task, standby leg, and
       stale mapping.
+- [ ] A maintenance-time native `/clear` carries queued prompts and fences to
+      the replacement ID; a second prompt arriving during the first paste stays
+      behind it, and direct input opens only after both are submitted once.
 - [ ] `/sab-account` works only for Claude and `/sab-run` only for Pi.
 - [ ] Claude/Codex permission relay and Pi safe-mode/project-trust decisions work.
 - [ ] Pi image input, adaptive routing, plan/approve, pause/resume, all budgets,

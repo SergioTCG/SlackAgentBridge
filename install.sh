@@ -100,17 +100,47 @@ canonical_directory() {
 # A no-reload activation still rewrites provider hooks and the public `sab`
 # link, so it is safe only from the checkout already owned by launchd. Refuse a
 # disposable development worktree before touching Git, config, hooks, or PATH.
-if [ "$RELOAD_DAEMON" = 0 ] && [ -f "$PLIST" ]; then
-  LIVE_BRIDGE="$(plist_working_directory "$PLIST")"
-  if [ -z "$LIVE_BRIDGE" ]; then
-    say "Refusing staged activation: unable to determine the live installation from $PLIST."
-    say "Repair or replace the LaunchAgent during an approved maintenance step; no files were changed."
-    exit 1
+# Check the loaded job as well as its on-disk plist: an operator can move or
+# delete the plist while launchd keeps the old service alive in memory.
+if [ "$RELOAD_DAEMON" = 0 ]; then
+  if command -v launchctl >/dev/null 2>&1 &&
+      launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    LOADED_BRIDGE="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '
+      /^[[:space:]]*working directory = / {
+        sub(/^[[:space:]]*working directory = /, ""); print; exit
+      }
+    ')"
+    if [ -z "$LOADED_BRIDGE" ]; then
+      LOADED_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '
+        /^[[:space:]]*pid = [0-9]+/ { print $3; exit }
+      ')"
+      if [ -n "$LOADED_PID" ] && command -v lsof >/dev/null 2>&1; then
+        LOADED_BRIDGE="$(lsof -a -p "$LOADED_PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+      fi
+    fi
+    if [ -z "$LOADED_BRIDGE" ]; then
+      say "Refusing staged activation: the loaded service $LABEL exists, but its working directory cannot be verified."
+      say "Repair or replace the LaunchAgent during an approved maintenance step; no files were changed."
+      exit 1
+    fi
+    if [ "$(canonical_directory "$LOADED_BRIDGE")" != "$(canonical_directory "$BRIDGE")" ]; then
+      say "Refusing staged activation from $BRIDGE: the loaded service uses $LOADED_BRIDGE."
+      say "Run this installer from the live installation during its approved staging step; no files were changed."
+      exit 1
+    fi
   fi
-  if [ "$(canonical_directory "$LIVE_BRIDGE")" != "$(canonical_directory "$BRIDGE")" ]; then
-    say "Refusing staged activation from $BRIDGE: the live installation is $LIVE_BRIDGE."
-    say "Run this installer from the live installation during its approved staging step; no files were changed."
-    exit 1
+  if [ -f "$PLIST" ]; then
+    LIVE_BRIDGE="$(plist_working_directory "$PLIST")"
+    if [ -z "$LIVE_BRIDGE" ]; then
+      say "Refusing staged activation: unable to determine the live installation from $PLIST."
+      say "Repair or replace the LaunchAgent during an approved maintenance step; no files were changed."
+      exit 1
+    fi
+    if [ "$(canonical_directory "$LIVE_BRIDGE")" != "$(canonical_directory "$BRIDGE")" ]; then
+      say "Refusing staged activation from $BRIDGE: the live installation is $LIVE_BRIDGE."
+      say "Run this installer from the live installation during its approved staging step; no files were changed."
+      exit 1
+    fi
   fi
 fi
 

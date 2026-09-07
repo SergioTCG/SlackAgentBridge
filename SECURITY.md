@@ -174,8 +174,10 @@ accounts, and the Mac user running the daemon.
   order before loopback delivery; a delayed earlier event therefore cannot be
   made stale by a later final. Shutdown interrupts commentary backoff and gives
   every already accepted stable final a bounded drain before the proxy exits;
-  drain exhaustion is explicit rather than silent. Private transition finals
-  resolve only their exact waiter and never enter Slack.
+  the correlated App Server stays alive until that drain completes so ancestry
+  proof remains possible. Drain exhaustion is explicit rather than silent.
+  Private transition finals resolve only their exact waiter and never enter
+  Slack.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
   `sab new pi` from the checked-out release and is not installed globally or into a
   project. Its inbound stream and permission endpoints require matching Pi
@@ -212,9 +214,11 @@ accounts, and the Mac user running the daemon.
   `/sab-update` maintenance rather than an unattended session-start side
   effect.
 - **Live-checkout staging fence:** no-reload provider activation compares its
-  checkout with the historical LaunchAgent's working directory before any
-  mutation. A development worktree cannot silently replace provider hooks,
-  configuration, Git state, or the public executable used by the live daemon.
+  checkout with both the loaded historical LaunchAgent job and the on-disk
+  plist before any mutation. Missing, moved, malformed, or contradictory
+  service metadata fails closed; a development worktree cannot silently
+  replace provider hooks, configuration, Git state, or the public executable
+  used by the live daemon.
 - **Fail-closed session sweeps:** `/sab-update all` operates only on exact
   authoritative live mappings and skips interactive, transitional, managed,
   automation-owned, delegated-team, waking, or restarting sessions. It never touches dormant
@@ -237,6 +241,9 @@ accounts, and the Mac user running the daemon.
   an explicit activation instruction. Once any provider maintenance restart is
   reserved, overlapping lifecycle or setting mutations are rejected while owner
   prompts queue and status, usage, and terminal-view operations remain available.
+  A verified native identity replacement carries the queue and fences forward;
+  direct input remains closed until all queued prompts have reached the exact
+  replacement input surface in arrival order.
 - **Owner-private App Home:** `app_home_opened` may arrive for any workspace
   user, but only the configured owner receives bridge/session metadata or
   actions. Other users receive a static restricted view. Owner actions reuse

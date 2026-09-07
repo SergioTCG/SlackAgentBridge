@@ -60,7 +60,7 @@ test('team management actions redraw state-dependent controls after refresh and 
   assert.match(handler, /sub === 'auto' \|\| sub === 'manual'[\s\S]*postTeamManagement\(channel, session, team\)/)
 })
 
-test('session update ownership is reserved before Slack and released by immutable identity', () => {
+test('session update ownership is reserved before Slack and follows a native identity replacement', () => {
   const reserve = /function reserveSessionMaintenance\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(reserve, /const sessionId = expectedSessionId \|\| session\?\.id/)
   assert.match(reserve, /restarting\.add\(sessionId\)/)
@@ -69,12 +69,22 @@ test('session update ownership is reserved before Slack and released by immutabl
 
   const stop = /async function stopSessionForUpdate\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(stop, /reserveSessionMaintenance\(session/)
-  assert.match(stop, /releaseSessionMaintenance\(reservation\)/)
+  assert.match(stop, /releaseSessionMaintenance\(reservation, session\)/)
 
   const update = /async function updateAndRestart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(update, /const updateSessionId = expectedSessionId \|\| session\.id/)
-  assert.match(update, /restarting\.delete\(updateSessionId\)/)
-  assert.match(update, /updatingSessions\.delete\(updateSessionId\)/)
+  assert.match(update, /releaseSessionMaintenance\(\{ sessionId: updateSessionId \}, session\)/)
+  assert.match(daemon, /rebindSessionRuntimeState\(priorSid, sid, \{[\s\S]{0,500}pendingBySession: pendingBySid/)
+})
+
+test('replacement startup drains all queued input before releasing direct delivery', () => {
+  const completion = /async function completeAuthoritativeSessionStart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(completion, /updatingSessions\.add\(sid\)/)
+  assert.match(completion, /drainSessionInputQueue\(\(\) => session\.id/)
+  assert.doesNotMatch(completion, /pendingBySid\.set\(sid, \[\]\)[\s\S]*setTimeout/)
+
+  const start = /if \(ev === 'SessionStart'\) \{[\s\S]{0,1200}completeAuthoritativeSessionStart/.exec(daemon)?.[0] || ''
+  assert.doesNotMatch(start, /updatingSessions\.delete\(sid\)/)
 })
 
 test('provider maintenance blocks overlapping session mutations but leaves observation available', () => {

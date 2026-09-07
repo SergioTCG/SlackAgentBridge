@@ -106,7 +106,8 @@ import { createNodeRegistry } from './node-registry.mjs'
 import { readNodeListenerConfiguration } from './node-runtime.mjs'
 import { createCoordinatorNodeTransport, listenForNodeConnections } from './node-transport.mjs'
 import {
-  bulkUpdateBlockReason, planBulkSessionUpdate, runBulkSessionUpdate,
+  bulkUpdateBlockReason, drainSessionInputQueue, planBulkSessionUpdate,
+  rebindSessionRuntimeState, runBulkSessionUpdate,
 } from './session-update.mjs'
 import {
   applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
@@ -259,6 +260,7 @@ function consumeInjected(sid, prompt) {
 // ---- Claude Code binary: version, update, model list ------------------------
 const restarting = new Set() // session ids intentionally restarting (suppress the "ended" notice)
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
+const drainingSessionInput = new Set() // exact sessions serially flushing input queued across a wake/restart
 const completedSessionStartTmux = new Map() // sid → tmux; dedupe native/synthetic start races
 let bulkUpdateRunning = false
 function claudeBin() {
@@ -1415,6 +1417,10 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
   const tmux = session.tmux || ''
   if (completedSessionStartTmux.get(sid) === tmux) return false
   completedSessionStartTmux.set(sid, tmux)
+  // Install the input fence synchronously, before any Slack API await below.
+  // Maintenance already owns this fence; ordinary resurrection acquires it
+  // whenever an accepted prompt is waiting for the replacement input surface.
+  if (tmux && (updatingSessions.has(sid) || pendingBySid.get(sid)?.length)) updatingSessions.add(sid)
   try {
     pendingSpawnChannels.delete(tmux)
     const ch = await ensureChannel(session)
@@ -1424,24 +1430,46 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
     if (provider === 'codex') await reportCodexModelMismatch(session)
     automationLifecycle.correlateSessionStart(session)
 
-    // Flush messages queued during resurrection. The completion claim above is
-    // synchronous, so a native SessionStart racing a process-tree fallback can
-    // never paste these messages twice.
-    const queued = pendingBySid.get(sid) || []
-    if (queued.length && tmux) {
-      pendingBySid.set(sid, [])
-      setTimeout(async () => {
-        for (const m of queued) {
-          rememberInjected(sid, queuedPromptText(m))
-          if (provider === 'pi') {
-            if (!injectQueuedPiPrompt(session.pid, m)) log('Pi flush stream unavailable', sid.slice(0, 8))
-          } else {
-            await tmuxPaste(tmux, m).catch(e => log('flush paste failed', String(e)))
-            if (provider === 'codex') ensureCodexTurnStarted(session)
-          }
-          await sleep(500)
+    // Keep the fence until every item—including messages arriving while an
+    // earlier paste is in flight—has reached the replacement input surface.
+    // The completion claim above prevents native/fallback startup races from
+    // scheduling two drains for the same tmux.
+    if (updatingSessions.has(sid) && tmux) {
+      const timer = setTimeout(async () => {
+        try {
+          await drainSessionInputQueue(() => session.id, {
+            pendingBySession: pendingBySid,
+            updatingSessionIds: updatingSessions,
+            drainingSessionIds: drainingSessionInput,
+            deliver: async m => {
+              const currentSid = session.id
+              const prompt = queuedPromptText(m)
+              rememberInjected(currentSid, prompt)
+              if (provider === 'pi') {
+                if (!injectQueuedPiPrompt(session.pid, m)) throw new Error('Pi input stream is unavailable')
+              } else {
+                if (session.tmux !== tmux || !(await tmuxAlive(tmux))) {
+                  throw new Error('replacement tmux is no longer authoritative')
+                }
+                await tmuxPaste(tmux, m)
+                if (provider === 'codex') ensureCodexTurnStarted(session)
+              }
+              await sleep(500)
+            },
+          })
+        } catch (error) {
+          log('queued input drain failed closed', session.id.slice(0, 8), String(error?.message || error))
+          // The surviving queue itself remains an input fence. Release the
+          // maintenance marker so the owner can recover by restarting this
+          // exact session; ordinary messages continue joining the queue.
+          updatingSessions.delete(session.id)
+          await post(session.channel,
+            '⚠️ The resumed provider did not accept its queued input. The queue remains fenced; retry this exact session with `/sab-update`.').catch(() => {})
         }
       }, 2000)
+      timer.unref?.()
+    } else if (updatingSessions.has(sid)) {
+      log('retained input fence without a replacement tmux', sid.slice(0, 8))
     }
     return true
   } catch (error) {
@@ -1541,6 +1569,12 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     if (internalTurns.has(priorSid)) {
       internalTurns.set(sid, internalTurns.get(priorSid)); internalTurns.delete(priorSid)
     }
+    rebindSessionRuntimeState(priorSid, sid, {
+      pendingBySession: pendingBySid,
+      updatingSessionIds: updatingSessions,
+      restartingSessionIds: restarting,
+      wakingSessions: resurrectInFlight,
+    })
     session.id = sid
     session.offset = 0
     state.sessions[sid] = session
@@ -1732,7 +1766,6 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
 
   if (ev === 'SessionStart') {
     restarting.delete(sid) // a resumed /sab-update session is up; re-enable the "ended" notice
-    updatingSessions.delete(sid)
     resurrectInFlight.delete(sid) // the wake completed; future resurrects are legitimate
     if (session.tmux) clearKillOnClose(session.tmux)
     if (session.tmux) tmuxTitle(session.tmux, session.cwd || 'sab') // initial title; updateTopic enriches it (folder · branch · model · effort)
@@ -2214,7 +2247,6 @@ async function adoptHooklessCodexResume(session, claim, reason) {
   // replacement tmux. Codex resume can remain idle without emitting that hook.
   if (!applyHooklessCodexClaim(state, session, claim)) return false
   restarting.delete(session.id)
-  updatingSessions.delete(session.id)
   resurrectInFlight.delete(session.id)
   clearKillOnClose(claim.tmux)
   tmuxTitle(claim.tmux, session.cwd || 'sab')
@@ -2746,9 +2778,15 @@ async function updateProviderCli(provider) {
   return { provider, before, after, note, summary: ver, failed: /error|fail/i.test(note) }
 }
 
-function scheduleUpdateGuardCleanup(sessionId) {
+function scheduleUpdateGuardCleanup(sessionOrId) {
   const timer = setTimeout(() => {
+    const sessionId = typeof sessionOrId === 'string' ? sessionOrId : sessionOrId?.id
+    if (!sessionId) return
     restarting.delete(sessionId)
+    if (pendingBySid.get(sessionId)?.length || drainingSessionInput.has(sessionId)) {
+      log('retained update guard for undrained input', sessionId.slice(0, 8))
+      return
+    }
     updatingSessions.delete(sessionId)
   }, 60000)
   timer.unref?.()
@@ -2777,10 +2815,14 @@ function reserveSessionMaintenance(session, { expectedSessionId = null } = {}) {
   return Object.freeze({ sessionId, channel })
 }
 
-function releaseSessionMaintenance(reservation) {
+function releaseSessionMaintenance(reservation, currentSession = null) {
   if (!reservation?.sessionId) return
   restarting.delete(reservation.sessionId)
   updatingSessions.delete(reservation.sessionId)
+  if (currentSession?.id && currentSession.id !== reservation.sessionId) {
+    restarting.delete(currentSession.id)
+    updatingSessions.delete(currentSession.id)
+  }
 }
 
 async function stopReservedSession(session, reservation, message = null) {
@@ -2809,7 +2851,7 @@ async function stopSessionForUpdate(session, message, { expectedSessionId = null
     await stopReservedSession(session, reservation, message)
     return reservation.sessionId
   } catch (error) {
-    releaseSessionMaintenance(reservation)
+    releaseSessionMaintenance(reservation, session)
     throw error
   }
 }
@@ -2830,7 +2872,7 @@ async function resumeUpdatedSession(session, update, updateError = null, { expec
   }
   await resurrect(session)
   if (!session.tmux || !(await tmuxAlive(session.tmux))) throw new Error('replacement tmux session did not become active')
-  scheduleUpdateGuardCleanup(expectedSessionId) // SessionStart normally clears this first
+  scheduleUpdateGuardCleanup(session) // the replacement input drain normally clears this first
 }
 
 // /sab-update: stop this session's agent, update the CLI if a newer build exists,
@@ -2848,8 +2890,7 @@ async function updateAndRestart(session, { expectedSessionId = null } = {}) {
     const update = await updateProviderCli(provider)
     await resumeUpdatedSession(session, update, null, { expectedSessionId: updateSessionId })
   } catch (error) {
-    restarting.delete(updateSessionId)
-    updatingSessions.delete(updateSessionId)
+    releaseSessionMaintenance({ sessionId: updateSessionId }, session)
     throw error
   }
 }
@@ -3021,7 +3062,7 @@ async function handleSlackMessage(channel, text, sender, request) {
   // A settings/account/flags restart uses the same maintenance reservation as
   // a CLI update. Queue owner input before question-form routing so it cannot
   // reach the provider process which is being replaced.
-  if (updatingSessions.has(session.id)) {
+  if (updatingSessions.has(session.id) || drainingSessionInput.has(session.id) || pendingBySid.get(session.id)?.length) {
     reserveTeamInput(session, 'slack')
     try {
       if (providerOf(session) === 'pi') {
@@ -3068,7 +3109,7 @@ const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kil
 // fall back to a channel event, and resurrect the session if it's gone.
 async function injectText(session, text, options = {}) {
   const provider = providerOf(session)
-  if (updatingSessions.has(session.id)) {
+  if (updatingSessions.has(session.id) || drainingSessionInput.has(session.id) || pendingBySid.get(session.id)?.length) {
     const queued = pendingBySid.get(session.id) || []
     const item = provider === 'pi'
       ? piPromptQueueItem(text, options)
@@ -4509,9 +4550,9 @@ async function restartSessionWithMutation(session, {
     if (!session.tmux || !(await tmuxAlive(session.tmux))) {
       throw new Error('replacement tmux session did not become active')
     }
-    scheduleUpdateGuardCleanup(reservation.sessionId) // SessionStart normally clears this first
+    scheduleUpdateGuardCleanup(session) // the replacement input drain normally clears this first
   } catch (error) {
-    releaseSessionMaintenance(reservation)
+    releaseSessionMaintenance(reservation, session)
     throw error
   }
 }

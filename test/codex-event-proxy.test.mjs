@@ -156,14 +156,18 @@ test('event proxy drains a queued fallback final when shutdown interrupts commen
     proxy.kill('SIGTERM')
     await waitFor(() => deliveries.some(delivery =>
       delivery.url.startsWith('/codex/final') && delivery.body.itemId === 'final-shutdown'))
-    await Promise.race([
-      once(proxy, 'exit'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('proxy did not finish its shutdown drain')), 5000)),
-    ])
+    if (proxy.exitCode === null && proxy.signalCode === null) {
+      await Promise.race([
+        once(proxy, 'exit'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('proxy did not finish its shutdown drain')), 5000)),
+      ])
+    }
   } finally {
     client?.terminate()
-    if (proxy.exitCode === null) proxy.kill('SIGKILL')
-    await Promise.race([once(proxy, 'exit'), new Promise(resolve => setTimeout(resolve, 500))]).catch(() => {})
+    if (proxy.exitCode === null && proxy.signalCode === null) {
+      proxy.kill('SIGKILL')
+      await Promise.race([once(proxy, 'exit'), new Promise(resolve => setTimeout(resolve, 500))]).catch(() => {})
+    }
     upstream.close()
     daemon.close()
   }

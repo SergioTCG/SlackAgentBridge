@@ -65,8 +65,9 @@ state, and Slack API results remain authoritative in that order.
    creates a new candidate and restarts the affected gates.
 
 No-reload provider staging is still a live-install mutation. Run it only from
-the checkout recorded in the LaunchAgent; an isolated worktree must be refused
-before hooks, configuration, Git state, or the public executable can change.
+the checkout verified against both the loaded LaunchAgent job and its on-disk
+plist; an isolated or unverifiable worktree must be refused before hooks,
+configuration, Git state, or the public executable can change.
 
 ## Stop-the-line conditions
 

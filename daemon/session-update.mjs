@@ -51,6 +51,88 @@ export function groupUpdateSessions(sessions) {
   return groups
 }
 
+// Native providers can replace their conversation identity in-place (for
+// example Claude `/clear`). Runtime maintenance state is keyed by that native
+// identity, so carry every not-yet-delivered prompt and lifecycle fence to the
+// replacement before the old key is discarded.
+export function rebindSessionRuntimeState(fromId, toId, {
+  pendingBySession,
+  updatingSessionIds,
+  restartingSessionIds,
+  wakingSessions,
+} = {}) {
+  if (!fromId || !toId || fromId === toId) return false
+
+  if (pendingBySession?.has(fromId)) {
+    const prior = pendingBySession.get(fromId) || []
+    const replacement = pendingBySession.get(toId) || []
+    if (prior.length || replacement.length) pendingBySession.set(toId, [...prior, ...replacement])
+    pendingBySession.delete(fromId)
+  }
+  for (const ids of [updatingSessionIds, restartingSessionIds]) {
+    if (ids?.delete(fromId)) ids.add(toId)
+  }
+  if (wakingSessions?.has(fromId)) {
+    if (!wakingSessions.has(toId)) wakingSessions.set(toId, wakingSessions.get(fromId))
+    wakingSessions.delete(fromId)
+  }
+  return true
+}
+
+// Drain until the queue is observably empty. New input can arrive while an
+// earlier paste is awaiting the provider; it remains fenced and is picked up
+// by the next loop iteration instead of overtaking the queued prompt.
+export async function drainSessionInputQueue(sessionIdentity, {
+  pendingBySession,
+  updatingSessionIds,
+  drainingSessionIds,
+  deliver,
+} = {}) {
+  const resolveIdentity = typeof sessionIdentity === 'function' ? sessionIdentity : () => sessionIdentity
+  let activeId = resolveIdentity()
+  if (!activeId || typeof deliver !== 'function') throw new TypeError('session input drain requires an identity and deliver function')
+  if (drainingSessionIds?.has(activeId)) return false
+  drainingSessionIds?.add(activeId)
+  const followReplacement = () => {
+    const nextId = resolveIdentity()
+    if (!nextId || nextId === activeId) return activeId
+    drainingSessionIds?.delete(activeId)
+    if (drainingSessionIds?.has(nextId)) throw new Error('replacement session already has an input drain')
+    activeId = nextId
+    drainingSessionIds?.add(activeId)
+    return activeId
+  }
+  let completed = false
+  try {
+    while (true) {
+      const sessionId = followReplacement()
+      const batch = [...(pendingBySession?.get(sessionId) || [])]
+      if (!batch.length) break
+      pendingBySession.set(sessionId, [])
+      for (let index = 0; index < batch.length; index++) {
+        try {
+          await deliver(batch[index])
+        } catch (error) {
+          const replacementId = followReplacement()
+          const arrived = pendingBySession.get(replacementId) || []
+          pendingBySession.set(replacementId, [...batch.slice(index), ...arrived])
+          throw error
+        }
+      }
+    }
+    const sessionId = followReplacement()
+    pendingBySession?.delete(sessionId)
+    updatingSessionIds?.delete(sessionId)
+    completed = true
+    return true
+  } finally {
+    drainingSessionIds?.delete(activeId)
+    // A failed delivery deliberately retains the maintenance fence and queue.
+    // Callers may retry, but direct provider input must not overtake it.
+    if (!completed && pendingBySession && !pendingBySession.has(activeId)) pendingBySession.set(activeId, [])
+  }
+}
+
 // Stop every eligible session for one provider before swapping its CLI, then
 // resume every session even when the update check itself fails. Callers provide
 // all effects so this orchestration can be regression-tested without Slack,

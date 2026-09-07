@@ -6,6 +6,25 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.10] — 2026-09-07
+
+### Fixed
+
+- Provider maintenance now carries its queued owner input and restart fences
+  across a verified native session-ID replacement such as Claude `/clear`.
+  Replacement startup keeps direct input closed until the entire live queue,
+  including prompts arriving during the drain, reaches the provider in order.
+- Codex runner shutdown now keeps the correlated App Server process alive until
+  the event proxy finishes its bounded commentary/final drain. The daemon can
+  therefore still prove the final response's exact process ancestry while it
+  is being delivered.
+- No-reload installation now verifies the currently loaded historical
+  LaunchAgent as well as its on-disk plist. A deleted or moved plist can no
+  longer let a disposable worktree redirect live hooks and the public `sab`
+  executable.
+- The event-proxy shutdown regression no longer misses an already-observed
+  child exit on faster Node runtimes.
+
 ## [2.1.0-rc.9] — 2026-09-07
 
 ### Added

@@ -202,9 +202,13 @@ updates once, and every stopped session resumes even when the update check
 fails. Each exact native session is reserved synchronously before the first
 Slack notice or other await; duplicate updates are rejected and incoming prompts
 during this bounded relaunch are held in the existing per-session queue. A
-rebind releases only that immutable reservation and cannot stop or resume the
-replacement. Standby, provisional, stale, dormant, and rebound records are never
-bulk-restarted.
+verified in-place native identity replacement carries that queue and both
+maintenance fences to the new identity. Replacement startup keeps direct input
+closed while Slack metadata is refreshed and until every queued prompt,
+including prompts arriving during the drain, reaches the exact replacement
+input surface in order. A stale reservation still cannot stop or resume an
+unrelated replacement. Standby, provisional, stale, dormant, and rebound
+records are never bulk-restarted.
 
 The only exception is a provider-local trust surface that cannot be decided
 remotely. The bridge opens the provisional target's terminal automatically and
@@ -416,7 +420,9 @@ Server source order across loopback retries, so a later final cannot overtake
 an earlier response. On proxy shutdown, commentary backoff is curtailed and
 the accepted delivery tail is drained for up to 30 seconds, ensuring a stable
 fallback final gets its bounded local retry opportunity before the sidecar
-exits. Before applying the exact-process fence, the daemon
+exits. The runner keeps the correlated App Server alive until that drain
+finishes so the daemon can still prove the delivery's process ancestry. Before
+applying the exact-process fence, the daemon
 canonicalizes npm's persistent App Server launcher to its direct matching
 native child—the identity emitted by lifecycle hooks—and then revalidates that
 child against the exact tmux. If either sidecar cannot start, the runner falls
@@ -562,10 +568,11 @@ correlated process/tmux, and optionally archives only that immutable channel.
 `si.sergej.claudeslackproxy` LaunchAgent label. It installs only the `sab`
 symlink and removes old launcher symlinks. Existing `CCS_*`,
 `~/.config/ccs`, old checkout paths, control channels, state records, and local
-port remain compatible. A no-reload staged activation reads the installed
-LaunchAgent working directory and refuses a different checkout before any
-mutation, so development worktrees cannot replace live hooks or the public
-executable.
+port remain compatible. A no-reload staged activation checks both the loaded
+LaunchAgent job and its installed plist working directory, then refuses a
+different or unverifiable checkout before any mutation. This remains effective
+when the plist was moved or deleted while launchd retained the job, so
+development worktrees cannot replace live hooks or the public executable.
 
 Self-update and release rollout must occur from a clean release commit during a
 maintenance window. The prior tag and config backup remain available until

@@ -63,6 +63,9 @@ loopback event proxy mirrors completed semantic commentary and uses a completed
 App Server turn as an exact final-answer fallback when Codex omits its Stop
 hook. It excludes commands, output, diffs, plans, reasoning, and deltas; Stop
 and App Server completion share a durable turn-level deduplication claim.
+The Codex runner keeps the correlated App Server alive through the proxy's
+bounded shutdown drain so a closing TUI cannot invalidate the final's ancestry
+proof before delivery.
 If Codex rejects a submitted turn because its selected model is at capacity,
 SAB replaces the working timer with that actionable failure instead of leaving
 the channel apparently busy. The detector requires the exact current TUI
@@ -295,6 +298,9 @@ every skip or failure.
 Each represented provider CLI is updated once; every eligible native session is
 then resumed with its existing cwd, identity, account, model, effort, and launch
 flags. Messages arriving during the relaunch are queued for that same session.
+If the provider replaces its native identity during maintenance, the queue and
+restart fences follow only that verified in-place rebind. Direct input reopens
+only after all queued prompts, including later arrivals, are submitted in order.
 An idle Codex resume may not emit `SessionStart`; after a bounded hook grace
 period, every update, settings change, and ordinary Slack wake recovers it only
 by finding the Codex process beneath the exact replacement tmux and validating

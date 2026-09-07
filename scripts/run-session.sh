@@ -111,8 +111,12 @@ run_codex() {
     status=$?
     trap - EXIT HUP INT TERM
     if [ -n "$proxy_pid" ] && kill -0 "$proxy_pid" 2>/dev/null; then kill "$proxy_pid" 2>/dev/null || true; fi
-    if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then kill "$app_pid" 2>/dev/null || true; fi
+    # The proxy owns the stable commentary/final delivery queue. Let its bounded
+    # shutdown drain finish while the correlated App Server process is still
+    # alive, otherwise the daemon's exact-process ancestry check rejects the
+    # final response which the proxy is trying to flush.
     if [ -n "$proxy_pid" ]; then wait "$proxy_pid" 2>/dev/null || true; fi
+    if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then kill "$app_pid" 2>/dev/null || true; fi
     if [ -n "$app_pid" ]; then wait "$app_pid" 2>/dev/null || true; fi
     rm -f "$app_log" "$proxy_log"
     rmdir "$runtime_dir" 2>/dev/null || true

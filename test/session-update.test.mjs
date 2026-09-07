@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  bulkUpdateBlockReason, planBulkSessionUpdate, runBulkSessionUpdate,
+  bulkUpdateBlockReason, drainSessionInputQueue, planBulkSessionUpdate,
+  rebindSessionRuntimeState, runBulkSessionUpdate,
 } from '../daemon/session-update.mjs'
 
 function stateFixture() {
@@ -88,4 +89,99 @@ test('a stop failure affects only that exact session', async () => {
   assert.deepEqual(result.results.map(item => [item.session.id, item.status, item.phase]), [
     ['one', 'failed', 'stop'], ['two', 'resumed', undefined],
   ])
+})
+
+test('native session replacement carries maintenance input and fences to the new identity', () => {
+  const pending = new Map([
+    ['old-session', ['first', 'second']],
+    ['new-session', ['already-new']],
+  ])
+  const updating = new Set(['old-session'])
+  const restarting = new Set(['old-session'])
+  const waking = new Map([['old-session', 1234]])
+
+  rebindSessionRuntimeState('old-session', 'new-session', {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    restartingSessionIds: restarting,
+    wakingSessions: waking,
+  })
+
+  assert.deepEqual(pending.get('new-session'), ['first', 'second', 'already-new'])
+  assert.equal(pending.has('old-session'), false)
+  for (const collection of [updating, restarting]) {
+    assert.equal(collection.has('old-session'), false)
+    assert.equal(collection.has('new-session'), true)
+  }
+  assert.equal(waking.has('old-session'), false)
+  assert.equal(waking.get('new-session'), 1234)
+})
+
+test('session-start input drain preserves arrival order and releases maintenance only after delivery', async () => {
+  const session = { id: 'old-session' }
+  const pending = new Map([['old-session', ['first']]])
+  const updating = new Set(['old-session'])
+  const restarting = new Set(['old-session'])
+  const waking = new Map([['old-session', 1234]])
+  const draining = new Set()
+  const delivered = []
+  let releaseFirst
+  const firstBlocked = new Promise(resolve => { releaseFirst = resolve })
+  let firstStarted
+  const sawFirst = new Promise(resolve => { firstStarted = resolve })
+
+  const drain = drainSessionInputQueue(() => session.id, {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    drainingSessionIds: draining,
+    deliver: async item => {
+      delivered.push(item)
+      if (item === 'first') {
+        firstStarted()
+        await firstBlocked
+      }
+    },
+  })
+
+  await sawFirst
+  assert.equal(draining.has('old-session'), true)
+  assert.equal(updating.has('old-session'), true)
+  rebindSessionRuntimeState('old-session', 'new-session', {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    restartingSessionIds: restarting,
+    wakingSessions: waking,
+  })
+  session.id = 'new-session'
+  pending.set('new-session', [...(pending.get('new-session') || []), 'second'])
+  releaseFirst()
+  await drain
+
+  assert.deepEqual(delivered, ['first', 'second'])
+  assert.equal(pending.has('old-session'), false)
+  assert.equal(pending.has('new-session'), false)
+  assert.equal(draining.has('old-session'), false)
+  assert.equal(draining.has('new-session'), false)
+  assert.equal(updating.has('old-session'), false)
+  assert.equal(updating.has('new-session'), false)
+})
+
+test('failed session input delivery restores the undelivered item ahead of later arrivals', async () => {
+  const pending = new Map([['session', ['first']]])
+  const updating = new Set(['session'])
+  const draining = new Set()
+
+  await assert.rejects(drainSessionInputQueue('session', {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    drainingSessionIds: draining,
+    deliver: async () => {
+      pending.set('session', [...(pending.get('session') || []), 'second'])
+      throw new Error('input unavailable')
+    },
+  }), /input unavailable/)
+
+  assert.deepEqual(pending.get('session'), ['first', 'second'])
+  assert.equal(updating.has('session'), true)
+  assert.equal(draining.has('session'), false)
 })
