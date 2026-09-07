@@ -316,8 +316,15 @@ export function codexStatusRecoveryDecision(session, pane) {
   if (targetStartupState('codex', pane) === 'ready') return 'clear'
   if (session?.codexTurnStartedAt) return 'resume'
   // An explicit interrupt hint is the only safe way to revive a legacy turn
-  // whose timestamp was lost. Generic startup/trust screens are not work.
-  return /(?:esc|ctrl-c|f12) to interrupt/i.test(stripTerminalControls(pane)) ? 'resume' : 'clear'
+  // whose timestamp was lost. A rendered Working footer is equally strong:
+  // Codex only shows it while a turn is executing. Generic startup/trust
+  // screens are not work.
+  const visible = stripTerminalControls(pane)
+  const tail = visible.split('\n').slice(-16)
+  const tailText = tail.join('\n')
+  return /(?:esc|ctrl-c|f12) to interrupt/i.test(tailText) ||
+    tail.some(line => /\bWorking\b.*\(\s*\d+(?:h|m|s)\b/i.test(line))
+    ? 'resume' : 'clear'
 }
 
 // Codex normally emits Stop when a turn finishes, but an operator interrupt can

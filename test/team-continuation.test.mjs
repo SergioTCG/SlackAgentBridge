@@ -208,6 +208,16 @@ test('hookless resumed worker releases stale owner busy state and claims only th
   assert.equal(worker.teamActiveTaskId, fresh.id)
 })
 
+test('idle observation can opt into an exact provider-only or delegated fence', () => {
+  const provider = { id: 'provider', pid: 12, tmux: 'sab-provider', codexTurnStartedAt: 1000 }
+  assert.equal(observeIdleCodexTurn(provider, { ready: true, now: 20_000, allowProviderTurn: true }).action, 'confirm')
+  const worker = { ...provider, teamActiveTaskId: 'task_1' }
+  assert.equal(observeIdleCodexTurn(worker, {
+    ready: true, now: 20_000, allowProviderTurn: true, allowDelegatedTask: true,
+  }).action, 'confirm')
+  assert.equal(observeIdleCodexTurn(worker, { ready: true, now: 20_000 }).action, 'reset')
+})
+
 test('coordinator wait notices are delayed, deduplicated, and clearable', () => {
   const team = { id: 'team_1' }
   setContinuationMode(team, 'auto-until-blocked', { now: 1000 })

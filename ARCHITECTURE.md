@@ -380,9 +380,10 @@ sessions default to Codex's canonical dangerous flag (`--yolo`). Requested
 model/effort are durable launch intent, distinct from the actual model reported
 by Codex. A capacity fallback may update the actual model shown in the topic,
 but it cannot overwrite the requested model used on the next resume; a mismatch
-is reported visibly in the session channel. A stable footer change observed on
-an idle, authoritative TUI is an explicit native operator selection and becomes
-the new durable resume intent. Claude and Pi similarly rebuild resume arguments
+is reported visibly in the session channel. A footer becomes the new durable
+resume intent only when the idle, authoritative TUI also renders Codex's
+explicit `Model changed to …` confirmation; a plain footer mismatch is never
+treated as operator intent because it may be a capacity fallback. Claude and Pi similarly rebuild resume arguments
 from their latest known native model and effort, stripping stale original
 model/effort flags first.
 
@@ -405,11 +406,19 @@ or writable tools.
 Hooks start provider-specific live pollers. The daemon stores restart metadata
 needed to recover an in-progress turn, finds the frozen Slack status message on
 boot, re-adopts it, and continues the original elapsed duration. New channel
-content re-anchors the status as the latest item without resetting it.
+content re-anchors the status as the latest item without resetting it. All
+status mutations pass through one workspace-wide, rate-safe queue; superseded
+timer edits are coalesced before Slack I/O so they cannot starve final or
+ordinary messages.
 
 Final text comes only from provider-stable sources. Claude reads completed
 transcript records, Codex uses the Stop hook's final field, and Pi uses its
-extension event. Deduplication fences hook retries and restart races.
+extension event. Codex turns that omit `UserPromptSubmit` are tracked from the
+successful bridge injection, and a rendered `Working (...)` footer allows
+restart re-adoption when the timestamp was lost. Two unchanged idle-surface
+observations can release an owner turn; for a delegated task they fail only
+that exact journal entry and never fabricate or replay a final. Deduplication
+fences hook retries and restart races.
 
 ## Provider switching
 

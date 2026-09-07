@@ -510,6 +510,13 @@ async function updateTopic(session) {
 // bump posts the current text at the bottom, then removes the superseded copy.
 const liveStatuses = createStatusMessages(web, {
   log,
+  // Slack applies chat.update limits across the workspace. Status pollers run
+  // independently for every provider session, so serialize their mutations
+  // through one conservative workspace-wide budget. The status module drops
+  // superseded edits before this queue, keeping long-running sessions bounded.
+  // Keep comfortably below Slack's chat.update tier even when several
+  // non-status updates share the workspace budget.
+  minIntervalMs: 3000,
   postMessage: (channel, text) => enqueue(channel, () => web.chat.postMessage({ channel, text })),
 })
 const setStatus = (session, text) => liveStatuses.set(session, text)
@@ -690,20 +697,24 @@ async function reconcileCodexFooter(session, pane = null) {
   if (!session?.channel || providerOf(session) !== 'codex' ||
       state.channels[session.channel] !== session.id || !(session.pid && pidAlive(session.pid)) || !session.tmux) return false
   const footer = codexFooterSettings(pane ?? await tmuxCapture(session.tmux))
-  if (!footer || (session.model === footer.model && session.effort === footer.effort)) return false
+  if (!footer) return false
   const operatorChangedWhileIdle = shouldPromoteCodexFooter({
     turnStartedAt: session.codexTurnStartedAt,
     pollerActive: codexPollers.has(session.id),
     restarting: restarting.has(session.id),
     updating: updatingSessions.has(session.id),
+    explicitChange: footer.explicitChange,
   })
+  const actualUnchanged = session.model === footer.model && session.effort === footer.effort
+  const intentUnchanged = session.requestedModel === footer.model && session.requestedEffort === footer.effort
+  if (actualUnchanged && (!operatorChangedWhileIdle || intentUnchanged)) return false
   session.model = footer.model
   session.effort = footer.effort
   if (operatorChangedWhileIdle) {
-    // The only supported native interactive settings change happens at the
-    // idle TUI. Promote that explicit choice to durable resume intent. During
-    // an active turn the same mismatch is treated as a provider fallback and
-    // must never overwrite the requested settings.
+    // Promote only Codex's explicit native-picker confirmation to durable
+    // resume intent. A plain footer mismatch can be a capacity fallback and
+    // must never overwrite the requested settings (or become permanent on
+    // the next /sab-update).
     session.requestedModel = footer.model
     session.requestedEffort = footer.effort
   }
@@ -757,10 +768,69 @@ function startCodexPoller(session) {
         return
       }
       const idleDecision = observeIdleCodexTurn(session, {
-        ready: targetStartupState('codex', pane) === 'ready',
+        // A pending approval is an active provider turn even if the TUI has
+        // already painted its input footer. Leave the permission relay in
+        // control until Codex emits its lifecycle completion.
+        ready: targetStartupState('codex', pane) === 'ready' && !hasPendingPerm(session),
         previous: p.idleObservation,
+        allowProviderTurn: true,
+        allowDelegatedTask: true,
       })
       p.idleObservation = idleDecision.observation
+      if (idleDecision.action === 'release' && session.teamActiveTaskId) {
+        // A worker can return to the Codex input surface without Stop. Keep the
+        // task journal authoritative: release only the exact live task/session
+        // pair and mark it failed, so the coordinator can continue without
+        // replaying work whose final response was never authenticated.
+        const task = state.teamTasks?.[session.teamActiveTaskId]
+        const expected = {
+          sid: session.id,
+          pid: session.pid,
+          tmux: session.tmux,
+          turn: p.turnStartedAt,
+          taskId: session.teamActiveTaskId,
+        }
+        if (!task || !['dispatching', 'running'].includes(task.status) || task.targetSessionId !== expected.sid ||
+            task.targetChannel !== session.channel || state.channels?.[session.channel] !== expected.sid ||
+            !Number.isFinite(expected.turn) || expected.turn <= 0 || session.codexTurnStartedAt !== expected.turn ||
+            !(expected.pid > 1) || !expected.tmux || state.sessions?.[expected.sid] !== session ||
+            !(await validProviderRootClaim(expected.pid, expected.tmux, 'codex'))) {
+          p.idleObservation = null
+          return
+        }
+        p.stopped = true
+        stopPoller(session)
+        await failTeamTaskForSession(session,
+          'Codex returned to idle without its lifecycle completion hook; SAB released this task without replaying it.')
+        clearTeamInputReservation(session)
+        saveStateNow(state)
+        await clearStatus(session)
+        log('Codex delegated task fallback failed (Stop hook missing)', expected.sid.slice(0, 8), expected.taskId)
+        return
+      }
+      if (idleDecision.action === 'release' && !session.teamActiveTaskId &&
+          !session.teamInputReservation && session.codexTurnStartedAt) {
+        // A restart can lose the Slack/team fence while the exact Codex turn
+        // timestamp survives through re-adoption. Clear that provider-only
+        // turn after two identical ready observations so its status cannot
+        // remain stuck forever. A late Stop hook may still deliver its stable
+        // final text; this fallback never fabricates one from terminal output.
+        const expected = { sid: session.id, pid: session.pid, tmux: session.tmux, turn: p.turnStartedAt }
+        if (!Number.isFinite(expected.turn) || expected.turn <= 0 || !(expected.pid > 1) || !expected.tmux ||
+            session.codexTurnStartedAt !== expected.turn || state.sessions?.[expected.sid] !== session ||
+            !session.channel || state.channels?.[session.channel] !== expected.sid ||
+            !(await validProviderRootClaim(expected.pid, expected.tmux, 'codex'))) {
+          p.idleObservation = null
+          return
+        }
+        p.stopped = true
+        stopPoller(session)
+        saveStateNow(state)
+        await clearStatus(session)
+        await post(session.channel,
+          '⚠️ Codex returned to idle without its lifecycle completion hook. SAB cleared the stale working status; the final response was not available from the stable hook.').catch(() => {})
+        return
+      }
       if (idleDecision.action === 'release' && !session.teamActiveTaskId && session.teamInputReservation) {
         // A resumed ordinary owner turn can omit Codex's Stop hook. Never let
         // that stale poller fence a worker forever: require the exact current
@@ -837,6 +907,16 @@ function beginCodexTurn(session) {
   delete session.codexUsageBaseline
   saveState(state)
   startCodexPoller(session)
+}
+
+// Codex occasionally accepts tmux input without emitting UserPromptSubmit.
+// Mark bridge-injected input at the transport boundary so the status poller
+// cannot depend on a provider hook that may never arrive. A later hook remains
+// authoritative and may refresh the timestamp in the normal path.
+function ensureCodexTurnStarted(session) {
+  if (providerOf(session) !== 'codex' || session.codexTurnStartedAt) return false
+  beginCodexTurn(session)
+  return true
 }
 
 const piPollers = new Map()
@@ -1039,7 +1119,7 @@ async function readoptStatus() {
         log('recovered Codex terminal failure', s.id.slice(0, 8), terminalFailure.key)
         continue
       }
-      const recovery = codexStatusRecoveryDecision(s, pane)
+      const recovery = hasPendingPerm(s) ? 'resume' : codexStatusRecoveryDecision(s, pane)
       if (recovery === 'resume') {
         if (!s.codexTurnStartedAt) {
           s.codexTurnStartedAt = recoverCodexTurnStartedAt({
@@ -1290,7 +1370,10 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
           rememberInjected(sid, queuedPromptText(m))
           if (provider === 'pi') {
             if (!injectQueuedPiPrompt(session.pid, m)) log('Pi flush stream unavailable', sid.slice(0, 8))
-          } else await tmuxPaste(tmux, m).catch(e => log('flush paste failed', String(e)))
+          } else {
+            await tmuxPaste(tmux, m).catch(e => log('flush paste failed', String(e)))
+            if (provider === 'codex') ensureCodexTurnStarted(session)
+          }
           await sleep(500)
         }
       }, 2000)
@@ -2865,6 +2948,7 @@ async function injectText(session, text, options = {}) {
     rememberInjected(session.id, delivered)
     try {
       await tmuxPaste(session.tmux, delivered)
+      if (provider === 'codex') ensureCodexTurnStarted(session)
       log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
       return
     } catch (e) {
@@ -2872,6 +2956,7 @@ async function injectText(session, text, options = {}) {
     }
   }
   if (alive && injectToSession(session.pid, delivered)) {
+    if (provider === 'codex') ensureCodexTurnStarted(session)
     log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
     return
   }
@@ -4293,9 +4378,12 @@ async function setCodexSetting(session, name, value) {
   if (name === 'model') session.requestedModel = value
   if (name === 'effort') session.requestedEffort = value
   sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), [name]: value })
+  // Journal the operator's requested settings before any Slack call or
+  // provider teardown. A daemon crash in the restart window must not restore
+  // the previous model/effort on the next resume.
+  saveStateNow(state)
   const alive = session.pid && pidAlive(session.pid)
   if (!alive) {
-    saveState(state)
     return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
   }
   await post(session.channel, `🔧 *Setting ${name}* → \`${value}\`. Restarting Codex and resuming this conversation…`)

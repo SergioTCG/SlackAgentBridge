@@ -36,6 +36,18 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex turns that omit lifecycle hooks no longer lose their bridge status
+  tracking when input was accepted through tmux or a daemon restart. SAB now
+  re-adopts a verified rendered `Working (...)` turn, coalesces and rate-limits
+  workspace-wide status edits, and releases an exact idle owner fence after
+  two confirmations. A delegated task that returns idle without a stable Stop
+  final is failed visibly and released without replay, preserving task and
+  session authority boundaries.
+- Slack responses are no longer starved behind unbounded per-session status
+  updates. Status mutations share one global API queue and drop stale
+  timer edits before Slack I/O, allowing commentary, final messages, and
+  status cleanup to make progress under Slack's workspace-wide limits.
+
 - Hookless Codex worker recovery no longer leaves resumed team workers
   permanently busy after a daemon restart. The exact authoritative worker
   process must show the same idle input surface twice after a grace period
@@ -47,9 +59,9 @@ Notable changes to this project. Format based on
   continuation budget; manual teams, collaborators, unrelated events, and
   eventless retries remain fail-closed.
 - Provider update/restart now resumes Claude, Codex, and Pi with the latest
-  known model and effort. Codex promotes only stable idle-TUI changes to durable
-  intent, so an unexpected active-turn fallback remains visible without
-  replacing the requested settings.
+  known model and effort. Codex promotes only an explicit idle-TUI `Model
+  changed to …` confirmation to durable intent, so an unexpected capacity
+  fallback remains visible without replacing the requested settings.
 
 - Automatic team continuation now wakes for every authenticated worker reply,
   including ordinary progress and dispatch-healing idempotent retries, instead

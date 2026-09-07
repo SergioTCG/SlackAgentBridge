@@ -49,13 +49,40 @@ export function recoverCodexTurnStartedAt({
 export function createStatusMessages(web, {
   log = () => {},
   postMessage = (channel, text) => web.chat.postMessage({ channel, text }),
+  // Slack rate limits chat.update across the workspace, not just per channel.
+  // Keep one bounded FIFO for every status mutation while retaining the
+  // per-session ordering below. Tests and callers may set this to zero.
+  minIntervalMs = 0,
 } = {}) {
   const entries = new Map()
+  const apiQueue = []
+  let apiRunning = false
+  let lastApiAt = 0
+
+  const scheduleApi = (action) => new Promise((resolve, reject) => {
+    apiQueue.push({ action, resolve, reject })
+    if (apiRunning) return
+    apiRunning = true
+    ;(async () => {
+      try {
+        while (apiQueue.length) {
+          const item = apiQueue.shift()
+          const wait = Math.max(0, Number(minIntervalMs) || 0) - (Date.now() - lastApiAt)
+          if (wait > 0) await new Promise(done => setTimeout(done, wait))
+          lastApiAt = Date.now()
+          try { item.resolve(await item.action()) }
+          catch (error) { item.reject(error) }
+        }
+      } finally {
+        apiRunning = false
+      }
+    })()
+  })
 
   const entryFor = sid => {
     let entry = entries.get(sid)
     if (!entry) {
-      entry = { ts: null, text: '', queue: Promise.resolve() }
+      entry = { ts: null, text: '', desiredText: '', queue: Promise.resolve() }
       entries.set(sid, entry)
     }
     return entry
@@ -71,13 +98,19 @@ export function createStatusMessages(web, {
   async function set(session, text) {
     if (!session?.id || !session.channel) return false
     const desiredText = String(text || '')
+    const entry = entryFor(session.id)
+    entry.desiredText = desiredText
     return serialize(session.id, async current => {
+      // The poller can tick faster than Slack's workspace-wide API budget.
+      // Drop superseded edits before they enter the API queue; only the newest
+      // text for this session is ever sent.
+      if (current.desiredText !== desiredText) return true
       current.text = desiredText
       try {
         if (current.ts) {
-          await web.chat.update({ channel: session.channel, ts: current.ts, text: current.text })
+          await scheduleApi(() => web.chat.update({ channel: session.channel, ts: current.ts, text: current.text }))
         } else {
-          const posted = await postMessage(session.channel, current.text)
+          const posted = await scheduleApi(() => postMessage(session.channel, current.text))
           current.ts = posted.ts
         }
         return true
@@ -98,7 +131,7 @@ export function createStatusMessages(web, {
 
       let replacement
       try {
-        replacement = await postMessage(session.channel, current.text)
+        replacement = await scheduleApi(() => postMessage(session.channel, current.text))
         if (!replacement?.ts) throw new Error('Slack did not return a status timestamp')
       } catch (error) {
         log('bumpStatus post error:', error?.data?.error || String(error))
@@ -106,12 +139,12 @@ export function createStatusMessages(web, {
       }
 
       try {
-        await web.chat.delete({ channel: session.channel, ts: oldTs })
+        await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: oldTs }))
       } catch (error) {
         if (error?.data?.error !== 'message_not_found') {
           // Keep the old authoritative status if replacement could not be made
           // atomic. Best-effort cleanup avoids leaving two live status lines.
-          try { await web.chat.delete({ channel: session.channel, ts: replacement.ts }) } catch {}
+          try { await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts })) } catch {}
           log('bumpStatus delete error:', error?.data?.error || String(error))
           return false
         }
@@ -128,7 +161,7 @@ export function createStatusMessages(web, {
       current.ts = null
       current.text = ''
       if (!session.channel || !ts) return false
-      try { await web.chat.delete({ channel: session.channel, ts }) } catch {}
+      try { await scheduleApi(() => web.chat.delete({ channel: session.channel, ts })) } catch {}
       return true
     })
   }

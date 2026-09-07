@@ -124,6 +124,31 @@ test('clear followed immediately by a new turn preserves the new status text', a
   assert.equal(slack.calls.at(-1)[1].text, 'new turn')
 })
 
+test('status edits coalesce while a workspace-wide Slack budget is occupied', async () => {
+  const slack = fakeSlack()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  let updates = 0
+  const originalUpdate = slack.web.chat.update
+  slack.web.chat.update = async args => {
+    updates++
+    if (updates === 1) { startedResolve(); await gate }
+    return originalUpdate(args)
+  }
+  const status = createStatusMessages(slack.web)
+  const session = { id: 'S1', channel: 'C1' }
+  await status.set(session, 'working 1s')
+  const pending = status.set(session, 'working 2s')
+  await started
+  const newer = Promise.all([status.set(session, 'working 3s'), status.set(session, 'working 4s')])
+  release()
+  await Promise.all([pending, newer])
+  assert.equal(updates, 2)
+  assert.equal(slack.calls.at(-1)[1].text, 'working 4s')
+})
+
 test('daemon re-anchors status after posts, topic changes, and channel messages', () => {
   assert.match(daemon, /async function postSlackMessage[\s\S]*bumpStatusForChannel\(channel, result\?\.ts\)/)
   assert.match(daemon, /const changed = await syncTopic[\s\S]*if \(changed\) await bumpStatus/)

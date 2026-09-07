@@ -67,14 +67,19 @@ the channel apparently busy. The detector requires the exact current TUI
 warning on a stable idle input surface and ignores stale terminal scrollback.
 If Codex starts a fallback model during a turn, SAB shows the actual model and
 posts a warning while retaining the requested model/effort for the next
-restart. A model/effort change made explicitly at the idle native TUI becomes
-the new durable selection. Claude and Pi likewise resume with their latest
-known native model/effort rather than their original launch values.
-If a resumed Codex owner turn omits its `Stop` hook, SAB also applies the
-bounded idle-surface fallback to ordinary team workers: two unchanged idle
-observations after the grace period clear only the stale owner fences and wake
-queued-task reconciliation. Delegated task claims, replacement sessions, and
-historical failed tasks are never released or replayed by this fallback.
+restart. A native Codex change becomes the new durable selection only when the
+idle TUI renders its explicit `Model changed to …` confirmation; a plain footer
+mismatch is treated as a possible capacity fallback and never changes the next
+resume. Claude and Pi likewise resume with their latest known native
+model/effort rather than their original launch values.
+If Codex omits `UserPromptSubmit`, SAB starts tracking a bridge-injected turn at
+the tmux boundary. If a resumed turn omits its `Stop` hook, two unchanged idle
+observations after the grace period clear only the exact provider/task fences.
+An owner turn is released for normal input; a delegated task is marked failed
+and released without replay, because the stable final response was not
+authenticated. Replacement sessions and historical failed tasks are never
+mutated. Status edits share a workspace-wide rate-safe, coalescing queue so a
+long-running timer cannot starve ordinary Slack responses.
 Claude `AskUserQuestion` forms use their structured hook payload, so Slack keeps
 the question header, prompt, recommendation, option descriptions, and previews
 separate from concise answer buttons. A bounded terminal parser remains only as

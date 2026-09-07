@@ -127,11 +127,20 @@ const parsedTimestamp = value => {
 export function observeIdleCodexTurn(session, {
   ready = false,
   previous = null,
+  // A provider turn may outlive its Slack/team fences after a daemon restart.
+  // Callers that already possess the exact Codex turn timestamp may observe
+  // that provider-only fence; team reconciliation keeps the stricter default.
+  allowProviderTurn = false,
+  // A delegated worker task is handled by the caller after a stable idle
+  // observation so it can fail that exact journal entry and release the worker
+  // without replaying it or fabricating a final answer.
+  allowDelegatedTask = false,
   now = Date.now(),
   graceMs = TEAM_CONTINUATION_IDLE_GRACE_MS,
   confirmations = TEAM_CONTINUATION_IDLE_CONFIRMATIONS,
 } = {}) {
-  if (!ready || session?.teamActiveTaskId || (!session?.teamTurn && !session?.teamInputReservation)) {
+  if (!ready || (session?.teamActiveTaskId && !allowDelegatedTask) || (!session?.teamTurn && !session?.teamInputReservation &&
+      !(allowProviderTurn && session?.codexTurnStartedAt))) {
     return { action: 'reset', observation: null }
   }
   const timestamps = [

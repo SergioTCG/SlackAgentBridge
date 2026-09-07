@@ -255,11 +255,14 @@ test('Codex status recovery clears an orphaned turn once the TUI is idle', () =>
   const working = `› queued input\n` +
     `• Waiting for background terminal (8s · f12 to interrupt)\n` +
     `  gpt-5.6-sol xhigh · ~/Code/Barrique`
+  const renderedWorkingFooter = `*•* *Working* (8m 1s • esc to interrupt)\n` +
+    `  gpt-5.6-sol xhigh · ~/Code/Barrique`
 
   assert.equal(targetStartupState('codex', working), 'starting')
   assert.equal(codexStatusRecoveryDecision({ codexTurnStartedAt: 100 }, idle), 'clear')
   assert.equal(codexStatusRecoveryDecision({ codexTurnStartedAt: 100 }, working), 'resume')
   assert.equal(codexStatusRecoveryDecision({}, working), 'resume')
+  assert.equal(codexStatusRecoveryDecision({}, renderedWorkingFooter), 'resume')
   assert.equal(codexStatusRecoveryDecision({}, idle), 'clear')
   assert.equal(codexStatusRecoveryDecision({}, 'Starting OpenAI Codex…'), 'clear')
 })

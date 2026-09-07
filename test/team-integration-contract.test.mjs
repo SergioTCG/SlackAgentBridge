@@ -78,6 +78,9 @@ test('automatic continuation recovers a hookless idle Codex coordinator without 
 
 test('hookless resumed Codex workers release stale owner fences before queued dispatch', () => {
   assert.match(daemon, /observeIdleCodexTurn\(session,/)
+  assert.match(daemon, /allowDelegatedTask: true/)
+  assert.match(daemon, /Codex delegated task fallback failed \(Stop hook missing\)/)
+  assert.match(daemon, /released this task without replaying it/)
   assert.match(daemon, /Codex idle fallback released owner turn \(Stop hook missing\)/)
   assert.match(daemon, /state\.sessions\?\.\[expected\.sid\] !== session[\s\S]*state\.channels\?\.\[session\.channel\] !== expected\.sid/)
   assert.match(daemon, /validProviderRootClaim\(expected\.pid, expected\.tmux, 'codex'\)/)

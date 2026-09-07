@@ -221,8 +221,15 @@ accounts, and the Mac user running the daemon.
   Codex worker may clear its bridge-owned busy markers only after two unchanged
   idle-surface observations following the grace period. The fallback proves the
   exact session, channel, PID/tmux ancestry, and turn fingerprint, persists
-  cleanup before waking queued dispatch, and is disabled for delegated tasks;
-  it cannot replay failed work or release a replacement session.
+  cleanup before waking queued dispatch. A delegated task may be failed and
+  released only after the same exact proof, preserving its journal and
+  completion delivery while never replaying work or releasing a replacement
+  session. No fallback path fabricates a provider final response from terminal
+  output.
+- **Rate-safe status delivery:** live status edits use one workspace-wide,
+  bounded queue and discard superseded timer text before Slack I/O. This keeps
+  status churn from exhausting `chat.update` capacity and delaying ordinary
+  replies or final delivery.
 - **Claude resume readiness:** a detached tmux appearing is not enough to revive
   a Claude session. Only the exact `SessionStart` PID/tmux claim makes it active.
   Failed attempts retain only a mode-0600 numeric exit code under the private
