@@ -87,6 +87,25 @@ test('replacement startup drains all queued input before releasing direct delive
   assert.doesNotMatch(start, /updatingSessions\.delete\(sid\)/)
 })
 
+test('the ordered startup drain is the sole consumer of maintenance input', () => {
+  const resurrection = /async function resurrect\([\s\S]*?\n\}\nconst pendingBySid/.exec(daemon)?.[0] || ''
+  assert.doesNotMatch(resurrection, /queued\.shift\(\)/,
+    'Codex resume argv must not consume a queued prompt before lifecycle adoption')
+
+  const piStream = /if \(url\.pathname === '\/pi\/stream'[\s\S]*?\n  \}/.exec(daemon)?.[0] || ''
+  assert.doesNotMatch(piStream, /pendingBySid\.(?:get|set)/,
+    'Pi stream attachment must not bypass the ordered startup drain')
+
+  const claudeStream = /if \(url\.pathname === '\/channel\/stream'\)[\s\S]*?\n  \}/.exec(daemon)?.[0] || ''
+  assert.doesNotMatch(claudeStream, /pendingBySid\.(?:get|set)/,
+    'Claude stream attachment must not bypass the ordered startup drain')
+})
+
+test('session-start metadata failure releases maintenance for an explicit retry', () => {
+  const completion = /async function completeAuthoritativeSessionStart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(completion, /recoverSessionInputFence\(session\.id/)
+})
+
 test('provider maintenance blocks overlapping session mutations but leaves observation available', () => {
   assert.match(daemon, /const MAINTENANCE_SAFE_COMMANDS = new Set\(\['status', 'usage', 'terminal'\]\)/)
   assert.match(daemon, /updatingSessions\.has\(channelSession\.id\)[\s\S]{0,500}MAINTENANCE_SAFE_COMMANDS\.has\(name\)/)

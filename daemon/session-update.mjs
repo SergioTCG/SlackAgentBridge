@@ -79,6 +79,34 @@ export function rebindSessionRuntimeState(fromId, toId, {
   return true
 }
 
+// A retained queue can outlive a failed resurrection. A later owner message is
+// the explicit retry signal only when no process, wake, maintenance operation,
+// or active drain already owns delivery.
+export function shouldRetryDormantSessionWake({
+  pending = false,
+  providerAlive = false,
+  waking = false,
+  updating = false,
+  draining = false,
+} = {}) {
+  return Boolean(pending && !providerAlive && !waking && !updating && !draining)
+}
+
+// Startup metadata is allowed to fail without trapping the session behind a
+// stale maintenance marker. An active drain retains exclusive ownership; a
+// surviving queue remains the direct-input fence but becomes explicitly
+// retryable through /sab-update.
+export function recoverSessionInputFence(sessionId, {
+  pendingBySession,
+  updatingSessionIds,
+  drainingSessionIds,
+} = {}) {
+  if (!sessionId) return 'released'
+  if (drainingSessionIds?.has(sessionId)) return 'draining'
+  updatingSessionIds?.delete(sessionId)
+  return pendingBySession?.get(sessionId)?.length ? 'retry' : 'released'
+}
+
 // Drain until the queue is observably empty. New input can arrive while an
 // earlier paste is awaiting the provider; it remains fenced and is picked up
 // by the next loop iteration instead of overtaking the queued prompt.

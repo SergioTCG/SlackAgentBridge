@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   bulkUpdateBlockReason, drainSessionInputQueue, planBulkSessionUpdate,
-  rebindSessionRuntimeState, runBulkSessionUpdate,
+  rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
+  shouldRetryDormantSessionWake,
 } from '../daemon/session-update.mjs'
 
 function stateFixture() {
@@ -184,4 +185,36 @@ test('failed session input delivery restores the undelivered item ahead of later
   assert.deepEqual(pending.get('session'), ['first', 'second'])
   assert.equal(updating.has('session'), true)
   assert.equal(draining.has('session'), false)
+})
+
+test('pending-only dormant input retries wake without weakening active maintenance fences', () => {
+  assert.equal(shouldRetryDormantSessionWake({ pending: true, providerAlive: false }), true)
+  assert.equal(shouldRetryDormantSessionWake({ pending: true, providerAlive: false, waking: true }), false)
+  assert.equal(shouldRetryDormantSessionWake({ pending: true, providerAlive: false, updating: true }), false)
+  assert.equal(shouldRetryDormantSessionWake({ pending: true, providerAlive: false, draining: true }), false)
+  assert.equal(shouldRetryDormantSessionWake({ pending: true, providerAlive: true }), false)
+  assert.equal(shouldRetryDormantSessionWake({ pending: false, providerAlive: false }), false)
+})
+
+test('startup failure releases a stranded maintenance marker while preserving queued input', () => {
+  const pending = new Map([['session', ['retry me']]])
+  const updating = new Set(['session'])
+  const draining = new Set()
+
+  assert.equal(recoverSessionInputFence('session', {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    drainingSessionIds: draining,
+  }), 'retry')
+  assert.deepEqual(pending.get('session'), ['retry me'])
+  assert.equal(updating.has('session'), false)
+
+  updating.add('session')
+  draining.add('session')
+  assert.equal(recoverSessionInputFence('session', {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    drainingSessionIds: draining,
+  }), 'draining')
+  assert.equal(updating.has('session'), true)
 })

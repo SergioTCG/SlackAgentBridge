@@ -129,6 +129,25 @@ test('provider handoff revokes old session grants without affecting the target',
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
 })
 
+test('verified native replacement rebinds only matching live-session grants', () => {
+  const { temp, workspace } = fixture()
+  try {
+    let n = 0
+    const store = createArtifactGrantStore({ token: () => `grant-${++n}` })
+    const moved = store.issue(grantFields(workspace, { sessionId: 'old', channelId: 'C1', provider: 'codex' }))
+    const otherChannel = store.issue(grantFields(workspace, { sessionId: 'old', channelId: 'C2', provider: 'codex' }))
+    const otherProvider = store.issue(grantFields(workspace, { sessionId: 'old', channelId: 'C1', provider: 'claude' }))
+
+    assert.equal(store.rebind({
+      fromSessionId: 'old', toSessionId: 'new', channelId: 'C1', provider: 'codex',
+    }), 1)
+    assert.throws(() => store.claim(moved.token, { sessionId: 'old', channelId: 'C1', provider: 'codex' }), /invalid/)
+    assert.equal(store.claim(moved.token, { sessionId: 'new', channelId: 'C1', provider: 'codex' }).sessionId, 'new')
+    assert.equal(store.claim(otherChannel.token, { sessionId: 'old', channelId: 'C2', provider: 'codex' }).channelId, 'C2')
+    assert.equal(store.claim(otherProvider.token, { sessionId: 'old', channelId: 'C1', provider: 'claude' }).provider, 'claude')
+  } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+})
+
 test('an in-flight grant cannot be used concurrently', async () => {
   const { temp, workspace } = fixture()
   try {

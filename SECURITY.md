@@ -176,6 +176,9 @@ accounts, and the Mac user running the daemon.
   every already accepted stable final a bounded drain before the proxy exits;
   the correlated App Server stays alive until that drain completes so ancestry
   proof remains possible. Drain exhaustion is explicit rather than silent.
+  The runner propagates that exhaustion as a nonzero failure and prints only a
+  bounded proxy diagnostic; it never claims clean delivery after losing its
+  final retry path.
   Private transition finals resolve only their exact waiter and never enter
   Slack.
 - **Explicit Pi extension loading:** the bridge extension is loaded by
@@ -216,9 +219,10 @@ accounts, and the Mac user running the daemon.
 - **Live-checkout staging fence:** no-reload provider activation compares its
   checkout with both the loaded historical LaunchAgent job and the on-disk
   plist before any mutation. Missing, moved, malformed, or contradictory
-  service metadata fails closed; a development worktree cannot silently
-  replace provider hooks, configuration, Git state, or the public executable
-  used by the live daemon.
+  service metadata fails closed; the check runs before even clone or pull in a
+  piped install, so a development worktree cannot silently replace provider
+  hooks, configuration, Git state, or the public executable used by the live
+  daemon.
 - **Fail-closed session sweeps:** `/sab-update all` operates only on exact
   authoritative live mappings and skips interactive, transitional, managed,
   automation-owned, delegated-team, waking, or restarting sessions. It never touches dormant
@@ -242,8 +246,11 @@ accounts, and the Mac user running the daemon.
   reserved, overlapping lifecycle or setting mutations are rejected while owner
   prompts queue and status, usage, and terminal-view operations remain available.
   A verified native identity replacement carries the queue and fences forward;
-  direct input remains closed until all queued prompts have reached the exact
-  replacement input surface in arrival order.
+  exact-bound artifact grants follow only that provider/channel replacement.
+  Direct input remains closed until one shared ordered drain has delivered all
+  queued prompts in arrival order; launch arguments and reconnecting streams
+  are never independent queue consumers. Startup failures preserve the queue,
+  release only stale maintenance ownership, and expose an exact-session retry.
 - **Owner-private App Home:** `app_home_opened` may arrive for any workspace
   user, but only the configured owner receives bridge/session metadata or
   actions. Other users receive a static restricted view. Owner actions reuse

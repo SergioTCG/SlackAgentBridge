@@ -236,6 +236,50 @@ exit 1
   }
 })
 
+test('piped staged activation checks the loaded target before any clone or pull', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-piped-preflight-'))
+  try {
+    const scriptDir = path.join(temp, 'download')
+    const destination = path.join(temp, 'staged-destination')
+    const liveBridge = path.join(temp, 'live-bridge')
+    const fakeBin = path.join(temp, 'fake-bin')
+    const gitMarker = path.join(temp, 'git-was-called')
+    fs.mkdirSync(scriptDir, { recursive: true })
+    fs.mkdirSync(liveBridge, { recursive: true })
+    fs.mkdirSync(fakeBin, { recursive: true })
+    const downloaded = path.join(scriptDir, 'install.sh')
+    fs.copyFileSync(new URL('../install.sh', import.meta.url), downloaded)
+    fs.writeFileSync(path.join(fakeBin, 'launchctl'), `#!/bin/sh
+if [ "$1" = print ]; then
+  printf '%s\n' 'working directory = ${liveBridge}'
+  printf '%s\n' 'pid = 4242'
+  exit 0
+fi
+exit 1
+`, { mode: 0o755 })
+    fs.writeFileSync(path.join(fakeBin, 'git'), `#!/bin/sh
+printf called > '${gitMarker}'
+exit 99
+`, { mode: 0o755 })
+
+    const run = spawnSync('bash', [downloaded, '--provider', 'codex', '--no-daemon-reload'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: temp,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        CCS_HOME: destination,
+      },
+    })
+    assert.notEqual(run.status, 0)
+    assert.match(`${run.stdout}\n${run.stderr}`, /loaded service|live installation/i)
+    assert.equal(fs.existsSync(gitMarker), false, 'target verification must precede every Git mutation')
+    assert.equal(fs.existsSync(destination), false)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('provider hook installation is idempotent and no-restart is isolated', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-install-'))
   try {

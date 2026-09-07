@@ -6,6 +6,29 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.11] — 2026-09-07
+
+### Fixed
+
+- Provider maintenance now has one ordered input consumer across launch,
+  lifecycle adoption, and provider stream attachment. Codex no longer removes
+  the first prompt into its resume command, and Claude/Pi reconnects cannot
+  overtake an earlier queued prompt. Failed delivery restores the exact item
+  and its deduplication claim for an explicit retry.
+- A failed dormant wake or SessionStart metadata call no longer leaves queued
+  owner input behind a permanent maintenance fence. The queue remains intact,
+  a later owner message retries a genuinely dormant session, and Slack reports
+  the exact-session `/sab-update` recovery path.
+- Artifact grants carried by queued prompts now follow only a verified
+  same-provider, same-channel native session replacement. Unrelated grants and
+  provider handoffs remain isolated or revoked.
+- Piped no-reload installation verifies the loaded LaunchAgent target before
+  clone, pull, hook, configuration, or executable changes. A mismatched live
+  checkout therefore fails without touching Git.
+- Codex runner shutdown now propagates an exhausted commentary/final drain as
+  a visible nonzero failure and includes the bounded proxy diagnostic instead
+  of silently presenting the TUI exit as successful.
+
 ## [2.1.0-rc.10] — 2026-09-07
 
 ### Fixed

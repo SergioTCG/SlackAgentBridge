@@ -39,6 +39,8 @@
       LaunchAgent.
 - [ ] A no-reload installer invoked from a different worktree fails before
       changing provider hooks, configuration, Git state, or the `sab` link.
+- [ ] A piped no-reload installer with a mismatched loaded target fails before
+      invoking clone, pull, or any other Git operation.
 - [ ] The same no-reload fence rejects a differently rooted loaded LaunchAgent
       when its plist is missing, and allows a genuinely unloaded fresh install.
 - [ ] Only `sab` is linked on `PATH`; legacy symlinks are removed.
@@ -72,6 +74,8 @@
 - [ ] Closing Codex while commentary delivery is backing off still drains its
       accepted App Server fallback final before the proxy exits, while the
       correlated App Server remains alive for daemon ancestry validation.
+- [ ] Exhausting that bounded Codex shutdown drain produces a visible nonzero
+      runner failure with a bounded diagnostic rather than silent success.
 - [ ] New sessions are headless; Slack interaction works with no Ghostty window.
 - [ ] `/sab-terminal open` opens or focuses one exact session, `close` detaches
       without stopping it, and a Slack prompt continues afterward.
@@ -108,7 +112,12 @@
       stale mapping.
 - [ ] A maintenance-time native `/clear` carries queued prompts and fences to
       the replacement ID; a second prompt arriving during the first paste stays
-      behind it, and direct input opens only after both are submitted once.
+      behind it, exact artifact grants follow only that verified replacement,
+      and direct input opens only after both are submitted once. Confirm resume
+      argv and provider-stream reconnects cannot consume the queue separately.
+- [ ] A failed wake or SessionStart metadata operation preserves queued input,
+      clears stale maintenance ownership, reports `/sab-update`, and a later
+      owner message retries a truly dormant session without duplication.
 - [ ] `/sab-account` works only for Claude and `/sab-run` only for Pi.
 - [ ] Claude/Codex permission relay and Pi safe-mode/project-trust decisions work.
 - [ ] Pi image input, adaptive routing, plan/approve, pause/resume, all budgets,

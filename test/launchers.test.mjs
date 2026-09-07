@@ -199,6 +199,38 @@ while :; do sleep 1; done
   }
 })
 
+test('Codex runner surfaces and propagates an exhausted proxy shutdown drain', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-drain-failure-'))
+  try {
+    fs.writeFileSync(path.join(temp, 'codex'), `#!/bin/bash
+if [ "$1" = app-server ]; then
+  printf '%s\n' 'listening on: ws://127.0.0.1:45678'
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
+exit 0
+`, { mode: 0o755 })
+    fs.writeFileSync(path.join(temp, 'node'), `#!/bin/bash
+printf '%s\n' 'listening on: ws://127.0.0.1:45679'
+trap 'printf "%s\\n" "sab Codex event proxy: shutdown drain timed out; stable final was not delivered" >&2; exit 1' TERM INT
+while :; do sleep 1; done
+`, { mode: 0o755 })
+
+    const run = spawnSync(sab, ['__run', 'codex'], {
+      encoding: 'utf8', timeout: 10000,
+      env: {
+        ...process.env, PATH: `${temp}:${process.env.PATH}`, TMPDIR: temp,
+        TMUX: 'test-client', CCS_TMUX: 'sab-drain-failure',
+      },
+    })
+    assert.notEqual(run.status, 0)
+    assert.match(run.stderr, /shutdown drain timed out; stable final was not delivered/)
+    assert.match(run.stderr, /Codex response delivery did not drain/)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('Codex runner inserts the transparent event proxy without changing user flags', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-proxy-'))
   try {

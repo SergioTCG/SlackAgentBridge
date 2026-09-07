@@ -300,7 +300,12 @@ then resumed with its existing cwd, identity, account, model, effort, and launch
 flags. Messages arriving during the relaunch are queued for that same session.
 If the provider replaces its native identity during maintenance, the queue and
 restart fences follow only that verified in-place rebind. Direct input reopens
-only after all queued prompts, including later arrivals, are submitted in order.
+only after the shared ordered drain submits all queued prompts, including later
+arrivals. Launch arguments and reconnecting provider streams never consume that
+queue independently. A failed wake or startup-metadata call preserves the
+queue, reports the exact recovery action, and allows a later owner message to
+retry a genuinely dormant session. One-use artifact grants embedded in those
+prompts follow only the verified same-provider/channel native replacement.
 An idle Codex resume may not emit `SessionStart`; after a bounded hook grace
 period, every update, settings change, and ordinary Slack wake recovers it only
 by finding the Codex process beneath the exact replacement tmux and validating

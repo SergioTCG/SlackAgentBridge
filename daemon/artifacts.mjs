@@ -153,7 +153,23 @@ export function createArtifactGrantStore({
     return removed
   }
 
-  return { issue, claim, finish, revoke, prune, size: () => grants.size }
+  // Native `/clear` or a provider-owned replacement can change the session ID
+  // without changing the verified provider/tmux/channel execution boundary.
+  // Preserve already-issued one-use tokens for prompts which were queued across
+  // that replacement, but touch no grant outside the exact old binding.
+  function rebind({ fromSessionId, toSessionId, channelId, provider } = {}) {
+    prune()
+    if (!fromSessionId || !toSessionId || fromSessionId === toSessionId || !channelId || !provider) return 0
+    let moved = 0
+    for (const grant of grants.values()) {
+      if (grant.sessionId !== fromSessionId || grant.channelId !== channelId || grant.provider !== provider) continue
+      grant.sessionId = toSessionId
+      moved++
+    }
+    return moved
+  }
+
+  return { issue, claim, finish, revoke, rebind, prune, size: () => grants.size }
 }
 
 export async function fulfillArtifactUpload(store, { token, binding, paths }, uploader) {

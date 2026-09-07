@@ -107,7 +107,8 @@ import { readNodeListenerConfiguration } from './node-runtime.mjs'
 import { createCoordinatorNodeTransport, listenForNodeConnections } from './node-transport.mjs'
 import {
   bulkUpdateBlockReason, drainSessionInputQueue, planBulkSessionUpdate,
-  rebindSessionRuntimeState, runBulkSessionUpdate,
+  rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
+  shouldRetryDormantSessionWake,
 } from './session-update.mjs'
 import {
   applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
@@ -249,6 +250,14 @@ function rememberInjected(sid, text) {
   const a = injectedRecently.get(sid) || []
   a.push({ text: text.trim(), at: Date.now() })
   injectedRecently.set(sid, a.slice(-10))
+}
+function forgetInjected(sid, text) {
+  const a = injectedRecently.get(sid) || []
+  const wanted = String(text || '').trim()
+  const index = a.findLastIndex(item => item.text === wanted)
+  if (index >= 0) a.splice(index, 1)
+  if (a.length) injectedRecently.set(sid, a)
+  else injectedRecently.delete(sid)
 }
 function consumeInjected(sid, prompt) {
   const a = injectedRecently.get(sid) || []
@@ -1445,14 +1454,19 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
               const currentSid = session.id
               const prompt = queuedPromptText(m)
               rememberInjected(currentSid, prompt)
-              if (provider === 'pi') {
-                if (!injectQueuedPiPrompt(session.pid, m)) throw new Error('Pi input stream is unavailable')
-              } else {
-                if (session.tmux !== tmux || !(await tmuxAlive(tmux))) {
-                  throw new Error('replacement tmux is no longer authoritative')
+              try {
+                if (provider === 'pi') {
+                  if (!injectQueuedPiPrompt(session.pid, m)) throw new Error('Pi input stream is unavailable')
+                } else {
+                  if (session.tmux !== tmux || !(await tmuxAlive(tmux))) {
+                    throw new Error('replacement tmux is no longer authoritative')
+                  }
+                  await tmuxPaste(tmux, m)
+                  if (provider === 'codex') ensureCodexTurnStarted(session)
                 }
-                await tmuxPaste(tmux, m)
-                if (provider === 'codex') ensureCodexTurnStarted(session)
+              } catch (error) {
+                forgetInjected(currentSid, prompt)
+                throw error
               }
               await sleep(500)
             },
@@ -1462,7 +1476,11 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
           // The surviving queue itself remains an input fence. Release the
           // maintenance marker so the owner can recover by restarting this
           // exact session; ordinary messages continue joining the queue.
-          updatingSessions.delete(session.id)
+          recoverSessionInputFence(session.id, {
+            pendingBySession: pendingBySid,
+            updatingSessionIds: updatingSessions,
+            drainingSessionIds: drainingSessionInput,
+          })
           await post(session.channel,
             '⚠️ The resumed provider did not accept its queued input. The queue remains fenced; retry this exact session with `/sab-update`.').catch(() => {})
         }
@@ -1474,6 +1492,15 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
     return true
   } catch (error) {
     if (completedSessionStartTmux.get(sid) === tmux) completedSessionStartTmux.delete(sid)
+    const recovery = recoverSessionInputFence(session.id, {
+      pendingBySession: pendingBySid,
+      updatingSessionIds: updatingSessions,
+      drainingSessionIds: drainingSessionInput,
+    })
+    if (recovery === 'retry' && session.channel) {
+      await post(session.channel,
+        '⚠️ Session startup metadata could not be completed. Queued input was preserved; retry this exact session with `/sab-update`.').catch(() => {})
+    }
     throw error
   }
 }
@@ -1574,6 +1601,12 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       updatingSessionIds: updatingSessions,
       restartingSessionIds: restarting,
       wakingSessions: resurrectInFlight,
+    })
+    artifactGrants.rebind({
+      fromSessionId: priorSid,
+      toSessionId: sid,
+      channelId: session.channel,
+      provider,
     })
     session.id = sid
     session.offset = 0
@@ -2108,7 +2141,6 @@ async function resurrect(session, text) {
   if (inflight && Date.now() - inflight < 90000) return // already waking; message is queued
   resurrectInFlight.set(session.id, Date.now())
   let up = false
-  let initialPrompt = null
   let lastResumeError = null
   let lastTmuxName = null
   try {
@@ -2130,22 +2162,10 @@ async function resurrect(session, text) {
       }
     }
     await post(session.channel, '⏳ *Waking this session up on the Mac…*')
-    // Codex does not necessarily emit SessionStart while a resumed TUI is idle.
-    // Waiting for that hook before pasting the wake message therefore deadlocks:
-    // local typing starts the first turn, then the hook finally flushes Slack's
-    // queue. Codex resume accepts an optional PROMPT, so consume exactly the
-    // first queued message into argv; it starts the turn and unlocks SessionStart.
-    // Later messages stay queued and are flushed by the existing hook path.
-    if (provider === 'codex') {
-      const queued = pendingBySid.get(session.id) || []
-      initialPrompt = queued.shift() ?? text ?? null
-      pendingBySid.set(session.id, queued)
-      if (initialPrompt) {
-        rememberInjected(session.id, initialPrompt) // suppress the hook echo; Slack already shows it
-        log('codex resume bootstrapped queued prompt', session.id.slice(0, 8))
-      }
-    }
-    const args = resumeArgs(session, initialPrompt)
+    // No provider receives queued input through launch argv. Codex's exact-tmux
+    // hookless adoption makes an idle resume discoverable without starting the
+    // turn, after which the shared ordered drain owns every queued prompt.
+    const args = resumeArgs(session)
     // Start headlessly and verify that the tmux-owned provider materializes.
     for (let attempt = 1; attempt <= 2; attempt++) {
       const tmuxName = `sab-res-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`
@@ -2224,10 +2244,6 @@ async function resurrect(session, text) {
   } finally {
     if (!up) {
       resurrectInFlight.delete(session.id)
-      if (initialPrompt) {
-        const queued = pendingBySid.get(session.id) || []
-        pendingBySid.set(session.id, [initialPrompt, ...queued])
-      }
     }
   }
 }
@@ -2783,11 +2799,12 @@ function scheduleUpdateGuardCleanup(sessionOrId) {
     const sessionId = typeof sessionOrId === 'string' ? sessionOrId : sessionOrId?.id
     if (!sessionId) return
     restarting.delete(sessionId)
-    if (pendingBySid.get(sessionId)?.length || drainingSessionInput.has(sessionId)) {
-      log('retained update guard for undrained input', sessionId.slice(0, 8))
-      return
-    }
-    updatingSessions.delete(sessionId)
+    const recovery = recoverSessionInputFence(sessionId, {
+      pendingBySession: pendingBySid,
+      updatingSessionIds: updatingSessions,
+      drainingSessionIds: drainingSessionInput,
+    })
+    if (recovery !== 'released') log(`${recovery === 'draining' ? 'retained' : 'released'} update guard for undrained input`, sessionId.slice(0, 8))
   }, 60000)
   timer.unref?.()
 }
@@ -3109,16 +3126,29 @@ const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kil
 // fall back to a channel event, and resurrect the session if it's gone.
 async function injectText(session, text, options = {}) {
   const provider = providerOf(session)
-  if (updatingSessions.has(session.id) || drainingSessionInput.has(session.id) || pendingBySid.get(session.id)?.length) {
+  const updating = updatingSessions.has(session.id)
+  const draining = drainingSessionInput.has(session.id)
+  const pending = Boolean(pendingBySid.get(session.id)?.length)
+  const providerAlive = Boolean(session.pid && pidAlive(session.pid))
+  if (updating || draining || pending) {
     const queued = pendingBySid.get(session.id) || []
     const item = provider === 'pi'
       ? piPromptQueueItem(text, options)
       : `${String(text || '')}${String(options.privateContext || '')}`
     pendingBySid.set(session.id, [...queued, item])
-    await post(session.channel, '⏸️ Provider maintenance is in progress — queued this message for the resumed session.')
+    await post(session.channel, updating || draining
+      ? '⏸️ Provider maintenance is in progress — queued this message for the resumed session.'
+      : '⏸️ Earlier input is still queued — added this message behind it and retrying the dormant session when possible.')
+    if (shouldRetryDormantSessionWake({
+      pending: true,
+      providerAlive,
+      waking: resurrectInFlight.has(session.id),
+      updating,
+      draining,
+    })) await resurrect(session)
     return
   }
-  const alive = session.pid && pidAlive(session.pid)
+  const alive = providerAlive
   if (provider === 'pi') {
     const queuedPrompt = piPromptQueueItem(text, options)
     const combined = queuedPromptText(queuedPrompt)
@@ -5989,20 +6019,6 @@ http.createServer(async (req, res) => {
       capabilities: parsePiStreamCapabilities(url.searchParams.get('capabilities')),
     })
     log('Pi extension stream attached pid', pid)
-    if (session) {
-      const queued = pendingBySid.get(session.id) || []
-      if (queued.length) {
-        pendingBySid.set(session.id, [])
-        for (const item of queued) {
-          rememberInjected(session.id, queuedPromptText(item))
-          if (!injectQueuedPiPrompt(pid, item)) {
-            log('Pi reconnect flush failed', session.id.slice(0, 8))
-            pendingBySid.set(session.id, queued.slice(queued.indexOf(item)))
-            break
-          }
-        }
-      }
-    }
     const ka = setInterval(() => { try { res.write(': ka\n\n') } catch {} }, 15000)
     req.on('close', () => { clearInterval(ka); if (streams.get(pid)?.res === res) streams.delete(pid) })
     return
@@ -6094,12 +6110,6 @@ http.createServer(async (req, res) => {
     res.write(': connected\n\n')
     streams.set(pid, { res, provider: 'claude' })
     log('channel attached pid', pid)
-    // attach to a session record and flush any queued messages for its sid
-    const session = sessionByPid(pid)
-    if (session) {
-      const q = pendingBySid.get(session.id)
-      if (q?.length) { for (const m of q) injectToSession(pid, m); pendingBySid.set(session.id, []) }
-    }
     const ka = setInterval(() => { try { res.write(': ka\n\n') } catch {} }, 15000)
     req.on('close', () => { clearInterval(ka); if (streams.get(pid)?.res === res) streams.delete(pid) })
     return
