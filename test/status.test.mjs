@@ -309,6 +309,22 @@ test('status scheduler exposes bounded operational queue depth', async () => {
   assert.deepEqual(status.snapshot(), { active: false, normal: 0, priority: 0, sessions: 1 })
 })
 
+test('clearing a session without a posted status does not consume the workspace API interval', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web, { minIntervalMs: 100 })
+
+  await status.clear({ id: 'EMPTY', channel: 'C0' })
+  const posted = status.set({ id: 'LIVE', channel: 'C1' }, 'working')
+  const outcome = await Promise.race([
+    posted.then(() => 'posted'),
+    new Promise(resolve => setTimeout(() => resolve('delayed'), 20)),
+  ])
+
+  assert.equal(outcome, 'posted')
+  await posted
+  assert.deepEqual(slack.calls.map(call => call[0]), ['post'])
+})
+
 test('bridge health exposes status-queue pressure without provider or Slack secrets', () => {
   const block = /if \(name === 'health'\) \{([\s\S]*?)\n  \}\n  if \(name === 'kill'\)/.exec(daemon)?.[1] || ''
   assert.match(block, /liveStatuses\.snapshot\(\)/)

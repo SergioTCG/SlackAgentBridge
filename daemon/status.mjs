@@ -234,14 +234,16 @@ export function createStatusMessages(web, {
     // `previous` may be a bump between its replacement post and old-message
     // delete, and that second operation needs the same queue. Enqueue the
     // priority clear only after this session's prior mutation has settled.
-    const clearing = previous.then(() => scheduleApi(async () => {
+    const clearing = previous.then(() => {
       const ts = entry.ts
       entry.ts = null
       entry.text = ''
       if (!session.channel || !ts) return false
-      try { await web.chat.delete({ channel: session.channel, ts }) } catch {}
-      return true
-    }, { priority: true }))
+      return scheduleApi(async () => {
+        try { await web.chat.delete({ channel: session.channel, ts }) } catch {}
+        return true
+      }, { priority: true })
+    })
     entry.queue = clearing
     return clearing
   }

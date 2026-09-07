@@ -45,6 +45,28 @@ test('team management actions reject a panel rendered for a replaced team', () =
   assert.match(daemon, /expectedTeamId: parsed\.binding/)
 })
 
+test('session update ownership is reserved before Slack and released by immutable identity', () => {
+  const stop = /async function stopSessionForUpdate\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(stop, /const reservedSessionId = expectedSessionId \|\| session\.id/)
+  assert.ok(stop.indexOf('restarting.add(reservedSessionId)') < stop.indexOf('await post('))
+  assert.ok(stop.indexOf('updatingSessions.add(reservedSessionId)') < stop.indexOf('await post('))
+  assert.match(stop, /restarting\.delete\(reservedSessionId\)/)
+  assert.match(stop, /updatingSessions\.delete\(reservedSessionId\)/)
+
+  const update = /async function updateAndRestart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(update, /const updateSessionId = expectedSessionId \|\| session\.id/)
+  assert.match(update, /restarting\.delete\(updateSessionId\)/)
+  assert.match(update, /updatingSessions\.delete\(updateSessionId\)/)
+})
+
+test('status dashboard binds the pre-await native session identity', () => {
+  const status = /if \(name === 'status'\) \{[\s\S]*?\n  if \(name === 'health'\)/.exec(daemon)?.[0] || ''
+  assert.match(status, /const statusSessionId = session\.id/)
+  assert.match(status, /authoritativeManagementSession\(channel, statusSessionId\)/)
+  assert.match(status, /postSessionDashboard\(channel, authoritative\)/)
+  assert.doesNotMatch(status, /postSessionDashboard\(channel, session\)/)
+})
+
 test('App Home uses the sole Socket Mode coordinator and hides data from non-owners', () => {
   assert.match(daemon, /app_home_opened: handleAppHomeOpened/)
   assert.match(daemon, /if \(!USER \|\| userId !== USER\) return appHomeOverviewView\(\{ authorized: false \}\)/)

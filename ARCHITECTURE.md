@@ -197,9 +197,12 @@ provider transitions, private maintenance turns, managed Pi activity,
 automation ownership, delegated team work, and concurrent wake/restart work. Eligible sessions are
 grouped by provider: all selected sessions in a group stop, that provider's CLI
 updates once, and every stopped session resumes even when the update check
-fails. Incoming prompts during this bounded relaunch are held in the existing
-per-session queue. Standby, provisional, stale, dormant, and rebound records are
-never bulk-restarted.
+fails. Each exact native session is reserved synchronously before the first
+Slack notice or other await; duplicate updates are rejected and incoming prompts
+during this bounded relaunch are held in the existing per-session queue. A
+rebind releases only that immutable reservation and cannot stop or resume the
+replacement. Standby, provisional, stale, dormant, and rebound records are never
+bulk-restarted.
 
 The only exception is a provider-local trust surface that cannot be decided
 remotely. The bridge opens the provisional target's terminal automatically and
@@ -442,10 +445,11 @@ boot, re-adopts it, and continues the original elapsed duration. New channel
 content re-anchors the status as the latest item without resetting it. All
 status mutations pass through one workspace-wide, rate-safe queue. Superseded
 timer edits are cancelled before Slack I/O, and end-of-turn cleanup has priority
-over cosmetic updates from other sessions. Provider commentary and finals use
-the ordinary per-channel output path without waiting for status mutation, so a
-Slack `chat.update` backoff cannot hold the stable response behind its timer.
-Queue pressure is visible through `/sab-health`.
+over cosmetic updates from other sessions; a clear with no posted status never
+consumes an API slot. Provider commentary and finals use the ordinary
+per-channel output path without waiting for status mutation, so a Slack
+`chat.update` backoff cannot hold the stable response behind its timer. Queue
+pressure is visible through `/sab-health`.
 
 Final text comes only from provider-stable sources. Claude reads completed
 transcript records, Codex uses either the Stop hook's final field or the exact

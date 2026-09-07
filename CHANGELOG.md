@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.2] — 2026-09-07
+## [2.1.0-rc.3] — 2026-09-07
 
 ### Added
 
@@ -68,6 +68,10 @@ Notable changes to this project. Format based on
   of unrelated cosmetic Slack traffic. A final that crosses the replacement
   post boundary invalidates both the old and provisional working lines instead
   of waiting behind the workspace timer queue.
+- Provider updates reserve the exact native session before their first Slack
+  notice, so delayed API calls cannot admit a second restart or lose a prompt.
+  Status dashboards likewise bind the pre-await native identity, and empty
+  status clears no longer consume workspace rate-limit slots.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the
@@ -177,7 +181,7 @@ Notable changes to this project. Format based on
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
 
-[2.1.0-rc.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.2
+[2.1.0-rc.3]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.3
 
 ## [2.0.1] — 2026-08-26
 

@@ -2736,10 +2736,10 @@ async function updateProviderCli(provider) {
   return { provider, before, after, note, summary: ver, failed: /error|fail/i.test(note) }
 }
 
-function scheduleUpdateGuardCleanup(session) {
+function scheduleUpdateGuardCleanup(sessionId) {
   const timer = setTimeout(() => {
-    restarting.delete(session.id)
-    updatingSessions.delete(session.id)
+    restarting.delete(sessionId)
+    updatingSessions.delete(sessionId)
   }, 60000)
   timer.unref?.()
 }
@@ -2748,49 +2748,77 @@ async function stopSessionForUpdate(session, message, { expectedSessionId = null
   // Reserve synchronously after the caller's final liveness/busy check. Any
   // prompt arriving while the Slack notice or process stop is in flight is then
   // queued for this exact native session instead of racing a second wake.
-  if (message) await post(session.channel, message).catch(error => log('update notice failed', session.id.slice(0, 8), String(error)))
-  if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
-    throw new Error('the session changed while the update notice was being posted; no provider was stopped')
+  const reservedSessionId = expectedSessionId || session.id
+  const reservedChannel = session.channel
+  if (!reservedChannel || session.id !== reservedSessionId ||
+      authoritativeManagementSession(reservedChannel, reservedSessionId) !== session) {
+    throw new Error('the session changed before the update could be reserved; no provider was stopped')
   }
-  restarting.add(session.id)
-  updatingSessions.add(session.id)
-  const oldPid = session.pid
-  if (session.tmux) await tmuxKill(session.tmux)
-  if (oldPid && pidAlive(oldPid)) { try { process.kill(oldPid) } catch {} }
-  stopPoller(session)
-  await clearStatus(session)
-  clearPermissionsForPid(oldPid, 'session restarting')
-  session.pid = null
-  saveStateNow(state)
-  await sleep(1500) // let the old process fully exit before the binary is swapped
+  if (restarting.has(reservedSessionId) || updatingSessions.has(reservedSessionId)) {
+    throw new Error('the session is already restarting')
+  }
+  restarting.add(reservedSessionId)
+  updatingSessions.add(reservedSessionId)
+  try {
+    if (message) await post(reservedChannel, message).catch(error =>
+      log('update notice failed', reservedSessionId.slice(0, 8), String(error)))
+    if (session.id !== reservedSessionId ||
+        authoritativeManagementSession(reservedChannel, reservedSessionId) !== session) {
+      throw new Error('the session changed while the update notice was being posted; no provider was stopped')
+    }
+    const oldPid = session.pid
+    if (session.tmux) await tmuxKill(session.tmux)
+    if (oldPid && pidAlive(oldPid)) { try { process.kill(oldPid) } catch {} }
+    stopPoller(session)
+    await clearStatus(session)
+    clearPermissionsForPid(oldPid, 'session restarting')
+    session.pid = null
+    saveStateNow(state)
+    await sleep(1500) // let the old process fully exit before the binary is swapped
+    return reservedSessionId
+  } catch (error) {
+    restarting.delete(reservedSessionId)
+    updatingSessions.delete(reservedSessionId)
+    throw error
+  }
 }
 
-async function resumeUpdatedSession(session, update, updateError = null) {
+async function resumeUpdatedSession(session, update, updateError = null, { expectedSessionId = session.id } = {}) {
+  const reservedChannel = session.channel
+  if (session.id !== expectedSessionId ||
+      authoritativeManagementSession(reservedChannel, expectedSessionId) !== session) {
+    throw new Error('the session changed before its updated provider could be resumed')
+  }
   const label = providerLabel(providerOf(session))
   const summary = update?.summary || `⚠️ update check failed (${String(updateError || 'unknown error').slice(0, 120)})`
-  await post(session.channel, `📦 ${label} ${summary}. Resuming the conversation…`).catch(error =>
-    log('update result notice failed', session.id.slice(0, 8), String(error)))
+  await post(reservedChannel, `📦 ${label} ${summary}. Resuming the conversation…`).catch(error =>
+    log('update result notice failed', expectedSessionId.slice(0, 8), String(error)))
+  if (session.id !== expectedSessionId ||
+      authoritativeManagementSession(reservedChannel, expectedSessionId) !== session) {
+    throw new Error('the session changed while its update result was being posted; no provider was resumed')
+  }
   await resurrect(session)
   if (!session.tmux || !(await tmuxAlive(session.tmux))) throw new Error('replacement tmux session did not become active')
-  scheduleUpdateGuardCleanup(session) // SessionStart normally clears this first
+  scheduleUpdateGuardCleanup(expectedSessionId) // SessionStart normally clears this first
 }
 
 // /sab-update: stop this session's agent, update the CLI if a newer build exists,
 // then resume the same conversation with identical launch flags.
 async function updateAndRestart(session, { expectedSessionId = null } = {}) {
+  const updateSessionId = expectedSessionId || session.id
   if (bulkUpdateRunning) return post(session.channel, '⏳ A bridge-wide session update is already running. This session will be included if it is idle.')
-  if (updatingSessions.has(session.id)) return post(session.channel, '⏳ This session is already updating.')
+  if (updatingSessions.has(updateSessionId)) return post(session.channel, '⏳ This session is already updating.')
   const provider = providerOf(session)
   const label = providerLabel(provider)
   try {
     await stopSessionForUpdate(session,
       `🔄 *Restarting ${path.basename(session.cwd)}* — stopping ${label}, checking for updates, then resuming with the same flags.`,
-      { expectedSessionId })
+      { expectedSessionId: updateSessionId })
     const update = await updateProviderCli(provider)
-    await resumeUpdatedSession(session, update)
+    await resumeUpdatedSession(session, update, null, { expectedSessionId: updateSessionId })
   } catch (error) {
-    restarting.delete(session.id)
-    updatingSessions.delete(session.id)
+    restarting.delete(updateSessionId)
+    updatingSessions.delete(updateSessionId)
     throw error
   }
 }
@@ -5094,10 +5122,11 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   if (name === 'status') {
     const session = channelSession
     if (session) {
+      const statusSessionId = session.id
       const { branch, worktree } = await gitInfo(session.cwd)
       const gs = await gitStatusText(session.cwd)
       const alive = session.pid && pidAlive(session.pid)
-      const meta = sessionMeta.get(session.id) || {}
+      const meta = sessionMeta.get(statusSessionId) || {}
       const changes = gs ? `${gs.split('\n').length} file(s) changed` : '✓ clean'
       const lineage = lineageFor(state, channel)
       const standbys = lineage ? PROVIDERS
@@ -5106,7 +5135,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
         .filter(item => item.session) : []
       // Table cells are raw text (no markdown), so no backticks here.
       await postMd(channel,
-        `*Session ${session.id.slice(0, 8)}* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
+        `*Session ${statusSessionId.slice(0, 8)}* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
         `| Field | Value |\n|---|---|\n` +
         `| Provider | ${providerLabel(providerOf(session))} |\n` +
         `| Folder | ${session.cwd} |\n` +
@@ -5124,7 +5153,11 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
         `| Changes | ${changes} |` +
         (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
       await postSlackMessage(channel, { text: 'Collaborators', blocks: await collabBlocks(channel) })
-      await postSessionDashboard(channel, session)
+      const authoritative = authoritativeManagementSession(channel, statusSessionId)
+      if (!authoritative || authoritative !== session) {
+        return post(channel, '⚠️ The native session changed while its status dashboard was loading. Run `/sab-status` again for fresh controls.')
+      }
+      await postSessionDashboard(channel, authoritative)
       return
     }
     let statusProvider = ingressProvider
