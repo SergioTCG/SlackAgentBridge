@@ -353,6 +353,40 @@ test('deferred clear deletes from the channel captured before provider handoff',
   assert.equal(deletion?.[1]?.ts, '10.000001')
 })
 
+test('deferred bump cleanup keeps the channel captured before provider handoff', async () => {
+  const slack = fakeSlack()
+  let release
+  let replacementResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const replacementPosted = new Promise(resolve => { replacementResolve = resolve })
+  let posts = 0
+  const status = createStatusMessages(slack.web, {
+    postMessage: async (channel, text) => {
+      posts++
+      const result = await slack.web.chat.postMessage({ channel, text })
+      if (posts === 2) {
+        replacementResolve()
+        await gate
+      }
+      return result
+    },
+  })
+  const session = { id: 'S1', channel: 'C-source' }
+  await status.set(session, 'working')
+
+  const bumping = status.bump(session, { afterTs: '99.000000' })
+  await replacementPosted
+  const clearing = status.clear(session)
+  session.channel = null
+  release()
+  await Promise.all([bumping, clearing])
+
+  const deletions = slack.calls.filter(call => call[0] === 'delete')
+  assert.equal(deletions.length, 2)
+  assert.ok(deletions.every(call => call[1].channel === 'C-source'))
+  assert.deepEqual(deletions.map(call => call[1].ts).sort(), ['10.000001', '11.000001'])
+})
+
 test('bridge health exposes status-queue pressure without provider or Slack secrets', () => {
   const block = /if \(name === 'health'\) \{([\s\S]*?)\n  \}\n  if \(name === 'kill'\)/.exec(daemon)?.[1] || ''
   assert.match(block, /liveStatuses\.snapshot\(\)/)

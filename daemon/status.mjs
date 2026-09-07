@@ -153,6 +153,10 @@ export function createStatusMessages(web, {
 
   async function bump(session, { afterTs = null } = {}) {
     if (!session?.id || !session.channel) return false
+    // A provider-switch commit deliberately clears the source leg's mutable
+    // channel while this serialized move can still be in flight. Keep the
+    // immutable owner captured at invocation for every provisional cleanup.
+    const channel = session.channel
     const entry = entryFor(session.id)
     const epoch = entry.epoch
     return serialize(session.id, async current => {
@@ -165,7 +169,7 @@ export function createStatusMessages(web, {
       let replacement
       try {
         replacement = await scheduleApi(
-          () => postMessage(session.channel, current.text, { valid }),
+          () => postMessage(channel, current.text, { valid }),
           { valid },
         )
         if (replacement === SKIPPED || (!replacement?.ts && !valid())) return false
@@ -175,7 +179,7 @@ export function createStatusMessages(web, {
           // never becomes authoritative; remove it before allowing the queued
           // clear to delete the original status message.
           try {
-            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+            await scheduleApi(() => web.chat.delete({ channel, ts: replacement.ts }), { priority: true })
           } catch {}
           return false
         }
@@ -186,7 +190,7 @@ export function createStatusMessages(web, {
 
       try {
         const deleted = await scheduleApi(
-          () => web.chat.delete({ channel: session.channel, ts: oldTs }),
+          () => web.chat.delete({ channel, ts: oldTs }),
           { priority: true, valid },
         )
         if (deleted === SKIPPED || !valid()) {
@@ -194,7 +198,7 @@ export function createStatusMessages(web, {
           // Remove the provisional copy through the cleanup lane; clear() will
           // delete oldTs as soon as this per-session mutation releases it.
           try {
-            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+            await scheduleApi(() => web.chat.delete({ channel, ts: replacement.ts }), { priority: true })
           } catch {}
           return false
         }
@@ -203,14 +207,14 @@ export function createStatusMessages(web, {
           // Keep the old authoritative status if replacement could not be made
           // atomic. Best-effort cleanup avoids leaving two live status lines.
           try {
-            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+            await scheduleApi(() => web.chat.delete({ channel, ts: replacement.ts }), { priority: true })
           } catch {}
           log('bumpStatus delete error:', error?.data?.error || String(error))
           return false
         }
         if (!valid()) {
           try {
-            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+            await scheduleApi(() => web.chat.delete({ channel, ts: replacement.ts }), { priority: true })
           } catch {}
           return false
         }

@@ -2747,41 +2747,62 @@ function scheduleUpdateGuardCleanup(sessionId) {
   timer.unref?.()
 }
 
+function maintenanceSessionIsAuthoritative(session, reservation) {
+  return Boolean(session && reservation && session.id === reservation.sessionId &&
+    session.channel === reservation.channel &&
+    authoritativeManagementSession(reservation.channel, reservation.sessionId) === session)
+}
+
+function reserveSessionMaintenance(session, { expectedSessionId = null } = {}) {
+  const sessionId = expectedSessionId || session?.id
+  const channel = session?.channel
+  if (!sessionId || !channel || session.id !== sessionId ||
+      authoritativeManagementSession(channel, sessionId) !== session) {
+    throw new Error('the session changed before maintenance could be reserved; no provider was stopped')
+  }
+  if (restarting.has(sessionId) || updatingSessions.has(sessionId) || resurrectInFlight.has(sessionId)) {
+    throw new Error('the session is already waking or restarting')
+  }
+  // Both sets are intentional: `restarting` fences stale provider hooks while
+  // `updatingSessions` queues prompts and rejects overlapping owner controls.
+  restarting.add(sessionId)
+  updatingSessions.add(sessionId)
+  return Object.freeze({ sessionId, channel })
+}
+
+function releaseSessionMaintenance(reservation) {
+  if (!reservation?.sessionId) return
+  restarting.delete(reservation.sessionId)
+  updatingSessions.delete(reservation.sessionId)
+}
+
+async function stopReservedSession(session, reservation, message = null) {
+  if (message) await post(reservation.channel, message).catch(error =>
+    log('maintenance notice failed', reservation.sessionId.slice(0, 8), String(error)))
+  if (!maintenanceSessionIsAuthoritative(session, reservation)) {
+    throw new Error('the session changed while its maintenance notice was being posted; no provider was stopped')
+  }
+  const oldPid = session.pid
+  if (session.tmux) await tmuxKill(session.tmux)
+  if (oldPid && pidAlive(oldPid)) { try { process.kill(oldPid) } catch {} }
+  stopPoller(session)
+  await clearStatus(session)
+  clearPermissionsForPid(oldPid, 'session restarting')
+  session.pid = null
+  saveStateNow(state)
+  await sleep(1500) // let the old process fully exit before its replacement starts
+}
+
 async function stopSessionForUpdate(session, message, { expectedSessionId = null } = {}) {
   // Reserve synchronously after the caller's final liveness/busy check. Any
   // prompt arriving while the Slack notice or process stop is in flight is then
   // queued for this exact native session instead of racing a second wake.
-  const reservedSessionId = expectedSessionId || session.id
-  const reservedChannel = session.channel
-  if (!reservedChannel || session.id !== reservedSessionId ||
-      authoritativeManagementSession(reservedChannel, reservedSessionId) !== session) {
-    throw new Error('the session changed before the update could be reserved; no provider was stopped')
-  }
-  if (restarting.has(reservedSessionId) || updatingSessions.has(reservedSessionId)) {
-    throw new Error('the session is already restarting')
-  }
-  restarting.add(reservedSessionId)
-  updatingSessions.add(reservedSessionId)
+  const reservation = reserveSessionMaintenance(session, { expectedSessionId })
   try {
-    if (message) await post(reservedChannel, message).catch(error =>
-      log('update notice failed', reservedSessionId.slice(0, 8), String(error)))
-    if (session.id !== reservedSessionId ||
-        authoritativeManagementSession(reservedChannel, reservedSessionId) !== session) {
-      throw new Error('the session changed while the update notice was being posted; no provider was stopped')
-    }
-    const oldPid = session.pid
-    if (session.tmux) await tmuxKill(session.tmux)
-    if (oldPid && pidAlive(oldPid)) { try { process.kill(oldPid) } catch {} }
-    stopPoller(session)
-    await clearStatus(session)
-    clearPermissionsForPid(oldPid, 'session restarting')
-    session.pid = null
-    saveStateNow(state)
-    await sleep(1500) // let the old process fully exit before the binary is swapped
-    return reservedSessionId
+    await stopReservedSession(session, reservation, message)
+    return reservation.sessionId
   } catch (error) {
-    restarting.delete(reservedSessionId)
-    updatingSessions.delete(reservedSessionId)
+    releaseSessionMaintenance(reservation)
     throw error
   }
 }
@@ -2988,6 +3009,22 @@ async function handleSlackMessage(channel, text, sender, request) {
   if (!session) {
     if (channel === state.control) return post(channel, 'This is the control channel. Use `/sab-new <claude|codex|pi>` to start a session, or `/sab-status` to list them all.')
     log('inbound (unmapped channel, ignored)', channel)
+    return
+  }
+  // A settings/account/flags restart uses the same maintenance reservation as
+  // a CLI update. Queue owner input before question-form routing so it cannot
+  // reach the provider process which is being replaced.
+  if (updatingSessions.has(session.id)) {
+    reserveTeamInput(session, 'slack')
+    try {
+      if (providerOf(session) === 'pi') {
+        await injectText(session, trimmed, { privateContext: ownerPromptPrivateContext(session, request) })
+      } else await injectText(session, trimmed + ownerPromptPrivateContext(session, request))
+    } catch (error) {
+      clearTeamInputReservation(session)
+      saveStateNow(state)
+      throw error
+    }
     return
   }
   // An open question form eats pasted text, so route replies through it instead:
@@ -4444,20 +4481,41 @@ function listAccounts() {
       .split('\n').map(l => l.split('=')[0].trim()).filter(n => safeAccount(n))
   } catch { return [] }
 }
-async function switchAccount(session, name) {
+async function restartSessionWithMutation(session, {
+  expectedSessionId = null,
+  notice,
+  mutate,
+} = {}) {
+  const reservation = reserveSessionMaintenance(session, { expectedSessionId })
+  try {
+    if (notice) await post(reservation.channel, notice).catch(error =>
+      log('settings restart notice failed', reservation.sessionId.slice(0, 8), String(error)))
+    if (!maintenanceSessionIsAuthoritative(session, reservation)) {
+      throw new Error('the native session changed while its setting notice was being posted; no setting was changed')
+    }
+    mutate(session)
+    // Journal operator intent before teardown. A daemon crash in the restart
+    // window must resume with the newly selected setting, account, or flags.
+    saveStateNow(state)
+    await stopReservedSession(session, reservation)
+    await resurrect(session)
+    if (!session.tmux || !(await tmuxAlive(session.tmux))) {
+      throw new Error('replacement tmux session did not become active')
+    }
+    scheduleUpdateGuardCleanup(reservation.sessionId) // SessionStart normally clears this first
+  } catch (error) {
+    releaseSessionMaintenance(reservation)
+    throw error
+  }
+}
+
+async function switchAccount(session, name, { expectedSessionId = null } = {}) {
   const label = name ? `\`${name}\`` : "this machine's own login"
-  await post(session.channel, `🔐 *Switching subscription* → ${label}. Restarting and resuming this conversation…`)
-  restarting.add(session.id)
-  if (session.tmux) await tmuxKill(session.tmux)
-  if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
-  stopPoller(session); await clearStatus(session)
-  clearPermissionsForPid(session.pid, 'session restarting')
-  session.pid = null
-  session.account = name || null
-  saveState(state)
-  await sleep(1500)
-  await resurrect(session)
-  setTimeout(() => restarting.delete(session.id), 60000)
+  return restartSessionWithMutation(session, {
+    expectedSessionId,
+    notice: `🔐 *Switching subscription* → ${label}. Restarting and resuming this conversation…`,
+    mutate: current => { current.account = name || null },
+  })
 }
 
 // Launch flags a session was started with, minus the resume plumbing (which the
@@ -4469,19 +4527,12 @@ function displayFlags(session) {
 // Change a live session's launch flags. Claude Code reads them at startup, so
 // this restarts the session and resumes the same conversation — the same dance
 // as /sab-account and /sab-update.
-async function setFlags(session, flags) {
-  await post(session.channel, `🔧 *Setting launch flags* → \`${flags.join(' ') || '(none)'}\`. Restarting and resuming this conversation…`)
-  restarting.add(session.id)
-  if (session.tmux) await tmuxKill(session.tmux)
-  if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
-  stopPoller(session); await clearStatus(session)
-  clearPermissionsForPid(session.pid, 'session restarting')
-  session.pid = null
-  session.launchFlags = flags.join(' ')
-  saveState(state)
-  await sleep(1500)
-  await resurrect(session)
-  setTimeout(() => restarting.delete(session.id), 60000)
+async function setFlags(session, flags, { expectedSessionId = null } = {}) {
+  return restartSessionWithMutation(session, {
+    expectedSessionId,
+    notice: `🔧 *Setting launch flags* → \`${flags.join(' ') || '(none)'}\`. Restarting and resuming this conversation…`,
+    mutate: current => { current.launchFlags = flags.join(' ') },
+  })
 }
 
 async function setCodexSetting(session, name, value, { expectedSessionId = null } = {}) {
@@ -4494,28 +4545,16 @@ async function setCodexSetting(session, name, value, { expectedSessionId = null 
     saveStateNow(state)
     return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
   }
-  await post(session.channel, `🔧 *Setting ${name}* → \`${value}\`. Restarting Codex and resuming this conversation…`)
-  if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
-    return post(session.channel, '⚠️ The native session changed while the setting notice was being posted. No setting was changed; use fresh controls.')
-  }
-  session[name] = value
-  if (name === 'model') session.requestedModel = value
-  if (name === 'effort') session.requestedEffort = value
-  sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), [name]: value })
-  // Journal operator intent immediately before teardown. A daemon crash in the
-  // restart window must not restore the previous model/effort.
-  saveStateNow(state)
-  restarting.add(session.id)
-  if (session.tmux) await tmuxKill(session.tmux)
-  if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
-  stopPoller(session)
-  await clearStatus(session)
-  clearPermissionsForPid(session.pid, 'session restarting')
-  session.pid = null
-  saveState(state)
-  await sleep(1500)
-  await resurrect(session)
-  setTimeout(() => restarting.delete(session.id), 60000)
+  return restartSessionWithMutation(session, {
+    expectedSessionId,
+    notice: `🔧 *Setting ${name}* → \`${value}\`. Restarting Codex and resuming this conversation…`,
+    mutate: current => {
+      current[name] = value
+      if (name === 'model') current.requestedModel = value
+      if (name === 'effort') current.requestedEffort = value
+      sessionMeta.set(current.id, { ...(sessionMeta.get(current.id) || {}), [name]: value })
+    },
+  })
 }
 
 async function setPiSetting(session, name, value, { expectedSessionId = null } = {}) {
@@ -5383,11 +5422,11 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       return post(channel, `*Subscription for this session:* ${cur}\n*Available:* ${known}\nSwitch with \`/sab-account <name>\` (or \`/sab-account default\`). The session restarts and resumes — the conversation is kept.`)
     }
     const want = rest[0].toLowerCase()
-    if (want === 'default' || want === 'none') return switchAccount(session, null)
+    if (want === 'default' || want === 'none') return switchAccount(session, null, { expectedSessionId })
     const picked = safeAccount(rest[0])
     if (!picked || !available.includes(picked)) return post(channel, `❌ Unknown account \`${rest[0]}\`. *Available:* ${known}`)
     if (picked === session.account) return post(channel, `Already running under \`${picked}\`.`)
-    return switchAccount(session, picked)
+    return switchAccount(session, picked, { expectedSessionId })
   }
   if (name === 'update' || name === 'restart') {
     if (!rest.length) {
@@ -5421,7 +5460,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       if (!norm) return post(channel, `❌ Flag not allowed: \`${f}\`\n*Allowed:* ${allowed}`)
       if (!flags.includes(norm)) flags.push(norm)
     }
-    return setFlags(session, flags)
+    return setFlags(session, flags, { expectedSessionId })
   }
   if (name === 'new') {
     if (!ingressProvider) {

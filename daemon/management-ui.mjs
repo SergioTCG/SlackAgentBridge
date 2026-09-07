@@ -2,6 +2,10 @@ const ACTION_PREFIX = 'sab_manage'
 const TOKEN_RE = /^[A-Za-z0-9_-]{1,128}$/
 
 const text = (value, limit = 75) => String(value ?? '').replace(/[\r\n]+/g, ' ').slice(0, limit) || '—'
+const optionValue = value => {
+  const raw = String(value ?? '')
+  return raw && raw.length <= 150 && !/[\r\n\0]/.test(raw) ? raw : null
+}
 const providerName = provider => provider === 'claude' ? 'Claude Code'
   : provider === 'codex' ? 'Codex'
     : provider === 'pi' ? 'Pi' : text(provider)
@@ -58,8 +62,8 @@ function optionsFrom(models) {
   const seen = new Set()
   const options = []
   for (const model of models || []) {
-    const value = text(model?.value, 150)
-    if (seen.has(value) || value === '—') continue
+    const value = optionValue(model?.value)
+    if (!value || seen.has(value)) continue
     seen.add(value)
     const option = { text: { type: 'plain_text', text: text(model?.label || value) }, value }
     if (model?.description) option.description = { type: 'plain_text', text: text(model.description) }

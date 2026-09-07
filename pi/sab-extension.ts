@@ -112,8 +112,14 @@ async function controlResult(ctx: ExtensionContext, message: BridgeMessage, resu
 
 async function handleControl(pi: ExtensionAPI, managed: any, ctx: ExtensionContext, message: BridgeMessage) {
   try {
-    if (["model", "effort"].includes(message.action || "") &&
-        ctx.sessionManager.getSessionId() !== message.expectedSessionId) {
+    const mutableSetting = ["model", "effort"].includes(message.action || "");
+    if (mutableSetting && !message.expectedSessionId) {
+      return controlResult(ctx, message, {
+        ok: false,
+        error: "A daemon restart is required before mutable Pi controls can be used with this staged extension.",
+      });
+    }
+    if (mutableSetting && ctx.sessionManager.getSessionId() !== message.expectedSessionId) {
       return controlResult(ctx, message, {
         ok: false,
         error: "This setting control belongs to a native Pi session which is no longer active.",

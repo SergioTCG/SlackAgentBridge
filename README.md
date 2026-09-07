@@ -150,7 +150,9 @@ removes old launcher symlinks and installs only `sab` on `PATH`.
 
 The staged `install-codex.sh` and `install-pi.sh` helpers can add provider
 support without restarting the live daemon. Activation still belongs in a
-controlled maintenance window.
+controlled maintenance window. If a newly staged Pi extension meets an older
+daemon, model and effort changes fail closed with a restart-required message;
+they do not mutate an unverified native session.
 
 ## Local CLI
 

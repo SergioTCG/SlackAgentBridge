@@ -57,6 +57,17 @@ test('model picker is bounded to Slack limits and preserves the selected value',
   assert.ok(select.options.every(option => option.value.length <= 150))
 })
 
+test('model picker never truncates an overlong value into a different model identity', () => {
+  const valid = `provider/${'m'.repeat(141)}`
+  const tooLong = `provider/${'m'.repeat(142)}`
+  const blocks = modelPickerBlocks({
+    sessionId: SID, provider: 'pi', current: valid,
+    models: [{ value: tooLong, label: 'Invalid long model' }, { value: valid, label: 'Valid long model' }],
+  })
+  assert.deepEqual(blocks[1].accessory.options.map(option => option.value), [valid])
+  assert.equal(blocks[1].accessory.options[0].text.text, 'Valid long model')
+})
+
 test('effort, terminal, update, switch, new, and dashboard panels use only SAB actions', () => {
   const panels = [
     settingPickerBlocks({ sessionId: SID, kind: 'effort', title: 'Effort', current: 'xhigh', values: ['low', 'xhigh'] }),

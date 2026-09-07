@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.4] — 2026-09-07
+## [2.1.0-rc.5] — 2026-09-07
 
 ### Added
 
@@ -81,6 +81,16 @@ Notable changes to this project. Format based on
   turn finished, so a provider handoff cannot strand the old leg's timer. App
   Home stale-load recovery also renders a defined, internally consistent fresh
   overview.
+- Status reanchor cleanup now retains that immutable source channel across the
+  entire provisional bump, including a handoff that lands between replacement
+  post and cleanup. Interactive option values preserve Slack's full
+  150-character identity allowance and omit overlong values rather than
+  truncating them into another project or model.
+- Account, flag, and Codex model/effort restarts now reserve the exact native
+  session before their first Slack wait. Overlapping controls are rejected and
+  owner messages—including question-shaped replies—queue for the replacement
+  process. A staged Pi extension fails closed with an actionable activation
+  message when the older daemon cannot supply its native-session fence.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the
@@ -190,7 +200,7 @@ Notable changes to this project. Format based on
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
 
-[2.1.0-rc.4]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.4
+[2.1.0-rc.5]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.5
 
 ## [2.0.1] — 2026-08-26
 

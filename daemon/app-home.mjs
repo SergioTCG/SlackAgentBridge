@@ -6,6 +6,12 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{1,128}$/
 const MAX_HOME_SESSIONS = 50
 
 const plain = (value, limit = 75) => String(value ?? '').replace(/[\r\n]+/g, ' ').slice(0, limit) || '—'
+const optionValue = value => {
+  const raw = String(value ?? '')
+  // Slack Option values are identity-bearing and allow 150 characters. Never
+  // truncate one into a different project/model identity; omit invalid values.
+  return raw && raw.length <= 150 && !/[\r\n\0]/.test(raw) ? raw : null
+}
 const providerName = provider => provider === 'claude' ? 'Claude Code'
   : provider === 'codex' ? 'Codex'
     : provider === 'pi' ? 'Pi' : plain(provider)
@@ -47,8 +53,8 @@ function selectOptions(items) {
   const seen = new Set()
   const options = []
   for (const item of items || []) {
-    const value = plain(item?.value ?? item, 150)
-    if (value === '—' || seen.has(value)) continue
+    const value = optionValue(item?.value ?? item)
+    if (!value || seen.has(value)) continue
     seen.add(value)
     const option = { text: { type: 'plain_text', text: plain(item?.label ?? item) }, value }
     if (item?.description) option.description = { type: 'plain_text', text: plain(item.description) }

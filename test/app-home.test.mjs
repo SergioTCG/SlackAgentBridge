@@ -67,6 +67,25 @@ test('session App Home exposes provider-valid settings and confirmed lifecycle c
   assert.match(update.confirm.title.text, /update/i)
 })
 
+test('App Home keeps valid 150-character option values and omits longer identities', () => {
+  const valid = `provider/${'m'.repeat(141)}`
+  const tooLong = `provider/${'m'.repeat(142)}`
+  assert.equal(valid.length, 150)
+  assert.equal(tooLong.length, 151)
+  const view = appHomeSessionView({
+    session: {
+      id: SID, channel: 'C123', cwd: '/Users/example/Code/project', provider: 'pi',
+      model: valid, effort: 'xhigh', active: true, terminalOpen: false,
+    },
+    models: [{ value: tooLong, label: 'Invalid long model' }, { value: valid, label: 'Valid long model' }],
+    efforts: ['xhigh'], providers: ['claude', 'codex', 'pi'],
+  })
+  const modelSelect = view.blocks.flatMap(block => block.accessory ? [block.accessory] : [])
+    .find(action => parseAppHomeActionId(action.action_id)?.kind === 'model')
+  assert.deepEqual(modelSelect.options.map(option => option.value), [valid])
+  assert.equal(modelSelect.options[0].text.text, 'Valid long model')
+})
+
 test('new-session modal parses JSON-safe provider, folder, and flags fields', () => {
   const modal = newSessionModal({ providers: ['claude', 'codex', 'pi'], projects: ['Barrique', 'Project999'] })
   assert.equal(modal.type, 'modal')

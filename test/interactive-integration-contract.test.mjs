@@ -46,12 +46,15 @@ test('team management actions reject a panel rendered for a replaced team', () =
 })
 
 test('session update ownership is reserved before Slack and released by immutable identity', () => {
+  const reserve = /function reserveSessionMaintenance\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(reserve, /const sessionId = expectedSessionId \|\| session\?\.id/)
+  assert.match(reserve, /restarting\.add\(sessionId\)/)
+  assert.match(reserve, /updatingSessions\.add\(sessionId\)/)
+  assert.match(reserve, /resurrectInFlight\.has\(sessionId\)/)
+
   const stop = /async function stopSessionForUpdate\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
-  assert.match(stop, /const reservedSessionId = expectedSessionId \|\| session\.id/)
-  assert.ok(stop.indexOf('restarting.add(reservedSessionId)') < stop.indexOf('await post('))
-  assert.ok(stop.indexOf('updatingSessions.add(reservedSessionId)') < stop.indexOf('await post('))
-  assert.match(stop, /restarting\.delete\(reservedSessionId\)/)
-  assert.match(stop, /updatingSessions\.delete\(reservedSessionId\)/)
+  assert.match(stop, /reserveSessionMaintenance\(session/)
+  assert.match(stop, /releaseSessionMaintenance\(reservation\)/)
 
   const update = /async function updateAndRestart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(update, /const updateSessionId = expectedSessionId \|\| session\.id/)
@@ -62,6 +65,17 @@ test('session update ownership is reserved before Slack and released by immutabl
 test('provider maintenance blocks overlapping session mutations but leaves observation available', () => {
   assert.match(daemon, /const MAINTENANCE_SAFE_COMMANDS = new Set\(\['status', 'usage', 'terminal'\]\)/)
   assert.match(daemon, /updatingSessions\.has\(channelSession\.id\)[\s\S]{0,500}MAINTENANCE_SAFE_COMMANDS\.has\(name\)/)
+})
+
+test('every restart-causing settings path reserves maintenance before its first Slack wait', () => {
+  for (const name of ['switchAccount', 'setFlags', 'setCodexSetting']) {
+    const body = new RegExp(`async function ${name}\\([\\s\\S]*?\\n\\}`).exec(daemon)?.[0] || ''
+    assert.match(body, /restartSessionWithMutation\(/, `${name} must use exact-session restart fencing`)
+  }
+  const restart = /async function restartSessionWithMutation\([\s\S]*?\n\}\n\nasync function switchAccount/.exec(daemon)?.[0] || ''
+  assert.ok(restart.indexOf('reserveSessionMaintenance(') < restart.indexOf('await post('),
+    'restart maintenance must be reserved before the notice crosses an async boundary')
+  assert.match(daemon, /updatingSessions\.has\(session\.id\)[\s\S]{0,500}ownerPromptPrivateContext/)
 })
 
 test('status dashboard binds the pre-await native session identity', () => {

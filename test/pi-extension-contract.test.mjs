@@ -33,6 +33,13 @@ test('Pi setting controls reject a stale native session before mutating it', () 
   assert.match(daemon, /sendPiControl\(session, name, value, 15000, controlSessionId\)/)
 })
 
+test('Pi mutable controls fail closed with an actionable mixed-version protocol error', () => {
+  const control = /async function handleControl\([\s\S]*?\n\}/.exec(extension)?.[0] || ''
+  assert.match(control, /A daemon restart is required before mutable Pi controls can be used/)
+  assert.ok(control.indexOf('A daemon restart is required') < control.indexOf('await pi.setModel(model)'))
+  assert.ok(control.indexOf('A daemon restart is required') < control.indexOf('pi.setThinkingLevel(level as any)'))
+})
+
 test('Pi safe-mode permission failures block tool execution', () => {
   assert.match(extension, /if \(!SAFE_MODE\) return undefined/)
   assert.match(extension, /return \{ block: true, reason: "Slack permission relay was unavailable\." \}/)
