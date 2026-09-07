@@ -164,19 +164,32 @@ else
 fi
 
 # ---- 4. provider hooks (merge, never clobber) -------------------------------
+# A staged activation may historically have registered a hook from an isolated
+# SAB worktree. Canonicalize known SAB checkout identities to this installer’s
+# path while preserving every unrelated hook group. Each provider file is
+# replaced once so an interruption cannot leave only some lifecycle events
+# updated.
 if wants_claude; then
   mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
   [ -f "$CLAUDE_SETTINGS" ] || printf '{}\n' > "$CLAUDE_SETTINGS"
   HOOK="$BRIDGE/hooks/hook.sh"
-  for ev in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop; do
-    tmp="$(mktemp)"
-    jq --arg ev "$ev" --arg cmd "$HOOK" '
-      .hooks = (.hooks // {}) |
-      .hooks[$ev] = ((.hooks[$ev] // []) as $arr |
-        if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
-        else $arr + [{matcher: ".*", hooks: [{type: "command", command: $cmd}]}] end)
-    ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
-  done
+  SAB_HOOK_RE='/(?:\.claudeslackproxy|\.slack-agent-bridge|ClaudeSlackProxy[^/]*|SlackAgentBridge[^/]*|slack-agent-bridge[^/]*)/hooks/hook\.sh$'
+  tmp="$(mktemp "$(dirname "$CLAUDE_SETTINGS")/.sab-claude-hooks.XXXXXX")"
+  jq --arg cmd "$HOOK" --arg sab_re "$SAB_HOOK_RE" '
+    .hooks = (.hooks // {}) |
+    reduce ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "Stop"][] as $ev (.;
+      .hooks[$ev] = (
+        [(.hooks[$ev] // [])[] |
+          .hooks = [(.hooks // [])[] |
+            select((((.command // "") | test($sab_re)) | not))] |
+          select((.hooks | length) > 0)
+        ] as $groups |
+        $groups + [{matcher: ".*", hooks: [{type: "command", command: $cmd}]}]
+      )
+    )
+  ' "$CLAUDE_SETTINGS" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CLAUDE_SETTINGS"
   say "  registered Claude hooks in $CLAUDE_SETTINGS"
 fi
 
@@ -184,22 +197,25 @@ if wants_codex; then
   mkdir -p "$CODEX_DIR"
   [ -f "$CODEX_HOOKS" ] || printf '{}\n' > "$CODEX_HOOKS"
   HOOK="$BRIDGE/hooks/codex-hook.sh"
-  for ev in SessionStart SessionEnd UserPromptSubmit Stop; do
-    tmp="$(mktemp)"
-    jq --arg ev "$ev" --arg cmd "$HOOK" '
-      .hooks = (.hooks // {}) |
-      .hooks[$ev] = ((.hooks[$ev] // []) as $arr |
-        if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
-        else $arr + [{hooks: [{type: "command", command: $cmd, timeout: 3}]}] end)
-    ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
-  done
-  tmp="$(mktemp)"
-  jq --arg cmd "$HOOK" '
+  SAB_HOOK_RE='/(?:\.claudeslackproxy|\.slack-agent-bridge|ClaudeSlackProxy[^/]*|SlackAgentBridge[^/]*|slack-agent-bridge[^/]*)/hooks/codex-hook\.sh$'
+  tmp="$(mktemp "$CODEX_DIR/.sab-codex-hooks.XXXXXX")"
+  jq --arg cmd "$HOOK" --arg sab_re "$SAB_HOOK_RE" '
     .hooks = (.hooks // {}) |
-    .hooks.PermissionRequest = ((.hooks.PermissionRequest // []) as $arr |
-      if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
-      else $arr + [{matcher: ".*", hooks: [{type: "command", command: $cmd, timeout: 590, statusMessage: "Waiting for Slack approval"}]}] end)
-  ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
+    reduce ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest"][] as $ev (.;
+      .hooks[$ev] = (
+        [(.hooks[$ev] // [])[] |
+          .hooks = [(.hooks // [])[] |
+            select((((.command // "") | test($sab_re)) | not))] |
+          select((.hooks | length) > 0)
+        ] as $groups |
+        if $ev == "PermissionRequest" then
+          $groups + [{matcher: ".*", hooks: [{type: "command", command: $cmd, timeout: 590, statusMessage: "Waiting for Slack approval"}]}]
+        else $groups + [{hooks: [{type: "command", command: $cmd, timeout: 3}]}] end
+      )
+    )
+  ' "$CODEX_HOOKS" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CODEX_HOOKS"
   say "  registered Codex hooks in $CODEX_HOOKS"
 fi
 

@@ -138,6 +138,11 @@ After upgrading to the session-team release, apply and reinstall the same
 canonical manifest once more so Slack registers `/sab-team`. Existing tokens
 and OAuth scopes remain valid.
 
+The interactive-management release also enables the app's Home tab and routes
+`app_home_opened` through the same Socket Mode daemon. Apply the canonical
+manifest to the **existing app** and reinstall it once. No new OAuth scope,
+token, callback URL, app, or daemon is required.
+
 Fresh installs use `~/.slack-agent-bridge`. Existing
 `~/.claudeslackproxy` checkouts, `~/.config/ccs` state, session channels, and the
 historical `si.sergej.claudeslackproxy` LaunchAgent are retained. The installer
@@ -211,15 +216,15 @@ A session channel always acts on its authoritative provider.
 
 | Command | Effect |
 |---|---|
-| `/sab-new <claude\|codex\|pi> [folder] [flags]` | Start a headless session |
-| `/sab-model [model]` | Show or change this session's model |
-| `/sab-effort [level]` | Show or change reasoning/thinking effort |
+| `/sab-new <claude\|codex\|pi> [folder] [flags]` | Choose a provider/project interactively, or start a headless session directly |
+| `/sab-model [model]` | Choose or change this session's model |
+| `/sab-effort [level]` | Choose or change reasoning/thinking effort |
 | `/sab-flags [flags]` | Show or replace allowlisted launch flags |
-| `/sab-update [all]` | Update this session, or safely sweep all idle active sessions |
+| `/sab-update [current\|all]` | Choose an update interactively, or update this/all eligible sessions directly |
 | `/sab-stop` | Interrupt the current turn without ending the session |
 | `/sab-switch <claude\|codex\|pi> [new]` | Hand this channel to another native provider leg |
 | `/sab-kill [here\|session-id]` | End one exact provider process and keep its channel resumable |
-| `/sab-status [claude\|codex\|pi]` | Show this session, or filter the control-channel list |
+| `/sab-status [claude\|codex\|pi]` | Show this session plus controls, or filter the control-channel list |
 | `/sab-usage [provider] [days [n]\|models\|limits]` | Show provider usage |
 | `/sab-run …` | Control Pi adaptive routing and managed runs |
 | `/sab-account [name\|default]` | Show or change a Claude subscription |
@@ -236,6 +241,37 @@ included in the prompt. Dormant owner sessions resume headlessly; opening a
 terminal is never required. A Claude wake is successful only after its exact
 `SessionStart` claim; a provider that exits after briefly creating tmux is
 retried once and then reported visibly while the queued message remains safe.
+
+Management commands are interactive when invoked without arguments. `/sab-model`
+and `/sab-effort` show provider-valid selectors; `/sab-terminal`, `/sab-update`,
+`/sab-switch`, `/sab-new`, and `/sab-team` show bounded buttons or pickers.
+`/sab-status` adds a consolidated dashboard for the current session, while the
+control-channel dashboard exposes bridge-wide session, terminal, update,
+health, and usage controls. Parameterized forms such as `/sab-terminal open`,
+`/sab-model gpt-5.6-sol`, and `/sab-update all` remain available. Use
+`/sab-update current` for a non-interactive current-session update.
+
+Every click is rechecked against the immutable channel ID, exact authoritative
+session/provider, current provider catalog, transition state, and the existing
+team/update safety gates. A stale control therefore fails visibly instead of
+acting on a replacement leg. Broad update and team-close actions require Slack
+confirmation. These panels are only a presentation layer over the normal
+`/sab-*` dispatcher.
+
+### App Home
+
+Open *Slack Agent Bridge* under Slack's Apps section for a persistent owner
+dashboard. It lists authoritative session channels and provides exact session,
+terminal, model, effort, switch, update, team, usage, health, and new-session
+controls. The new-session modal requires an explicit provider and a current
+top-level project folder; launch flags pass through the existing provider
+allowlist.
+
+App Home rebuilds from authoritative state whenever it is opened or refreshed.
+Results remain visible in the bridge control channel or affected session
+channel rather than becoming private, unaudited Home-only state. Non-owners see
+a restricted view containing no session IDs, channel IDs, folders, settings, or
+actions.
 
 `/sab-update all` is the quiet-period maintenance sweep. It considers only the
 authoritative live session bound to each channel, skips any session with an
@@ -403,8 +439,9 @@ with the same Socket Mode token.
 - Optional dockless Ghostty viewports: `CCS_GHOSTTY_HIDDEN=1`
 - Local API: loopback port `8877`; never proxy or expose it
 
-Required validation is defined in [`AGENTS.md`](AGENTS.md). Releases also use
-the complete [release checklist](docs/release-checklist.md). Live Slack,
+Required validation is defined in [`AGENTS.md`](AGENTS.md). Releases use the
+[stability policy](docs/stability-policy.md) and complete
+[release checklist](docs/release-checklist.md). Live Slack,
 Ghostty, Claude, Codex, and Pi tests belong in a controlled maintenance window
 or on a separate Slack app and token set.
 

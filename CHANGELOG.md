@@ -6,8 +6,21 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.1] — 2026-09-07
+
 ### Added
 
+- Added owner-only interactive Slack management without introducing another
+  command namespace. No-argument `/sab-model`, `/sab-effort`, `/sab-terminal`,
+  `/sab-update`, `/sab-switch`, `/sab-new`, and `/sab-team` render provider-aware
+  selectors or buttons, while `/sab-status` adds exact session/control
+  dashboards. Parameterized commands remain available, and `/sab-update
+  current` provides an explicit direct current-session update.
+- Added an owner-only App Home dashboard over the same validated dispatcher. It
+  lists authoritative session channels, provides exact provider/session
+  controls, and opens an allowlisted new-session modal. Non-owners receive no
+  session metadata or actions. The Home tab uses the existing Socket Mode
+  connection and requires no additional OAuth scope.
 - Added opt-in, durable `auto-until-blocked` team continuation. Completed or
   blocked executor replies enqueue deduplicated events; an idle authoritative
   coordinator receives a bounded continuation turn and resumes after daemon
@@ -36,6 +49,14 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Provider commentary and final responses no longer wait behind rate-limited
+  working-status edits or deletes. Status cleanup invalidates queued stale
+  timers immediately, takes priority over other cosmetic updates, and exposes
+  its current queue pressure through `/sab-health`.
+- Re-running an installer now replaces stale SAB provider hooks left by deleted
+  development worktrees while preserving unrelated hooks and registering the
+  live checkout exactly once. The provider staging helpers also make `--help`
+  side-effect-free and reject unknown arguments.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the
@@ -144,6 +165,8 @@ Notable changes to this project. Format based on
   directed-edge agreement. Collaborator turns fail closed; uncertain restart
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
+
+[2.1.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.1
 
 ## [2.0.1] — 2026-08-26
 

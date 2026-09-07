@@ -194,6 +194,8 @@ and `CLAUDE.md`; never merge global/provider memory or `MEMORY.md`.
 
 1. Start from a clean branch or isolated worktree and inspect unrelated changes.
 2. Add or update a regression test before changing compatibility-sensitive code.
+   Classify release evidence and stop-the-line failures using
+   `docs/stability-policy.md`.
 3. Keep provider-specific behavior in `daemon/providers.mjs` or a clearly named
    adapter instead of scattering prefix checks across the daemon.
 4. Use one canonical source for repeated command or identity data.
@@ -215,7 +217,8 @@ shellcheck -S warning bin/sab scripts/run-session.sh scripts/claude-consent.sh \
   install.sh install-codex.sh install-pi.sh
 ```
 
-For a release, also complete `docs/release-checklist.md`. Real Slack, Ghostty,
+For a release, also complete `docs/stability-policy.md` and
+`docs/release-checklist.md`. Real Slack, Ghostty,
 Claude, Codex, and Pi smoke tests happen only in a controlled maintenance window or
 against a completely separate Slack app and tokens.
 

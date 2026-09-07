@@ -1,4 +1,4 @@
-const SOCKET_EVENTS = ['message', 'slash_commands', 'interactive']
+const SOCKET_EVENTS = ['message', 'app_home_opened', 'slash_commands', 'interactive']
 
 // Socket Mode belongs to the coordinator. Business handlers may currently be
 // in-process (the compatibility deployment) or later route to an enrolled node;

@@ -15,7 +15,7 @@ configured, and enrolled nodes cannot receive provider work yet. See
 ## System shape
 
 ```text
-Slack Socket Mode
+Slack Socket Mode (messages, commands, interactions, App Home)
        │
        ▼
 daemon/daemon.mjs ─────────────── ~/.config/ccs/state.json
@@ -55,7 +55,10 @@ them.
   executing the provider CLI.
 - `daemon/daemon.mjs` owns Slack ingress/egress, hooks, state adoption,
   session/channel correlation, resurrection, settings, permission decisions,
-  switching, and managed Pi coordination.
+  switching, App Home publishing, and managed Pi coordination.
+- `daemon/management-ui.mjs` and `daemon/app-home.mjs` build bounded, pure
+  Block Kit surfaces. The daemon remains responsible for authorization,
+  provider catalogs, command dispatch, and every side effect.
 - `daemon/slack-runtime.mjs` constructs the sole direct Slack API and Socket Mode
   clients for the compatible all-in-one deployment. `daemon/coordinator.mjs`
   owns prompt acknowledgement and serialized startup of that sole ingress;
@@ -213,12 +216,34 @@ The canonical manifest exposes one namespace:
 /sab-team /sab-health /sab-cleanup /sab-claim /sab-help
 ```
 
-`/sab-new` requires the provider. In a session channel, the authoritative
+`/sab-new` requires an explicit provider: its no-argument panel does not choose
+one until the owner clicks a provider. In a session channel, the authoritative
 session selects provider-specific behavior for every other provider operation.
 From the control channel, `/sab-status` and `/sab-usage` may take a provider
 filter. `/sab-update all` is bridge-wide and may be run from the control channel
 or a session channel. `/sab-run` rejects non-Pi sessions and `/sab-account`
 rejects non-Claude sessions before mutation.
+
+No-argument management commands use Block Kit as a presentation layer over the
+same dispatcher. `/sab-status` renders a session or bridge dashboard; model and
+effort selectors come from the authoritative provider adapter. Every action
+carries the exact session identity that rendered it and revalidates the owner,
+immutable channel mapping, current native leg, provider catalog, transition,
+delegated-work state, and the ordinary command's safety gates before mutation.
+Stale controls fail visibly. Broad update and team-close actions require Slack
+confirmation. Explicit text forms remain available; `/sab-update current`
+directly updates the current session while no-argument `/sab-update` opens its
+chooser.
+
+App Home is another view over that dispatcher. The canonical manifest enables
+the Home tab and sends `app_home_opened` through the existing Socket Mode
+connection. The owner receives fresh bridge/session state; other users receive
+no session metadata or actions. Home navigation has no durable state, model and
+effort options are refreshed from the provider adapters, and the new-session
+modal rechecks the chosen top-level project plus every provider flag. Lifecycle
+results remain in the normal control/session channels. This needs one manifest
+reinstall on the existing app, but no additional OAuth scope, token, callback
+URL, process, or app.
 
 The parser accepts old provider-prefixed slash commands only as an unadvertised
 upgrade shim while the owner replaces a 1.x manifest. No old command appears in
@@ -412,9 +437,12 @@ Hooks start provider-specific live pollers. The daemon stores restart metadata
 needed to recover an in-progress turn, finds the frozen Slack status message on
 boot, re-adopts it, and continues the original elapsed duration. New channel
 content re-anchors the status as the latest item without resetting it. All
-status mutations pass through one workspace-wide, rate-safe queue; superseded
-timer edits are coalesced before Slack I/O so they cannot starve final or
-ordinary messages.
+status mutations pass through one workspace-wide, rate-safe queue. Superseded
+timer edits are cancelled before Slack I/O, and end-of-turn cleanup has priority
+over cosmetic updates from other sessions. Provider commentary and finals use
+the ordinary per-channel output path without waiting for status mutation, so a
+Slack `chat.update` backoff cannot hold the stable response behind its timer.
+Queue pressure is visible through `/sab-health`.
 
 Final text comes only from provider-stable sources. Claude reads completed
 transcript records, Codex uses either the Stop hook's final field or the exact

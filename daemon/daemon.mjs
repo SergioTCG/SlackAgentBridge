@@ -17,7 +17,7 @@ import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } 
 import {
   CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, PI_EFFORTS, PROVIDERS, acceptHookSettings, allowedFlags,
   codexFlagsWithoutInitialPrompt, codexModelFromArgs, codexPermissionDecision, codexStatusRecoveryDecision,
-  defaultNewFlagsFor, displayFlagsFor,
+  defaultNewFlagsFor, displayFlagsFor, executableCacheKey,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, normalizeRemoteLaunchFlags, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   submitTargetValidation, switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
@@ -111,6 +111,15 @@ import {
   tmuxCodexProcessPid, waitForCodexResumeClaim,
 } from './codex-resume.mjs'
 import { waitForClaudeResumeClaim } from './claude-resume.mjs'
+import {
+  authoritativeManagementBinding, bridgeDashboardBlocks, modelPickerBlocks, newSessionBlocks,
+  parseManagementActionId, sessionDashboardBlocks,
+  settingPickerBlocks, switchPickerBlocks, teamPickerBlocks, terminalPickerBlocks, updatePickerBlocks,
+} from './management-ui.mjs'
+import {
+  APP_HOME_CALLBACK, APP_HOME_NEW_CALLBACK, appHomeOverviewView, appHomeSessionView,
+  newSessionModal, parseAppHomeActionId, parseNewSessionSubmission, validateNewSessionSelection,
+} from './app-home.mjs'
 import {
   AUTOMATION_TMUX_LAUNCH_ATTEMPTS,
   AUTOMATION_TMUX_POLL_INTERVAL_MS,
@@ -278,25 +287,28 @@ const agentVersion = provider => provider === 'codex' ? codexVersion() : provide
 let modelCache = { key: null, list: [] }
 async function getModels() {
   const bin = claudeBin()
-  let key = bin; try { key = fs.realpathSync(bin) } catch {}
+  const key = executableCacheKey(bin)
   if (modelCache.key === key) return modelCache.list
   const list = await availableModels(bin)
   if (list.length) modelCache = { key, list } // keyed by version path; refreshes after an update
   return list
 }
-let codexModelCache = null
+let codexModelCache = { key: null, list: [] }
 async function getCodexModels() {
-  if (codexModelCache) return codexModelCache
+  const bin = codexBin()
+  const key = executableCacheKey(bin)
+  if (codexModelCache.key === key) return codexModelCache.list
   try {
-    const { stdout } = await execFile(codexBin(), ['debug', 'models', '--bundled'], {
+    const { stdout } = await execFile(bin, ['debug', 'models', '--bundled'], {
       timeout: 15000, maxBuffer: 32 << 20,
     })
     const parsed = JSON.parse(stdout)
-    codexModelCache = (parsed.models || []).filter(m => m.visibility !== 'hide').map(m => ({
+    const list = (parsed.models || []).filter(m => m.visibility !== 'hide').map(m => ({
       alias: m.slug, id: m.slug, name: m.display_name || m.slug,
       efforts: (m.supported_reasoning_levels || []).map(e => e.effort),
     }))
-    return codexModelCache
+    if (list.length) codexModelCache = { key, list }
+    return list
   } catch (e) {
     log('codex model catalog unavailable', String(e?.message || e))
     return []
@@ -356,7 +368,7 @@ function post(channel, text) {
   return postSlackMessage(channel, { text, unfurl_links: false })
 }
 const MAX_INLINE = 6000 // longer responses upload as a file instead of many messages
-async function postMd(channel, md) {
+async function postMd(channel, md, { waitForBump = true, reanchor = true } = {}) {
   if (md.length > MAX_INLINE) {
     let activityTs = null
     let posted = false
@@ -377,7 +389,11 @@ async function postMd(channel, md) {
         posted = true
       }
     }
-    if (posted) await bumpStatusForChannel(channel, activityTs)
+    if (posted && reanchor) {
+      const bumped = bumpStatusForChannel(channel, activityTs)
+      if (waitForBump) await bumped
+      else bumped.catch(error => log('deferred status bump error', String(error?.message || error)))
+    }
     return
   }
   let activityTs = null
@@ -385,7 +401,18 @@ async function postMd(channel, md) {
     const result = await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
     activityTs = result?.ts || activityTs
   }
-  if (activityTs) await bumpStatusForChannel(channel, activityTs)
+  if (activityTs && reanchor) {
+    const bumped = bumpStatusForChannel(channel, activityTs)
+    if (waitForBump) await bumped
+    else bumped.catch(error => log('deferred status bump error', String(error?.message || error)))
+  }
+}
+
+// Provider prose/finals are critical traffic. A cosmetic timer edit or delete
+// may be rate-limited for minutes, but must never hold the provider HTTP hook
+// open or prevent the actual response from reaching Slack.
+function postProviderOutput(channel, md, { keepStatus = false } = {}) {
+  return postMd(channel, md, { waitForBump: false, reanchor: keepStatus })
 }
 
 // Every accepted Slack prompt receives a short-lived, one-use upload capability.
@@ -525,6 +552,9 @@ const liveStatuses = createStatusMessages(web, {
 const setStatus = (session, text) => liveStatuses.set(session, text)
 const clearStatus = session => liveStatuses.clear(session)
 const bumpStatus = (session, options) => liveStatuses.bump(session, options)
+function clearStatusDeferred(session) {
+  void clearStatus(session).catch(error => log('deferred status clear error', String(error?.message || error)))
+}
 async function bumpStatusForChannel(channel, afterTs = null) {
   const session = sessionByChannel(channel)
   return session ? bumpStatus(session, { afterTs }) : false
@@ -976,8 +1006,8 @@ const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel
 // (whichever of Stop / poller runs later) reads nothing and posts nothing.
 async function finalizeTurn(session, { terminalFailure = null } = {}) {
   stopPoller(session)
-  await clearStatus(session)
-  await clearQuestionForm(session)
+  clearStatusDeferred(session)
+  void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
   if (session.transcript) await waitTranscriptSettle(session.transcript)
   const rawText = readNewAssistantText(session)
   const delivery = prepareClaudeTerminalDelivery(
@@ -986,7 +1016,7 @@ async function finalizeTurn(session, { terminalFailure = null } = {}) {
   )
   if (delivery.failure) rememberClaudeTerminalFailure(session.id, delivery.failure)
   else if (delivery.text) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
-  if (delivery.text && !delivery.suppress) await postMd(session.channel, delivery.text)
+  if (delivery.text && !delivery.suppress) await postProviderOutput(session.channel, delivery.text)
   else if (delivery.suppress) log('suppressed duplicate Claude terminal failure', session.id.slice(0, 8), delivery.failure?.key)
   const taskFailure = terminalFailure
     ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
@@ -1021,10 +1051,10 @@ async function finalizeCodexTurn(session, body) {
     }
     const expected = codexFinalLifecycleFingerprint(session)
     stopPoller(session)
-    await clearStatus(session)
+    clearStatusDeferred(session)
     const text = String(body.last_assistant_message || '').trim()
     try {
-      if (text && session.channel) await postMd(session.channel, text)
+      if (text && session.channel) await postProviderOutput(session.channel, text)
     } catch (error) {
       // A known Slack failure remains retryable by the App Server proxy.
       if (turnId) releaseCodexFinal(session, turnId)
@@ -1053,9 +1083,9 @@ async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt)
   // already have replaced it while tmux capture or Slack I/O was in flight.
   if (!expectedStartedAt || session.codexTurnStartedAt !== expectedStartedAt) return false
   stopPoller(session)
-  await clearStatus(session)
+  clearStatusDeferred(session)
   const text = String(failure?.text || 'Codex could not start this turn.').slice(0, 2000)
-  if (session.channel) await postMd(session.channel, `⚠️ *Codex turn failed:* ${text}`)
+  if (session.channel) await postProviderOutput(session.channel, `⚠️ *Codex turn failed:* ${text}`)
   await finishTeamTaskForSession(session, '', text)
   clearTeamInputReservation(session)
   saveState(state)
@@ -1064,11 +1094,11 @@ async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt)
 
 async function finalizePiTurn(session, body) {
   stopPoller(session)
-  await clearStatus(session)
+  clearStatusDeferred(session)
   const turnId = body.turn_id || null
   if (turnId && session.lastMirroredTurn === turnId) return
   const text = String(body.last_assistant_message || '').trim()
-  if (text && session.channel) await postMd(session.channel, text)
+  if (text && session.channel) await postProviderOutput(session.channel, text)
   await finishTeamTaskForSession(session, text)
   clearTeamInputReservation(session)
   recordPiUsage(session, body)
@@ -1262,8 +1292,8 @@ const readNewAssistantText = session => assistantTextSinceOffset(session, true)
 
 async function privateAssistantText(session, body = {}) {
   stopPoller(session)
-  await clearStatus(session)
-  await clearQuestionForm(session)
+  clearStatusDeferred(session)
+  void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
   if (providerOf(session) === 'codex' || providerOf(session) === 'pi') {
     const turnId = body.turn_id || null
     if (providerOf(session) === 'pi') recordPiUsage(session, body)
@@ -1754,7 +1784,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     if (provider !== 'claude') return
     if (targetClaim || internalTurns.has(session.id)) return
     const text = readNewAssistantText(session)
-    if (text) { await clearStatus(session); await postMd(session.channel, text) }
+    if (text) { clearStatusDeferred(session); await postProviderOutput(session.channel, text) }
     const structuredForms = questionFormsFromHook(body)
     if (structuredForms.length) {
       await clearStatus(session)
@@ -2689,7 +2719,7 @@ async function updateProviderCli(provider) {
     const { stdout, stderr } = await execFile(bin, updateArgs, { timeout: 180000 })
     note = (stdout + '\n' + stderr).split('\n').map(s => s.trim()).filter(Boolean).pop() || ''
   } catch (e) { note = `error: ${e?.stderr?.trim() || e?.message || e}` }
-  if (provider === 'codex') codexModelCache = null
+  if (provider === 'codex') codexModelCache = { key: null, list: [] }
   else if (provider === 'claude') modelCache = { key: null, list: [] }
   const after = await agentVersion(provider)
   const ver = before !== after ? `updated \`${before}\` → \`${after}\``
@@ -4104,10 +4134,16 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
 }
 
 const codeDir = () => process.env.CCS_CODE_DIR || path.join(process.env.HOME, 'Code')
+function projectFolders() {
+  try {
+    return fs.readdirSync(codeDir(), { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map(entry => entry.name).sort()
+  } catch { return [] }
+}
 async function postFolderPicker(channel, provider = 'claude') {
   const base = codeDir()
-  let dirs = []
-  try { dirs = fs.readdirSync(base, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name).sort() } catch {}
+  const dirs = projectFolders()
   if (!dirs.length) return post(channel, `No projects in \`${base}\`. Set CCS_CODE_DIR, or use \`/sab-new ${provider} <folder>\`.`)
   const options = dirs.slice(0, 100).map(d => ({ text: { type: 'plain_text', text: d.slice(0, 75) }, value: d.slice(0, 75) }))
   const pickerAction = `sabnew_folder_${provider}`
@@ -4456,6 +4492,213 @@ async function setPiSetting(session, name, value) {
 // right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
 const defaultNewFlags = (provider = 'claude') => defaultNewFlagsFor(provider)
 
+async function managementModelCatalog(session) {
+  const provider = providerOf(session)
+  if (provider === 'codex') {
+    return (await getCodexModels()).map(model => ({
+      value: model.id,
+      label: model.name || model.id,
+      description: model.efforts?.length ? `Effort: ${model.efforts.join(', ')}` : 'Codex model',
+    }))
+  }
+  if (provider === 'pi') {
+    if (!(session.pid && pidAlive(session.pid))) return []
+    try {
+      const result = await sendPiControl(session, 'models')
+      if (!result?.ok) return []
+      return (result.models || []).map(model => ({
+        value: model.id,
+        label: model.name || model.id,
+        description: [model.reasoning ? 'thinking' : null, ...(model.input || [])].filter(Boolean).join(' · '),
+      }))
+    } catch (error) {
+      log('Pi model catalog unavailable', String(error))
+      return []
+    }
+  }
+  const models = await getModels()
+  if (models.length) {
+    return models.map(model => ({
+      // Keep the public family aliases where possible: dispatch deliberately
+      // resolves them to the preferred long-context variant.
+      value: model.alias || model.id,
+      label: model.alias || model.name || model.id,
+      description: model.name && model.name !== model.alias ? model.name : model.id,
+    }))
+  }
+  return ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: value }))
+}
+
+async function postModelManagement(channel, session) {
+  const meta = sessionMeta.get(session.id) || {}
+  const current = meta.model || readModel(session) || 'unknown'
+  const models = await managementModelCatalog(session)
+  if (!models.length) {
+    return post(channel, `⚠️ The ${providerLabel(providerOf(session))} model catalog is unavailable. ` +
+      'The session was not changed; retry shortly or use `/sab-model <id>`.')
+  }
+  return postSlackMessage(channel, {
+    text: `Choose a ${providerLabel(providerOf(session))} model`,
+    blocks: modelPickerBlocks({ sessionId: session.id, provider: providerOf(session), current, models }),
+  })
+}
+
+function postEffortManagement(channel, session) {
+  const provider = providerOf(session)
+  const values = provider === 'codex' ? CODEX_EFFORTS
+    : provider === 'pi' ? PI_EFFORTS : ['low', 'medium', 'high', 'max']
+  const meta = sessionMeta.get(session.id) || {}
+  return postSlackMessage(channel, {
+    text: `Choose ${provider === 'pi' ? 'thinking' : 'effort'} for ${providerLabel(provider)}`,
+    blocks: settingPickerBlocks({
+      sessionId: session.id,
+      kind: 'effort',
+      title: `${providerLabel(provider)} ${provider === 'pi' ? 'thinking' : 'effort'}`,
+      current: meta.effort || session.effort || 'unknown',
+      values,
+    }),
+  })
+}
+
+const postTerminalManagement = (channel, session = null) => postSlackMessage(channel, {
+  text: 'Manage terminal viewports',
+  blocks: terminalPickerBlocks({ sessionId: session?.id || null }),
+})
+
+const postUpdateManagement = (channel, session = null) => postSlackMessage(channel, {
+  text: 'Choose a provider update operation',
+  blocks: updatePickerBlocks({ sessionId: session?.id || null }),
+})
+
+const postSwitchManagement = (channel, session) => postSlackMessage(channel, {
+  text: `Switch from ${providerLabel(providerOf(session))}`,
+  blocks: switchPickerBlocks({ sessionId: session.id, currentProvider: providerOf(session), providers: PROVIDERS }),
+})
+
+const postNewSessionManagement = channel => postSlackMessage(channel, {
+  text: 'Choose a provider for the new session',
+  blocks: newSessionBlocks(PROVIDERS),
+})
+
+const postSessionDashboard = (channel, session) => postSlackMessage(channel, {
+  text: `Manage SAB session ${session.id.slice(0, 8)}`,
+  blocks: sessionDashboardBlocks({ sessionId: session.id, provider: providerOf(session) }),
+})
+
+const postBridgeDashboard = channel => postSlackMessage(channel, {
+  text: 'Manage Slack Agent Bridge',
+  blocks: bridgeDashboardBlocks(),
+})
+
+async function postTeamManagement(channel, session, team) {
+  if (!team) {
+    return post(channel, 'This channel is not in an active session team. Create one with `/sab-team create <name>` from the intended coordinator channel.')
+  }
+  await postMd(channel, teamStatusMarkdown(team))
+  return postSlackMessage(channel, {
+    text: `Manage session team ${team.name}`,
+    blocks: teamPickerBlocks({
+      sessionId: session.id,
+      team: {
+        coordinator: team.coordinatorChannel === channel,
+        continuation: team.continuation?.mode || 'manual',
+      },
+    }),
+  })
+}
+
+const appHomePublishQueues = new Map()
+
+function appHomeUptime() {
+  const seconds = Math.max(0, Math.round((Date.now() - BOOT_TS) / 1000))
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}m`
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`
+  return `${(seconds / 86400).toFixed(1)}d`
+}
+
+function appHomeSessions() {
+  const sessions = []
+  for (const channel of Object.keys(state.channels || {})) {
+    const session = sessionByChannel(channel)
+    if (!session || session.channel !== channel || state.channels[channel] !== session.id) continue
+    const meta = sessionMeta.get(session.id) || {}
+    sessions.push({
+      id: session.id,
+      channel,
+      cwd: session.cwd,
+      provider: providerOf(session),
+      model: meta.model || session.modelName || session.model || readModel(session) || null,
+      effort: meta.effort || session.effort || null,
+      active: Boolean(session.pid && pidAlive(session.pid)),
+    })
+  }
+  return sessions.sort((a, b) => String(a.cwd || '').localeCompare(String(b.cwd || '')) || a.id.localeCompare(b.id))
+}
+
+async function buildAppHomeView(userId, { sessionId = null, notice = '' } = {}) {
+  if (!USER || userId !== USER) return appHomeOverviewView({ authorized: false })
+  const sessions = appHomeSessions()
+  if (sessionId) {
+    const session = state.sessions?.[sessionId]
+    const authoritative = session?.channel ? authoritativeManagementSession(session.channel, sessionId) : null
+    if (authoritative) {
+      const meta = sessionMeta.get(session.id) || {}
+      const rows = await terminalControl.list().catch(() => [])
+      const terminalOpen = Boolean(rows.find(row => row.sessionId === session.id)?.attached)
+      const models = await managementModelCatalog(session)
+      const provider = providerOf(session)
+      const efforts = provider === 'codex' ? CODEX_EFFORTS
+        : provider === 'pi' ? PI_EFFORTS : ['low', 'medium', 'high', 'max']
+      return appHomeSessionView({
+        session: {
+          id: session.id,
+          channel: session.channel,
+          cwd: session.cwd,
+          provider,
+          model: meta.model || session.modelName || session.model || readModel(session) || 'unknown',
+          effort: meta.effort || session.effort || 'unknown',
+          active: Boolean(session.pid && pidAlive(session.pid)),
+          terminalOpen,
+        },
+        models,
+        efforts,
+        providers: PROVIDERS,
+        notice,
+      })
+    }
+    notice = '⚠️ That session control is stale. The current authoritative session list is shown below.'
+  }
+  const counts = { claude: 0, codex: 0, pi: 0, active: 0, dormant: 0 }
+  for (const session of sessions) {
+    counts[session.provider]++
+    counts[session.active ? 'active' : 'dormant']++
+  }
+  return appHomeOverviewView({
+    authorized: true,
+    stats: { ...counts, uptime: appHomeUptime() },
+    sessions,
+    notice,
+  })
+}
+
+function publishAppHome(userId, options = {}) {
+  const previous = appHomePublishQueues.get(userId) || Promise.resolve()
+  const current = previous.catch(() => {}).then(async () => {
+    const view = await buildAppHomeView(userId, options)
+    return web.views.publish({ user_id: userId, view })
+  })
+  appHomePublishQueues.set(userId, current)
+  return current.finally(() => {
+    if (appHomePublishQueues.get(userId) === current) appHomePublishQueues.delete(userId)
+  })
+}
+
+async function handleAppHomeOpened({ event }) {
+  if (!event?.user || (event.tab && event.tab !== 'home')) return
+  try { await publishAppHome(event.user) }
+  catch (error) { log('App Home publish failed', event.user, error?.data?.error || String(error)) }
+}
+
 function teamStatusMarkdown(team) {
   const rows = Object.entries(team.members || {}).map(([channel, member]) => {
     const session = sessionByChannel(channel)
@@ -4508,6 +4751,7 @@ function revokeCancelledTeamTasks(ids) {
 async function handleTeamCommand(channel, rest) {
   const session = sessionByChannel(channel)
   if (!session) return post(channel, 'Use `/sab-team` in an authoritative SAB session channel.')
+  const interactive = rest.length === 0
   const sub = String(rest[0] || 'status').toLowerCase()
   if (sub === 'create') {
     if (rest.length !== 2) return post(channel, 'Usage: `/sab-team create <name>`')
@@ -4527,7 +4771,8 @@ async function handleTeamCommand(channel, rest) {
   const team = activeTeamForChannel(state, channel)
   if (!team) return post(channel, 'This channel is not in an active session team. Create one with `/sab-team create <name>` from the intended coordinator channel.')
   if (sub === 'status') {
-    if (rest.length !== 1) return post(channel, 'Usage: `/sab-team status`')
+    if (rest.length > 1) return post(channel, 'Usage: `/sab-team status`')
+    if (interactive) return postTeamManagement(channel, session, team)
     return postMd(channel, teamStatusMarkdown(team))
   }
   if (team.coordinatorChannel !== channel) {
@@ -4621,13 +4866,13 @@ const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup', 'team'])
 
 function commandHelp(provider = null) {
   const context = provider ? ` This channel currently uses *${providerLabel(provider)}*.` : ''
-  return '*Slack Agent Bridge commands* — type `/sab-` to autocomplete.' + context + '\n' +
-    '`/sab-new <claude|codex|pi> [folder] [flags]` — start a headless session\n' +
-    '`/sab-model [model]` · `/sab-effort [level]` · `/sab-flags [flags]` — inspect or change the active provider\n' +
-    '`/sab-update [all]` · `/sab-stop` · `/sab-kill` — update one/all idle sessions, interrupt, or end\n' +
+  return '*Slack Agent Bridge commands* — type `/sab-` to autocomplete; omit arguments on management commands for interactive controls.' + context + '\n' +
+    '`/sab-new <claude|codex|pi> [folder] [flags]` — choose or start a headless session\n' +
+    '`/sab-model [model]` · `/sab-effort [level]` · `/sab-flags [flags]` — choose, inspect, or change the active provider\n' +
+    '`/sab-update [current|all]` · `/sab-stop` · `/sab-kill` — choose an update, interrupt, or end\n' +
     '`/sab-switch <claude|codex|pi> [new]` — hand this channel to another provider\n' +
     '`/sab-status [provider]` · `/sab-usage [provider] …` — current session or control-channel overview\n' +
-    '`/sab-terminal open|close|list|open-all|close-all` — manage optional Ghostty viewports\n' +
+    '`/sab-terminal [open|close|list|open-all|close-all]` — manage optional Ghostty viewports\n' +
     '`/sab-team create|add|status|auto|manual|permissions|remove|close` — link sessions for safe agent delegation\n' +
     '`/sab-run …` — Pi managed runs · `/sab-account …` — Claude subscriptions\n' +
     '`/sab-health` · `/sab-cleanup` · `/sab-claim` — bridge-wide operations'
@@ -4661,13 +4906,16 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     return post(channel, `🕸️ Team task \`${channelSession.teamActiveTaskId}\` owns this worker turn. Wait for its final response or interrupt/end it before changing provider settings.`)
   }
   if (name === 'terminal') {
-    let action = String(rest[0] || (channelSession ? 'list' : 'list')).toLowerCase()
+    const interactive = rest.length === 0
+    let action = String(rest[0] || 'list').toLowerCase()
     if (action === 'show-all') action = 'open-all'
     if (action === 'list') {
       if (rest.length > 1) return post(channel, 'Usage: `/sab-terminal list|open|close|open-all|close-all`')
       const rows = await terminalControl.list()
-      return postMd(channel, `| Session | Provider | Terminal | Folder |\n|---|---|---|---|\n${rows.map(row =>
+      await postMd(channel, `| Session | Provider | Terminal | Folder |\n|---|---|---|---|\n${rows.map(row =>
         `| ${row.session} | ${providerLabel(row.provider)} | ${row.attached ? '🖥️ open' : '▫️ closed'} | ${String(row.cwd || '—').replace(/\|/g, '\\|')} |`).join('\n') || '| _none_ | | | |'}`)
+      if (interactive) return postTerminalManagement(channel, channelSession)
+      return
     }
     const all = action === 'open-all' || action === 'close-all'
     const operation = action === 'open' || action === 'open-all' ? 'open'
@@ -4755,6 +5003,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
         ? '⏳ This Pi session is assessing a prompt. Cancel it with `/sab-stop` before switching providers.'
         : '⏳ This Pi session has an active managed run. Pause it with `/sab-run pause` before switching providers.')
     }
+    if (!rest.length && !ingressProvider) return postSwitchManagement(channel, channelSession)
     const words = rest.map(word => word.toLowerCase())
     const replaceMissing = words.includes('new')
     const requested = words.find(word => PROVIDERS.includes(word)) || null
@@ -4804,6 +5053,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
         `| Changes | ${changes} |` +
         (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
       await postSlackMessage(channel, { text: 'Collaborators', blocks: await collabBlocks(channel) })
+      await postSessionDashboard(channel, session)
       return
     }
     let statusProvider = ingressProvider
@@ -4817,7 +5067,9 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       const standby = !s.channel && Object.values(state.lineages || {}).some(lineage => lineage.legs?.[provider] === s.id)
       return `| ${path.basename(s.cwd)} | ${providerLabel(providerOf(s))} | ${s.id.slice(0, 8)} | ${standby ? '⏸️ standby' : alive ? '🟢 active' : '💤 dormant'} |`
     })
-    return postMd(channel, `| Session | Provider | ID | State |\n|---|---|---|---|\n${rows.join('\n') || '| _none_ | | | |'}`)
+    await postMd(channel, `| Session | Provider | ID | State |\n|---|---|---|---|\n${rows.join('\n') || '| _none_ | | | |'}`)
+    if (!statusProvider) return postBridgeDashboard(channel)
+    return
   }
   if (name === 'health') {
     const sess = Object.values(state.sessions)
@@ -4827,11 +5079,13 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     const claude = sess.length - codex - pi
     const up = Math.round((Date.now() - BOOT_TS) / 1000)
     const hms = up < 3600 ? `${Math.round(up / 60)}m` : `${(up / 3600).toFixed(1)}h`
+    const statusQueue = liveStatuses.snapshot()
     return postMd(channel,
       `| Bridge health | |\n|---|---|\n` +
       `| Uptime | ${hms} |\n` +
       `| Sessions | ${active} active, ${sess.length - active} dormant |\n` +
       `| Providers | ${claude} Claude, ${codex} Codex, ${pi} Pi |\n` +
+      `| Status queue | ${statusQueue.priority} cleanup, ${statusQueue.normal} cosmetic${statusQueue.active ? ' · active' : ''} |\n` +
       `| Agent streams attached | ${streams.size} |\n` +
       `| Open permission prompts | ${Object.keys(state.perms).length} |`)
   }
@@ -4882,43 +5136,9 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     const provider = providerOf(session)
     const meta = sessionMeta.get(session.id) || {}
     if (!rest.length) {
-      if (name === 'model') {
-        const cur = meta.model || readModel(session) || 'unknown'
-        if (provider === 'pi') {
-          if (session.pid && pidAlive(session.pid)) {
-            try {
-              const result = await sendPiControl(session, 'models')
-              if (result?.ok && result.models?.length) {
-                const rows = result.models.map(model =>
-                  `| \`${model.id}\` | ${model.name || model.id} | ${model.reasoning ? 'yes' : 'no'} | ${(model.input || []).join(', ')} |`).join('\n')
-                return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`${cmd('model')} <provider/model>\`:\n` +
-                  `| Model id | Name | Thinking | Input |\n|---|---|---|---|\n${rows}`)
-              }
-            } catch (error) { log('Pi model catalog unavailable', String(error)) }
-          }
-          return post(channel, `*model*: \`${cur}\`\nSet with \`${cmd('model')} <provider/model>\`.`)
-        }
-        if (provider === 'codex') {
-          const models = await getCodexModels()
-          if (models.length) {
-            const rows = models.map(m => `| \`${m.id}\` | ${m.name} | ${m.efforts.join(' · ') || '—'} |`).join('\n')
-            return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`${cmd('model')} <id>\`:\n| Model id | Name | Efforts |\n|---|---|---|\n${rows}`)
-          }
-          return post(channel, `*model*: \`${cur}\`\nSet with \`${cmd('model')} <id>\`.`)
-        }
-        const models = await getModels()
-        if (models.length) {
-          const rows = models.map(m => `| \`${m.alias}\` | ${m.name} | \`${m.id}\` |`).join('\n')
-          const hasLong = models.some(m => /-1m$/.test(m.alias))
-          return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`${cmd('model')} <alias>\` (or a full id):\n| Alias | Model | Full id |\n|---|---|---|\n${rows}` +
-            (hasLong ? '\n_A family alias picks the *1M-context* variant when one exists — pass the full id for the standard window._' : ''))
-        }
-        return post(channel, `*model*: \`${cur}\`\nSet with \`${cmd('model')} <value>\`  (sonnet · opus · haiku · fable)`)
-      }
-      const efforts = provider === 'codex' ? CODEX_EFFORTS.join(' · ')
-        : provider === 'pi' ? PI_EFFORTS.join(' · ')
-          : 'low · medium · high · max'
-      return post(channel, `*effort*: \`${meta.effort || session.effort || 'unknown'}\`\nSet with \`${cmd('effort')} <value>\`  (${efforts})`)
+      return name === 'model'
+        ? postModelManagement(channel, session)
+        : postEffortManagement(channel, session)
     }
     if (provider === 'codex') {
       const val = rest.join(' ').toLowerCase()
@@ -5040,8 +5260,13 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     return switchAccount(session, picked)
   }
   if (name === 'update' || name === 'restart') {
+    if (!rest.length) {
+      const session = sessionByChannel(channel)
+      return postUpdateManagement(channel, session)
+    }
     const all = rest.length === 1 && rest[0].toLowerCase() === 'all'
-    if (rest.length && !all) return post(channel, 'Usage: `/sab-update [all]`')
+    const current = rest.length === 1 && ['current', 'here'].includes(rest[0].toLowerCase())
+    if (!all && !current) return post(channel, 'Usage: `/sab-update [current|all]`')
     if (all) return updateAllSessions(channel)
     const session = sessionByChannel(channel)
     if (!session) return post(channel, 'Use `/sab-update` in a session channel, or `/sab-update all` to update every idle active session.')
@@ -5070,6 +5295,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   }
   if (name === 'new') {
     if (!ingressProvider) {
+      if (!rest.length) return postNewSessionManagement(channel)
       const requested = normalizeProvider(rest[0], null)
       if (!requested) return post(channel, 'Usage: `/sab-new <claude|codex|pi> [folder] [flags]`')
       commandProvider = requested
@@ -5279,7 +5505,7 @@ http.createServer(async (req, res) => {
       // claim and asks the local proxy to retry.
       saveStateNow(state)
       try {
-        await postMd(session.channel, commentary.text)
+        await postProviderOutput(session.channel, commentary.text, { keepStatus: true })
         res.writeHead(202); res.end('accepted')
       } catch (error) {
         releaseCodexCommentary(session, commentary.itemId)
@@ -5725,6 +5951,199 @@ async function respondEphemeral(body, text) {
   } catch { return false }
 }
 
+function authoritativeManagementSession(channel, target) {
+  if (!channel || target === 'bridge') return null
+  const session = authoritativeManagementBinding(state, channel, target)
+  const authoritative = sessionByChannel(channel)
+  if (!session || !authoritative || authoritative.id !== target) return null
+  return session
+}
+
+function authoritativeAppHomeSession(target) {
+  const session = state.sessions?.[target]
+  return session?.channel ? authoritativeManagementSession(session.channel, target) : null
+}
+
+async function handleAppHomeAction(body, action, parsed) {
+  const userId = body.user?.id
+  if (!userId || userId !== USER || body.view?.callback_id !== APP_HOME_CALLBACK) return
+  const session = parsed.target === 'bridge' ? null : authoritativeAppHomeSession(parsed.target)
+  if (parsed.target !== 'bridge' && !session) {
+    return publishAppHome(userId, { notice: '⚠️ That control belonged to a session which is no longer authoritative. No action was taken.' })
+  }
+  const destination = session?.channel || state.control
+
+  if (parsed.kind === 'navigate') {
+    if (parsed.target === 'bridge' && parsed.action === 'overview') return publishAppHome(userId)
+    if (session && parsed.action === 'session') return publishAppHome(userId, { sessionId: session.id })
+    return publishAppHome(userId, { notice: '⚠️ Invalid App Home navigation control.' })
+  }
+
+  if (parsed.kind === 'modal' && parsed.target === 'bridge' && parsed.action === 'new') {
+    const projects = projectFolders().filter(name => name.length <= 150).slice(0, 100)
+    if (!projects.length) return publishAppHome(userId, { notice: `⚠️ No project folders are available under \`${codeDir()}\`.` })
+    if (!body.trigger_id) return publishAppHome(userId, { notice: '⚠️ Slack did not provide a modal trigger. Reopen App Home and retry.' })
+    await web.views.open({ trigger_id: body.trigger_id, view: newSessionModal({ providers: PROVIDERS, projects }) })
+    return
+  }
+
+  if (!destination) return publishAppHome(userId, { notice: '⚠️ The bridge control channel is unavailable, so no action was taken.' })
+
+  if (parsed.kind === 'terminal') {
+    const allowed = session ? ['open', 'close'] : ['open-all', 'close-all']
+    if (!allowed.includes(parsed.action)) return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid terminal control.' })
+    await dispatch('terminal', [parsed.action], destination, null, { userId })
+    return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Terminal request processed. Its authoritative result was posted to Slack.' })
+  }
+
+  if (parsed.kind === 'update') {
+    if ((session && parsed.action !== 'current') || (!session && parsed.action !== 'all')) {
+      return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid update control.' })
+    }
+    await dispatch('update', [parsed.action], destination, null, { userId })
+    return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Update request processed. Its authoritative result remains visible in Slack.' })
+  }
+
+  if (parsed.kind === 'model') {
+    const value = action.selected_option?.value
+    if (!session || parsed.action !== 'select' || !value) return publishAppHome(userId, { notice: '⚠️ Invalid model control.' })
+    const supported = await managementModelCatalog(session)
+    if (!supported.some(model => model.value === value)) {
+      return publishAppHome(userId, { sessionId: session.id, notice: '⚠️ That model is no longer in the current provider catalog. No setting was changed.' })
+    }
+    await dispatch('model', [value], destination, null, { userId })
+    return publishAppHome(userId, { sessionId: session.id, notice: 'ℹ️ Model request processed. The session channel contains the authoritative result.' })
+  }
+
+  if (parsed.kind === 'effort') {
+    const value = action.selected_option?.value
+    const provider = session && providerOf(session)
+    const supported = provider === 'codex' ? CODEX_EFFORTS : provider === 'pi' ? PI_EFFORTS : ['low', 'medium', 'high', 'max']
+    if (!session || parsed.action !== 'select' || !supported.includes(value)) {
+      return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid or stale effort control. No setting was changed.' })
+    }
+    await dispatch('effort', [value], destination, null, { userId })
+    return publishAppHome(userId, { sessionId: session.id, notice: 'ℹ️ Effort request processed. The session channel contains the authoritative result.' })
+  }
+
+  if (parsed.kind === 'switch') {
+    const provider = normalizeProvider(parsed.action, null)
+    if (!session || !provider || provider === providerOf(session)) {
+      return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid provider-switch control.' })
+    }
+    await dispatch('switch', [provider], destination, null, { userId })
+    return publishAppHome(userId, { sessionId: session.id, notice: '🔀 Provider-switch review started. Continue from the session channel.' })
+  }
+
+  if (parsed.kind === 'dispatch') {
+    const allowed = session ? ['usage', 'team'] : ['usage', 'health']
+    if (!allowed.includes(parsed.action)) return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid App Home command.' })
+    await dispatch(parsed.action, [], destination, null, { userId })
+    return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Report request processed. Its authoritative result was posted to Slack.' })
+  }
+
+  return publishAppHome(userId, { sessionId: session?.id || null, notice: '⚠️ Unknown App Home control. No action was taken.' })
+}
+
+async function handleAppHomeSubmission(body) {
+  const userId = body.user?.id
+  if (!userId || userId !== USER || body.view?.callback_id !== APP_HOME_NEW_CALLBACK) return
+  try {
+    const request = parseNewSessionSubmission(body.view)
+    const projects = projectFolders()
+    validateNewSessionSelection(request, { providers: PROVIDERS, projects })
+    const provider = normalizeProvider(request.provider, null)
+    if (!state.control) throw new Error('the bridge control channel is unavailable')
+    await spawnNew(state.control, path.join(codeDir(), request.project), request.flags, provider)
+    await publishAppHome(userId, { notice: 'ℹ️ New-session request processed. Its authoritative lifecycle result appears in the bridge control channel; refresh after the session binds.' })
+  } catch (error) {
+    log('App Home new-session submission failed', String(error?.stack || error))
+    if (state.control) {
+      await post(state.control, `❌ App Home could not start the requested session. ${String(error?.message || error).slice(0, 500)}`).catch(() => {})
+    }
+    await publishAppHome(userId, { notice: `❌ New-session request failed: ${String(error?.message || error).slice(0, 500)}` }).catch(() => {})
+  }
+}
+
+async function handleManagementAction(body, action, parsed) {
+  const channel = body.channel?.id
+  if (!channel) return
+  const session = parsed.target === 'bridge' ? null : authoritativeManagementSession(channel, parsed.target)
+  if (parsed.target !== 'bridge' && !session) {
+    return post(channel, '⚠️ This management control is stale: the channel is no longer bound to that exact active session. Run `/sab-status` for fresh controls.')
+  }
+
+  if (parsed.kind === 'new') {
+    if (parsed.target !== 'bridge') return post(channel, '❌ Invalid new-session control.')
+    const provider = normalizeProvider(parsed.action, null)
+    if (!provider) return post(channel, '❌ Invalid provider selection.')
+    return postFolderPicker(channel, provider)
+  }
+
+  if (parsed.kind === 'panel') {
+    if (parsed.target === 'bridge') {
+      if (!['new', 'terminal', 'update', 'health', 'usage'].includes(parsed.action)) {
+        return post(channel, '❌ Invalid bridge-management control.')
+      }
+      return dispatch(parsed.action, [], channel, null, { userId: body.user.id })
+    }
+    if (!session || !['model', 'effort', 'terminal', 'switch', 'update', 'usage', 'team'].includes(parsed.action)) {
+      return post(channel, '❌ Invalid session-management control.')
+    }
+    return dispatch(parsed.action, [], channel, null, { userId: body.user.id })
+  }
+
+  if (parsed.kind === 'model') {
+    const value = action.selected_option?.value
+    if (!session || parsed.action !== 'select' || !value) return post(channel, '❌ Invalid model selection.')
+    const supported = await managementModelCatalog(session)
+    if (!supported.some(model => model.value === value)) {
+      return post(channel, '⚠️ That model is no longer in the provider’s current catalog. No setting was changed; run `/sab-model` for a fresh list.')
+    }
+    return dispatch('model', [value], channel, null, { userId: body.user.id })
+  }
+
+  if (parsed.kind === 'effort') {
+    const value = action.selected_option?.value
+    if (!session || parsed.action !== 'select' || !value) return post(channel, '❌ Invalid effort selection.')
+    const provider = providerOf(session)
+    const supported = provider === 'codex' ? CODEX_EFFORTS : provider === 'pi' ? PI_EFFORTS : ['low', 'medium', 'high', 'max']
+    if (!supported.includes(value)) return post(channel, '⚠️ That effort is no longer supported. No setting was changed; run `/sab-effort` for a fresh list.')
+    return dispatch('effort', [value], channel, null, { userId: body.user.id })
+  }
+
+  if (parsed.kind === 'terminal') {
+    if (!['list', 'open', 'close', 'open-all', 'close-all'].includes(parsed.action) ||
+        (!session && ['open', 'close'].includes(parsed.action))) {
+      return post(channel, '❌ Invalid terminal control.')
+    }
+    return dispatch('terminal', [parsed.action], channel, null, { userId: body.user.id })
+  }
+
+  if (parsed.kind === 'update') {
+    if (!['current', 'all'].includes(parsed.action) || (!session && parsed.action === 'current')) {
+      return post(channel, '❌ Invalid update control.')
+    }
+    return dispatch('update', [parsed.action], channel, null, { userId: body.user.id })
+  }
+
+  if (parsed.kind === 'switch') {
+    const provider = normalizeProvider(parsed.action, null)
+    if (!session || !provider || provider === providerOf(session)) return post(channel, '❌ Invalid provider-switch control.')
+    return dispatch('switch', [provider], channel, null, { userId: body.user.id })
+  }
+
+  if (parsed.kind === 'team') {
+    if (!session || !['status', 'add', 'auto', 'manual', 'permissions', 'close'].includes(parsed.action)) {
+      return post(channel, '❌ Invalid team-management control.')
+    }
+    return dispatch('team', [parsed.action], channel, null, { userId: body.user.id })
+  }
+
+  return post(channel, '❌ Unknown SAB management control. Run `/sab-status` for fresh controls.')
+}
+
+
 async function handleSocketSlashCommand({ body }) {
   try {
     const parsed = parseSlackCommand(body.command)
@@ -5759,9 +6178,34 @@ async function handleSocketSlashCommand({ body }) {
 // Interactive components: Approve/Deny buttons and provider folder pickers.
 async function handleSocketInteractive({ body }) {
   try {
-    if (body?.type !== 'block_actions' || body.user?.id !== USER) return
+    if (body?.user?.id !== USER) return
+    if (body.type === 'view_submission') return handleAppHomeSubmission(body)
+    if (body.type !== 'block_actions') return
     const action = body.actions?.[0]
     if (!action) return
+    const appHomeAction = parseAppHomeActionId(action.action_id)
+    if (appHomeAction) {
+      try { await handleAppHomeAction(body, action, appHomeAction) }
+      catch (error) {
+        log('App Home action failed', appHomeAction.kind, appHomeAction.action, String(error?.stack || error))
+        await publishAppHome(body.user.id, {
+          sessionId: appHomeAction.target === 'bridge' ? null : appHomeAction.target,
+          notice: `❌ App Home could not complete that action: ${String(error?.message || error).slice(0, 500)}`,
+        }).catch(() => {})
+      }
+      return
+    }
+    const managementAction = parseManagementActionId(action.action_id)
+    if (managementAction) {
+      try { await handleManagementAction(body, action, managementAction) }
+      catch (error) {
+        log('management action failed', managementAction.kind, managementAction.action, String(error?.stack || error))
+        if (body.channel?.id) {
+          await post(body.channel.id, `❌ SAB could not complete that management action. ${String(error?.message || error).slice(0, 500)}`).catch(() => {})
+        }
+      }
+      return
+    }
     if (String(action.action_id || '').startsWith('sabnew_folder_')) {
       const folder = action.selected_option?.value
       const provider = normalizeProvider(String(action.action_id).slice('sabnew_folder_'.length), null)
@@ -5867,6 +6311,7 @@ const socketCoordinator = createSocketModeCoordinator({
   socket: slackRuntime.socket,
   handlers: {
     message: handleSocketMessage,
+    app_home_opened: handleAppHomeOpened,
     slash_commands: handleSocketSlashCommand,
     interactive: handleSocketInteractive,
   },

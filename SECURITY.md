@@ -213,6 +213,20 @@ accounts, and the Mac user running the daemon.
   or standby legs, never runs the bulk cleanup path, and revalidates each target
   immediately before stopping it. Provider update failure does not prevent a
   safely stopped session from being resumed.
+- **Fail-closed interactive management:** Block Kit controls are owner-only and
+  bind the exact session identity that rendered them. Every click rechecks the
+  immutable channel/session/node binding, authoritative provider, current
+  catalog, and normal command gates. A stale, rebound, switched, or
+  cross-channel control reports an error and performs no mutation. Model and
+  effort values are validated again at action time; broad update and team-close
+  actions require Slack confirmation.
+- **Owner-private App Home:** `app_home_opened` may arrive for any workspace
+  user, but only the configured owner receives bridge/session metadata or
+  actions. Other users receive a static restricted view. Owner actions reuse
+  the normal dispatcher, provider allowlists, transition/team gates, and
+  Slack-channel audit trail. The new-session modal accepts only a currently
+  listed top-level project folder, and Home navigation grants no session,
+  Slack, node, team, or artifact authority.
 - **Hookless Codex resume fencing:** if idle Codex does not emit `SessionStart`
   after an update, settings change, or ordinary Slack wake, the bridge may
   restore the PID only from a Codex process descending from the exact recorded
@@ -230,9 +244,10 @@ accounts, and the Mac user running the daemon.
   session. No fallback path fabricates a provider final response from terminal
   output.
 - **Rate-safe status delivery:** live status edits use one workspace-wide,
-  bounded queue and discard superseded timer text before Slack I/O. This keeps
-  status churn from exhausting `chat.update` capacity and delaying ordinary
-  replies or final delivery.
+  bounded queue, discard superseded timer text before Slack I/O, and prioritize
+  end-of-turn cleanup. Provider commentary and finals do not wait on cosmetic
+  status mutations. This keeps `chat.update` backoff from withholding stable
+  output or leaving a completed provider turn fenced behind timer traffic.
 - **Claude resume readiness:** a detached tmux appearing is not enough to revive
   a Claude session. Only the exact `SessionStart` PID/tmux claim makes it active.
   Failed attempts retain only a mode-0600 numeric exit code under the private

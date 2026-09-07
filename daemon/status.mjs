@@ -55,20 +55,39 @@ export function createStatusMessages(web, {
   minIntervalMs = 0,
 } = {}) {
   const entries = new Map()
-  const apiQueue = []
+  const apiQueues = { priority: [], normal: [] }
   let apiRunning = false
   let lastApiAt = 0
+  const SKIPPED = Symbol('status mutation superseded')
 
-  const scheduleApi = (action) => new Promise((resolve, reject) => {
-    apiQueue.push({ action, resolve, reject })
+  const scheduleApi = (action, { priority = false, valid = null } = {}) => new Promise((resolve, reject) => {
+    apiQueues[priority ? 'priority' : 'normal'].push({ action, resolve, reject, valid })
     if (apiRunning) return
     apiRunning = true
     ;(async () => {
       try {
-        while (apiQueue.length) {
-          const item = apiQueue.shift()
+        while (apiQueues.priority.length || apiQueues.normal.length) {
+          // Resolve invalidated edits across the whole normal queue before
+          // choosing the next API call. Their per-session continuations may
+          // enqueue a priority clear, which must win over unrelated updates.
+          for (let index = apiQueues.normal.length - 1; index >= 0; index--) {
+            const queued = apiQueues.normal[index]
+            if (!queued.valid || queued.valid()) continue
+            apiQueues.normal.splice(index, 1)
+            queued.resolve(SKIPPED)
+          }
+          // Let the invalidated per-session promise chain finish. It may now
+          // enqueue a priority clear; yielding one event-loop turn guarantees
+          // that cleanup is visible before we select unrelated cosmetic work.
+          await new Promise(resolve => setImmediate(resolve))
+          const item = apiQueues.priority.shift() || apiQueues.normal.shift()
+          if (!item) continue
+          if (item.valid && !item.valid()) { item.resolve(SKIPPED); continue }
           const wait = Math.max(0, Number(minIntervalMs) || 0) - (Date.now() - lastApiAt)
           if (wait > 0) await new Promise(done => setTimeout(done, wait))
+          // A clear may have invalidated a cosmetic edit while it waited for
+          // the workspace budget. Drop it without consuming another API slot.
+          if (item.valid && !item.valid()) { item.resolve(SKIPPED); continue }
           lastApiAt = Date.now()
           try { item.resolve(await item.action()) }
           catch (error) { item.reject(error) }
@@ -82,7 +101,7 @@ export function createStatusMessages(web, {
   const entryFor = sid => {
     let entry = entries.get(sid)
     if (!entry) {
-      entry = { ts: null, text: '', desiredText: '', queue: Promise.resolve() }
+      entry = { ts: null, text: '', desiredText: '', setRevision: 0, epoch: 0, queue: Promise.resolve() }
       entries.set(sid, entry)
     }
     return entry
@@ -100,19 +119,26 @@ export function createStatusMessages(web, {
     const desiredText = String(text || '')
     const entry = entryFor(session.id)
     entry.desiredText = desiredText
+    const revision = ++entry.setRevision
     return serialize(session.id, async current => {
       // The poller can tick faster than Slack's workspace-wide API budget.
       // Drop superseded edits before they enter the API queue; only the newest
       // text for this session is ever sent.
-      if (current.desiredText !== desiredText) return true
-      current.text = desiredText
+      const valid = () => current.setRevision === revision && current.desiredText === desiredText
+      if (!valid()) return true
       try {
         if (current.ts) {
-          await scheduleApi(() => web.chat.update({ channel: session.channel, ts: current.ts, text: current.text }))
+          const result = await scheduleApi(
+            () => web.chat.update({ channel: session.channel, ts: current.ts, text: desiredText }),
+            { valid },
+          )
+          if (result === SKIPPED) return true
         } else {
-          const posted = await scheduleApi(() => postMessage(session.channel, current.text))
+          const posted = await scheduleApi(() => postMessage(session.channel, desiredText), { valid })
+          if (posted === SKIPPED) return true
           current.ts = posted.ts
         }
+        current.text = desiredText
         return true
       } catch (error) {
         if (error?.data?.error === 'message_not_found') current.ts = null
@@ -124,7 +150,10 @@ export function createStatusMessages(web, {
 
   async function bump(session, { afterTs = null } = {}) {
     if (!session?.id || !session.channel) return false
+    const entry = entryFor(session.id)
+    const epoch = entry.epoch
     return serialize(session.id, async current => {
+      if (current.epoch !== epoch || !current.desiredText) return false
       const oldTs = current.ts
       if (!oldTs || !current.text) return false
       if (afterTs && isNewerOrEqual(oldTs, afterTs)) return false
@@ -156,14 +185,28 @@ export function createStatusMessages(web, {
 
   async function clear(session) {
     if (!session?.id) return false
-    return serialize(session.id, async current => {
-      const ts = current.ts
-      current.ts = null
-      current.text = ''
+    const entry = entryFor(session.id)
+    // Invalidate queued edits immediately. Their global queue entries test the
+    // revision again immediately before Slack I/O, so an ended turn cannot
+    // continue consuming rate-limit budget while its delete waits behind it.
+    entry.desiredText = ''
+    entry.setRevision++
+    entry.epoch++
+    const previous = entry.queue.catch(() => {})
+    // Do not put an action which awaits `previous` into the global queue:
+    // `previous` may be a bump between its replacement post and old-message
+    // delete, and that second operation needs the same queue. Enqueue the
+    // priority clear only after this session's prior mutation has settled.
+    const clearing = previous.then(() => scheduleApi(async () => {
+      const ts = entry.ts
+      entry.ts = null
+      entry.text = ''
       if (!session.channel || !ts) return false
-      try { await scheduleApi(() => web.chat.delete({ channel: session.channel, ts })) } catch {}
+      try { await web.chat.delete({ channel: session.channel, ts }) } catch {}
       return true
-    })
+    }, { priority: true }))
+    entry.queue = clearing
+    return clearing
   }
 
   function adopt(sid, ts) {
@@ -171,5 +214,12 @@ export function createStatusMessages(web, {
     entryFor(sid).ts = ts
   }
 
-  return { set, bump, clear, adopt }
+  const snapshot = () => ({
+    active: apiRunning,
+    normal: apiQueues.normal.length,
+    priority: apiQueues.priority.length,
+    sessions: entries.size,
+  })
+
+  return { set, bump, clear, adopt, snapshot }
 }

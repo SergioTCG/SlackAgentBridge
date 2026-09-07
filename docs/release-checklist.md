@@ -50,6 +50,9 @@
       commands are absent.
 - [ ] Confirm `/sab-team` was registered without adding OAuth scopes or a second
       Slack app.
+- [ ] Confirm the Home tab is enabled, Messages tab remains disabled, and
+      `app_home_opened` is subscribed on the existing Socket Mode app without a
+      new OAuth scope or token.
 
 ## Controlled live canary
 
@@ -77,6 +80,17 @@
 - [ ] Claude login expiry and overload failures surface promptly and deduplicate.
 - [ ] `/sab-model`, `/sab-effort`, `/sab-flags`, `/sab-update`, `/sab-stop`,
       `/sab-kill`, `/sab-status`, and `/sab-usage` work for each provider.
+- [ ] No-argument model, effort, terminal, update, switch, new-session, team,
+      and status controls work; equivalent parameterized forms behave the same.
+      A panel posted before a switch/rebind fails without mutating the new leg.
+- [ ] Interactive update-all and team-close require confirmation; cancellation
+      has no side effect.
+- [ ] Owner App Home shows fresh bridge/session state, opens exact session
+      controls, and creates a default/allowlisted session. A non-owner Home
+      reveals no channel, session, cwd, model, or action data.
+- [ ] With several simultaneous turns, status queue pressure stays bounded,
+      `/sab-health` reports it, final/commentary messages arrive before delayed
+      timer cleanup, and a completed turn cannot keep an hour-old working line.
 - [ ] `/sab-update all` updates each represented provider binary once, resumes
       every idle authoritative session with unchanged settings, queues a prompt
       arriving mid-relaunch, and explicitly skips a busy turn, permission,

@@ -149,12 +149,100 @@ test('status edits coalesce while a workspace-wide Slack budget is occupied', as
   assert.equal(slack.calls.at(-1)[1].text, 'working 4s')
 })
 
+test('clear cancels a queued edit and preempts unrelated cosmetic status traffic', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  const first = { id: 'S1', channel: 'C1' }
+  const second = { id: 'S2', channel: 'C2' }
+  const ending = { id: 'S3', channel: 'C3' }
+
+  await status.set(first, 'one')
+  await status.set(second, 'two')
+  await status.set(ending, 'ending')
+
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const originalUpdate = slack.web.chat.update
+  slack.web.chat.update = async args => {
+    if (args.channel === 'C1') { startedResolve(); await gate }
+    return originalUpdate(args)
+  }
+
+  const occupied = status.set(first, 'one newer')
+  await started
+  const unrelated = status.set(second, 'two newer')
+  const stale = status.set(ending, 'must never be sent')
+  const cleared = status.clear(ending)
+  release()
+  await Promise.all([occupied, unrelated, stale, cleared])
+
+  const afterOccupied = slack.calls.slice(4)
+  assert.equal(afterOccupied[0][0], 'delete')
+  assert.equal(afterOccupied[0][1].channel, 'C3')
+  assert.equal(afterOccupied.some(call => call[0] === 'update' && call[1].text === 'must never be sent'), false)
+  assert.equal(afterOccupied.some(call => call[0] === 'update' && call[1].text === 'two newer'), true)
+})
+
+test('clear cannot deadlock an in-flight status bump', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  const session = { id: 'S1', channel: 'C1' }
+  await status.set(session, 'working')
+
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const originalPost = slack.web.chat.postMessage
+  slack.web.chat.postMessage = async args => {
+    if (args.text === 'working') { startedResolve(); await gate }
+    return originalPost(args)
+  }
+
+  const bumped = status.bump(session)
+  await started
+  const cleared = status.clear(session)
+  release()
+
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('status clear deadlocked')), 1000))
+  await Promise.race([Promise.all([bumped, cleared]), timeout])
+  assert.equal(status.snapshot().normal, 0)
+  assert.equal(status.snapshot().priority, 0)
+  assert.equal(slack.calls.filter(call => call[0] === 'delete').length, 2)
+})
+
+test('status scheduler exposes bounded operational queue depth', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  assert.deepEqual(status.snapshot(), { active: false, normal: 0, priority: 0, sessions: 0 })
+  await status.set({ id: 'S1', channel: 'C1' }, 'working')
+  assert.deepEqual(status.snapshot(), { active: false, normal: 0, priority: 0, sessions: 1 })
+})
+
+test('bridge health exposes status-queue pressure without provider or Slack secrets', () => {
+  const block = /if \(name === 'health'\) \{([\s\S]*?)\n  \}\n  if \(name === 'kill'\)/.exec(daemon)?.[1] || ''
+  assert.match(block, /liveStatuses\.snapshot\(\)/)
+  assert.match(block, /Status queue/)
+  assert.doesNotMatch(block, /SLACK_(?:BOT|APP)_TOKEN/)
+})
+
 test('daemon re-anchors status after posts, topic changes, and channel messages', () => {
   assert.match(daemon, /async function postSlackMessage[\s\S]*bumpStatusForChannel\(channel, result\?\.ts\)/)
   assert.match(daemon, /const changed = await syncTopic[\s\S]*if \(changed\) await bumpStatus/)
   assert.match(daemon, /event\.subtype === 'channel_topic'[\s\S]*bumpStatusForChannel\(event\.channel, event\.ts \|\| null\)/)
   assert.match(daemon, /if \(!event\.thread_ts\) await bumpStatusForChannel\(event\.channel, event\.ts \|\| null\)/)
   assert.match(daemon, /liveStatuses\.adopt\(s\.id, ts\)/)
+})
+
+test('provider output is delivered without waiting behind cosmetic status mutations', () => {
+  assert.match(daemon, /async function postMd\(channel, md, \{ waitForBump = true, reanchor = true \} = \{\}\)/)
+  assert.match(daemon, /function postProviderOutput\(channel, md, \{ keepStatus = false \} = \{\}\)/)
+  assert.match(daemon, /return postMd\(channel, md, \{ waitForBump: false, reanchor: keepStatus \}\)/)
+  assert.match(daemon, /finalizeCodexTurn[\s\S]*postProviderOutput\(session\.channel, text\)/)
+  const commentary = /if \(url\.pathname === '\/codex\/commentary'[\s\S]*?\n    return\n  \}/.exec(daemon)?.[0] || ''
+  assert.match(commentary, /postProviderOutput\(session\.channel, commentary\.text, \{ keepStatus: true \}\)/)
 })
 
 test('Codex restart recovery preserves or reconstructs the active turn duration', () => {

@@ -9,10 +9,39 @@ const installer = fs.readFileSync(new URL('../install.sh', import.meta.url), 'ut
 const codexInstaller = fs.readFileSync(new URL('../install-codex.sh', import.meta.url), 'utf8')
 const piInstaller = fs.readFileSync(new URL('../install-pi.sh', import.meta.url), 'utf8')
 
-test('installer accepts provider-selective setup without side effects for help', () => {
-  const run = spawnSync('bash', ['install.sh', '--help'], { encoding: 'utf8' })
-  assert.equal(run.status, 0, run.stderr)
-  assert.match(run.stdout, /claude\|codex\|pi\|both\|all/)
+test('all installer entry points expose help without side effects', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-help-'))
+  try {
+    const fakeBin = path.join(temp, 'fake-bin')
+    const config = path.join(temp, 'config')
+    fs.mkdirSync(fakeBin, { recursive: true })
+    fs.mkdirSync(config, { recursive: true })
+    for (const command of ['claude', 'codex', 'pi', 'tmux']) {
+      fs.writeFileSync(path.join(fakeBin, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    }
+    fs.writeFileSync(path.join(config, 'env'), 'SLACK_BOT_TOKEN=test\nSLACK_APP_TOKEN=test\n', { mode: 0o600 })
+    const env = {
+      ...process.env,
+      HOME: temp,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      CCS_CONFIG_DIR: config,
+      CCS_BIN_DIR: path.join(temp, 'linked-bin'),
+      CODEX_HOME: path.join(temp, 'codex'),
+      CCS_SKIP_DEPENDENCY_INSTALL: '1',
+      CCS_SKIP_GIT_REMOTE_MIGRATION: '1',
+    }
+    for (const script of ['install.sh', 'install-codex.sh', 'install-pi.sh']) {
+      const run = spawnSync('bash', [script, '--help'], { encoding: 'utf8', env })
+      assert.equal(run.status, 0, `${script}: ${run.stderr || run.stdout}`)
+      assert.match(run.stdout, /Usage:/, script)
+      assert.doesNotMatch(run.stdout, /Installing Slack Agent Bridge|registered .* hooks/, script)
+    }
+    assert.equal(fs.existsSync(path.join(temp, 'linked-bin', 'sab')), false)
+    assert.equal(fs.existsSync(path.join(temp, '.claude')), false)
+    assert.equal(fs.existsSync(path.join(temp, 'codex')), false)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
 })
 
 test('installer preserves installed runtime identities', () => {
@@ -63,6 +92,28 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
       '',
     ].join('\n'), { mode: 0o600 })
 
+    const staleCheckout = path.join(temp, 'Code', 'SlackAgentBridge-old-worktree')
+    const unrelatedClaude = '/opt/example/hooks/hook.sh'
+    const unrelatedCodex = '/opt/example/hooks/codex-hook.sh'
+    fs.mkdirSync(path.join(temp, '.claude'), { recursive: true })
+    fs.mkdirSync(codexHome, { recursive: true })
+    fs.writeFileSync(path.join(temp, '.claude/settings.json'), JSON.stringify({ hooks: {
+      SessionStart: [
+        { matcher: '.*', hooks: [{ type: 'command', command: `${staleCheckout}/hooks/hook.sh` }] },
+        { matcher: '.*', hooks: [{ type: 'command', command: path.resolve('hooks/hook.sh') }] },
+        { matcher: '.*', hooks: [{ type: 'command', command: path.resolve('hooks/hook.sh') }] },
+        { matcher: '.*', hooks: [{ type: 'command', command: unrelatedClaude }] },
+      ],
+    } }))
+    fs.writeFileSync(path.join(codexHome, 'hooks.json'), JSON.stringify({ hooks: {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: `${staleCheckout}/hooks/codex-hook.sh`, timeout: 3 }] },
+        { hooks: [{ type: 'command', command: path.resolve('hooks/codex-hook.sh'), timeout: 3 }] },
+        { hooks: [{ type: 'command', command: path.resolve('hooks/codex-hook.sh'), timeout: 3 }] },
+        { hooks: [{ type: 'command', command: unrelatedCodex, timeout: 3 }] },
+      ],
+    } }))
+
     const env = {
       ...process.env,
       HOME: temp,
@@ -83,11 +134,19 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     const claude = JSON.parse(fs.readFileSync(path.join(temp, '.claude/settings.json'), 'utf8'))
     const codex = JSON.parse(fs.readFileSync(path.join(codexHome, 'hooks.json'), 'utf8'))
     for (const event of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'Stop']) {
-      assert.equal(claude.hooks[event].length, 1, `duplicate Claude ${event} hook`)
+      const sab = claude.hooks[event].flatMap(group => group.hooks || [])
+        .filter(hook => hook.command === path.resolve('hooks/hook.sh'))
+      assert.equal(sab.length, 1, `duplicate Claude ${event} hook`)
     }
     for (const event of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'PermissionRequest']) {
-      assert.equal(codex.hooks[event].length, 1, `duplicate Codex ${event} hook`)
+      const sab = codex.hooks[event].flatMap(group => group.hooks || [])
+        .filter(hook => hook.command === path.resolve('hooks/codex-hook.sh'))
+      assert.equal(sab.length, 1, `duplicate Codex ${event} hook`)
     }
+    assert.doesNotMatch(JSON.stringify(claude), /SlackAgentBridge-old-worktree/)
+    assert.doesNotMatch(JSON.stringify(codex), /SlackAgentBridge-old-worktree/)
+    assert.match(JSON.stringify(claude), new RegExp(unrelatedClaude.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.match(JSON.stringify(codex), new RegExp(unrelatedCodex.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab')).isSymbolicLink())
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab')), path.resolve('bin/sab'))
     for (const legacy of ['ccs', 'ccs-codex', 'ccs-spawn', 'ccs-window', 'sab-codex', 'sab-pi', 'sab-upload', 'sab-automation']) {

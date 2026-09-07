@@ -25,6 +25,21 @@ export const providerLabel = provider => PROVIDER_META[normalizeProvider(provide
 export const providerCommand = provider => PROVIDER_META[normalizeProvider(provider)]?.command || 'claude'
 export const slackCommand = (_provider, name) => `/sab-${name}`
 
+// A provider executable may be replaced in place (not only through a versioned
+// symlink), so the resolved pathname alone is not a safe catalog-cache key.
+// Unresolved PATH commands deliberately fall back to their command name and
+// are explicitly invalidated by SAB-managed updates.
+export function executableCacheKey(command) {
+  const requested = String(command || '')
+  try {
+    const resolved = fs.realpathSync(requested)
+    const stat = fs.statSync(resolved)
+    return [resolved, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':')
+  } catch {
+    return requested
+  }
+}
+
 export function parseSlackCommand(command) {
   const neutral = /^\/sab-([a-z][a-z0-9-]*)$/.exec(String(command || ''))
   if (neutral) return { provider: null, name: neutral[1], legacy: false }
