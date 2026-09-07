@@ -48,7 +48,8 @@ export function recoverCodexTurnStartedAt({
 
 export function createStatusMessages(web, {
   log = () => {},
-  postMessage = (channel, text) => web.chat.postMessage({ channel, text }),
+  postMessage = (channel, text, { valid = null } = {}) =>
+    valid && !valid() ? null : web.chat.postMessage({ channel, text }),
   // Slack rate limits chat.update across the workspace, not just per channel.
   // Keep one bounded FIFO for every status mutation while retaining the
   // per-session ordering below. Tests and callers may set this to zero.
@@ -134,8 +135,10 @@ export function createStatusMessages(web, {
           )
           if (result === SKIPPED) return true
         } else {
-          const posted = await scheduleApi(() => postMessage(session.channel, desiredText), { valid })
+          const posted = await scheduleApi(() => postMessage(session.channel, desiredText, { valid }), { valid })
           if (posted === SKIPPED) return true
+          if (!posted?.ts && !valid()) return true
+          if (!posted?.ts) throw new Error('Slack did not return a status timestamp')
           current.ts = posted.ts
         }
         current.text = desiredText
@@ -157,11 +160,25 @@ export function createStatusMessages(web, {
       const oldTs = current.ts
       if (!oldTs || !current.text) return false
       if (afterTs && isNewerOrEqual(oldTs, afterTs)) return false
+      const valid = () => current.epoch === epoch && current.ts === oldTs && Boolean(current.desiredText)
 
       let replacement
       try {
-        replacement = await scheduleApi(() => postMessage(session.channel, current.text))
+        replacement = await scheduleApi(
+          () => postMessage(session.channel, current.text, { valid }),
+          { valid },
+        )
+        if (replacement === SKIPPED || (!replacement?.ts && !valid())) return false
         if (!replacement?.ts) throw new Error('Slack did not return a status timestamp')
+        if (!valid()) {
+          // The post crossed the API boundary just as the turn completed. It
+          // never becomes authoritative; remove it before allowing the queued
+          // clear to delete the original status message.
+          try {
+            await scheduleApi(() => web.chat.delete({ channel: session.channel, ts: replacement.ts }), { priority: true })
+          } catch {}
+          return false
+        }
       } catch (error) {
         log('bumpStatus post error:', error?.data?.error || String(error))
         return false

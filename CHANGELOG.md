@@ -51,12 +51,17 @@ Notable changes to this project. Format based on
 
 - Provider commentary and final responses no longer wait behind rate-limited
   working-status edits or deletes. Status cleanup invalidates queued stale
-  timers immediately, takes priority over other cosmetic updates, and exposes
-  its current queue pressure through `/sab-health`.
+  timers and replacement bumps at the final Slack boundary, takes priority over
+  other cosmetic updates, and exposes its current queue pressure through
+  `/sab-health`.
 - Re-running an installer now replaces stale SAB provider hooks left by deleted
-  development worktrees while preserving unrelated hooks and registering the
-  live checkout exactly once. The provider staging helpers also make `--help`
-  side-effect-free and reject unknown arguments.
+  development worktrees or arbitrary custom checkout paths while preserving
+  unrelated hooks and registering the live checkout exactly once. The provider
+  staging helpers also make `--help` side-effect-free and reject unknown
+  arguments.
+- Interactive session controls carry their exact session identity through
+  asynchronous provider-catalog lookups and revalidate it at the mutation
+  boundary, so a stale panel cannot change a replacement provider leg.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the

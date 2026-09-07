@@ -181,7 +181,7 @@ if wants_claude; then
       .hooks[$ev] = (
         [(.hooks[$ev] // [])[] |
           .hooks = [(.hooks // [])[] |
-            select((((.command // "") | test($sab_re)) | not))] |
+            select((.command // "") != $cmd and ((((.command // "") | test($sab_re)) | not)))] |
           select((.hooks | length) > 0)
         ] as $groups |
         $groups + [{matcher: ".*", hooks: [{type: "command", command: $cmd}]}]
@@ -205,7 +205,7 @@ if wants_codex; then
       .hooks[$ev] = (
         [(.hooks[$ev] // [])[] |
           .hooks = [(.hooks // [])[] |
-            select((((.command // "") | test($sab_re)) | not))] |
+            select((.command // "") != $cmd and ((((.command // "") | test($sab_re)) | not)))] |
           select((.hooks | length) > 0)
         ] as $groups |
         if $ev == "PermissionRequest" then

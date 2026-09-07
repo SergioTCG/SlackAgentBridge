@@ -77,9 +77,16 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     const config = path.join(temp, 'config')
     const linkedBin = path.join(temp, 'linked-bin')
     const codexHome = path.join(temp, 'codex')
+    const customBridge = path.join(temp, 'custom-install')
+    const customInstaller = path.join(customBridge, 'install.sh')
     fs.mkdirSync(fakeBin, { recursive: true })
     fs.mkdirSync(config, { recursive: true })
     fs.mkdirSync(linkedBin, { recursive: true })
+    fs.mkdirSync(path.join(customBridge, 'daemon'), { recursive: true })
+    fs.mkdirSync(path.join(customBridge, 'bin'), { recursive: true })
+    fs.copyFileSync(new URL('../install.sh', import.meta.url), customInstaller)
+    fs.writeFileSync(path.join(customBridge, 'daemon/daemon.mjs'), '// isolated installer fixture\n')
+    fs.writeFileSync(path.join(customBridge, 'bin/sab'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
     fs.symlinkSync('/legacy/sab-cc', path.join(linkedBin, 'sab-cc'))
     for (const command of ['claude', 'codex', 'pi', 'tmux']) {
       const executable = path.join(fakeBin, command)
@@ -93,6 +100,8 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     ].join('\n'), { mode: 0o600 })
 
     const staleCheckout = path.join(temp, 'Code', 'SlackAgentBridge-old-worktree')
+    const currentClaudeHook = path.join(customBridge, 'hooks/hook.sh')
+    const currentCodexHook = path.join(customBridge, 'hooks/codex-hook.sh')
     const unrelatedClaude = '/opt/example/hooks/hook.sh'
     const unrelatedCodex = '/opt/example/hooks/codex-hook.sh'
     fs.mkdirSync(path.join(temp, '.claude'), { recursive: true })
@@ -100,16 +109,16 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     fs.writeFileSync(path.join(temp, '.claude/settings.json'), JSON.stringify({ hooks: {
       SessionStart: [
         { matcher: '.*', hooks: [{ type: 'command', command: `${staleCheckout}/hooks/hook.sh` }] },
-        { matcher: '.*', hooks: [{ type: 'command', command: path.resolve('hooks/hook.sh') }] },
-        { matcher: '.*', hooks: [{ type: 'command', command: path.resolve('hooks/hook.sh') }] },
+        { matcher: '.*', hooks: [{ type: 'command', command: currentClaudeHook }] },
+        { matcher: '.*', hooks: [{ type: 'command', command: currentClaudeHook }] },
         { matcher: '.*', hooks: [{ type: 'command', command: unrelatedClaude }] },
       ],
     } }))
     fs.writeFileSync(path.join(codexHome, 'hooks.json'), JSON.stringify({ hooks: {
       SessionStart: [
         { hooks: [{ type: 'command', command: `${staleCheckout}/hooks/codex-hook.sh`, timeout: 3 }] },
-        { hooks: [{ type: 'command', command: path.resolve('hooks/codex-hook.sh'), timeout: 3 }] },
-        { hooks: [{ type: 'command', command: path.resolve('hooks/codex-hook.sh'), timeout: 3 }] },
+        { hooks: [{ type: 'command', command: currentCodexHook, timeout: 3 }] },
+        { hooks: [{ type: 'command', command: currentCodexHook, timeout: 3 }] },
         { hooks: [{ type: 'command', command: unrelatedCodex, timeout: 3 }] },
       ],
     } }))
@@ -125,7 +134,7 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
       CCS_SKIP_GIT_REMOTE_MIGRATION: '1',
     }
     for (let pass = 0; pass < 2; pass++) {
-      const run = spawnSync('bash', ['install.sh', '--provider', 'all', '--no-daemon-reload'], {
+      const run = spawnSync('bash', [customInstaller, '--provider', 'all', '--no-daemon-reload'], {
         encoding: 'utf8', env,
       })
       assert.equal(run.status, 0, run.stderr || run.stdout)
@@ -135,12 +144,12 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     const codex = JSON.parse(fs.readFileSync(path.join(codexHome, 'hooks.json'), 'utf8'))
     for (const event of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'Stop']) {
       const sab = claude.hooks[event].flatMap(group => group.hooks || [])
-        .filter(hook => hook.command === path.resolve('hooks/hook.sh'))
+        .filter(hook => hook.command === currentClaudeHook)
       assert.equal(sab.length, 1, `duplicate Claude ${event} hook`)
     }
     for (const event of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'PermissionRequest']) {
       const sab = codex.hooks[event].flatMap(group => group.hooks || [])
-        .filter(hook => hook.command === path.resolve('hooks/codex-hook.sh'))
+        .filter(hook => hook.command === currentCodexHook)
       assert.equal(sab.length, 1, `duplicate Codex ${event} hook`)
     }
     assert.doesNotMatch(JSON.stringify(claude), /SlackAgentBridge-old-worktree/)
@@ -148,7 +157,7 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     assert.match(JSON.stringify(claude), new RegExp(unrelatedClaude.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     assert.match(JSON.stringify(codex), new RegExp(unrelatedCodex.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab')).isSymbolicLink())
-    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab')), path.resolve('bin/sab'))
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab')), path.join(customBridge, 'bin/sab'))
     for (const legacy of ['ccs', 'ccs-codex', 'ccs-spawn', 'ccs-window', 'sab-codex', 'sab-pi', 'sab-upload', 'sab-automation']) {
       assert.equal(fs.existsSync(path.join(linkedBin, legacy)), false, `${legacy} should not be installed`)
     }

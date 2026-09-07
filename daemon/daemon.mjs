@@ -547,7 +547,8 @@ const liveStatuses = createStatusMessages(web, {
   // Keep comfortably below Slack's chat.update tier even when several
   // non-status updates share the workspace budget.
   minIntervalMs: 3000,
-  postMessage: (channel, text) => enqueue(channel, () => web.chat.postMessage({ channel, text })),
+  postMessage: (channel, text, options) =>
+    enqueue(channel, () => web.chat.postMessage({ channel, text }), options),
 })
 const setStatus = (session, text) => liveStatuses.set(session, text)
 const clearStatus = session => liveStatuses.clear(session)
@@ -2438,6 +2439,9 @@ async function beginProviderSwitch(channel, source, { replaceMissing = false, ta
   const blocker = switchBlockReason(source, channel)
   if (blocker) return post(channel, `⚠️ ${blocker}`)
   if (!(await tmuxAlive(source.tmux))) return post(channel, '⚠️ The source terminal is gone. Write a message to resume it, then retry the switch.')
+  if (state.sessions?.[source.id] !== source || source.channel !== channel || state.channels?.[channel] !== source.id) {
+    return post(channel, '⚠️ The channel changed provider or session while the switch was being checked. No action was taken; run `/sab-status` and retry from fresh controls.')
+  }
   const lineage = ensureLineage(state, channel, source)
   targetProvider ||= defaultSwitchTarget(providerOf(source))
   if (!PROVIDERS.includes(targetProvider) || targetProvider === providerOf(source)) {
@@ -4883,6 +4887,9 @@ function commandHelp(provider = null) {
 // older Slack manifest is being replaced.
 async function dispatch(name, rest, channel, ingressProvider = null, request = null) {
   const channelSession = channel !== state.control ? sessionByChannel(channel) : null
+  if (request?.expectedSessionId && !managementTargetStillAuthoritative(channel, channelSession, request)) {
+    return post(channel, '⚠️ This management request belongs to a session which is no longer authoritative. No action was taken; run `/sab-status` for fresh controls.')
+  }
   let commandProvider = channelSession ? providerOf(channelSession) : ingressProvider
   const cmd = commandName => slackCommand(commandProvider, commandName)
   if (name === 'help') {
@@ -5163,6 +5170,9 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       // the standard variant, so we translate to the full id ourselves. Passing a
       // full id (e.g. `claude-opus-5`) still selects exactly that.
       const models = await getModels()
+      if (sessionByChannel(channel) !== session || state.channels?.[channel] !== session.id || session.channel !== channel) {
+        return post(channel, '⚠️ The authoritative session changed while its model catalog was loading. No setting was changed; run `/sab-model` again.')
+      }
       const want = val.toLowerCase()
       const pick = models.find(m => m.alias.toLowerCase() === `${want}-1m`)
                 || models.find(m => m.alias.toLowerCase() === want)
@@ -5964,6 +5974,12 @@ function authoritativeAppHomeSession(target) {
   return session?.channel ? authoritativeManagementSession(session.channel, target) : null
 }
 
+function managementTargetStillAuthoritative(channel, session, request) {
+  const expected = request?.expectedSessionId
+  if (!expected) return true
+  return Boolean(session && session.id === expected && authoritativeManagementSession(channel, expected) === session)
+}
+
 async function handleAppHomeAction(body, action, parsed) {
   const userId = body.user?.id
   if (!userId || userId !== USER || body.view?.callback_id !== APP_HOME_CALLBACK) return
@@ -5992,7 +6008,9 @@ async function handleAppHomeAction(body, action, parsed) {
   if (parsed.kind === 'terminal') {
     const allowed = session ? ['open', 'close'] : ['open-all', 'close-all']
     if (!allowed.includes(parsed.action)) return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid terminal control.' })
-    await dispatch('terminal', [parsed.action], destination, null, { userId })
+    await dispatch('terminal', [parsed.action], destination, null, {
+      userId, ...(session ? { expectedSessionId: session.id } : {}),
+    })
     return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Terminal request processed. Its authoritative result was posted to Slack.' })
   }
 
@@ -6000,7 +6018,9 @@ async function handleAppHomeAction(body, action, parsed) {
     if ((session && parsed.action !== 'current') || (!session && parsed.action !== 'all')) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid update control.' })
     }
-    await dispatch('update', [parsed.action], destination, null, { userId })
+    await dispatch('update', [parsed.action], destination, null, {
+      userId, ...(session ? { expectedSessionId: session.id } : {}),
+    })
     return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Update request processed. Its authoritative result remains visible in Slack.' })
   }
 
@@ -6011,7 +6031,7 @@ async function handleAppHomeAction(body, action, parsed) {
     if (!supported.some(model => model.value === value)) {
       return publishAppHome(userId, { sessionId: session.id, notice: '⚠️ That model is no longer in the current provider catalog. No setting was changed.' })
     }
-    await dispatch('model', [value], destination, null, { userId })
+    await dispatch('model', [value], destination, null, { userId, expectedSessionId: session.id })
     return publishAppHome(userId, { sessionId: session.id, notice: 'ℹ️ Model request processed. The session channel contains the authoritative result.' })
   }
 
@@ -6022,7 +6042,7 @@ async function handleAppHomeAction(body, action, parsed) {
     if (!session || parsed.action !== 'select' || !supported.includes(value)) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid or stale effort control. No setting was changed.' })
     }
-    await dispatch('effort', [value], destination, null, { userId })
+    await dispatch('effort', [value], destination, null, { userId, expectedSessionId: session.id })
     return publishAppHome(userId, { sessionId: session.id, notice: 'ℹ️ Effort request processed. The session channel contains the authoritative result.' })
   }
 
@@ -6031,14 +6051,16 @@ async function handleAppHomeAction(body, action, parsed) {
     if (!session || !provider || provider === providerOf(session)) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid provider-switch control.' })
     }
-    await dispatch('switch', [provider], destination, null, { userId })
+    await dispatch('switch', [provider], destination, null, { userId, expectedSessionId: session.id })
     return publishAppHome(userId, { sessionId: session.id, notice: '🔀 Provider-switch review started. Continue from the session channel.' })
   }
 
   if (parsed.kind === 'dispatch') {
     const allowed = session ? ['usage', 'team'] : ['usage', 'health']
     if (!allowed.includes(parsed.action)) return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid App Home command.' })
-    await dispatch(parsed.action, [], destination, null, { userId })
+    await dispatch(parsed.action, [], destination, null, {
+      userId, ...(session ? { expectedSessionId: session.id } : {}),
+    })
     return publishAppHome(userId, { sessionId: session?.id || null, notice: 'ℹ️ Report request processed. Its authoritative result was posted to Slack.' })
   }
 
@@ -6090,7 +6112,7 @@ async function handleManagementAction(body, action, parsed) {
     if (!session || !['model', 'effort', 'terminal', 'switch', 'update', 'usage', 'team'].includes(parsed.action)) {
       return post(channel, '❌ Invalid session-management control.')
     }
-    return dispatch(parsed.action, [], channel, null, { userId: body.user.id })
+    return dispatch(parsed.action, [], channel, null, { userId: body.user.id, expectedSessionId: session.id })
   }
 
   if (parsed.kind === 'model') {
@@ -6100,7 +6122,7 @@ async function handleManagementAction(body, action, parsed) {
     if (!supported.some(model => model.value === value)) {
       return post(channel, '⚠️ That model is no longer in the provider’s current catalog. No setting was changed; run `/sab-model` for a fresh list.')
     }
-    return dispatch('model', [value], channel, null, { userId: body.user.id })
+    return dispatch('model', [value], channel, null, { userId: body.user.id, expectedSessionId: session.id })
   }
 
   if (parsed.kind === 'effort') {
@@ -6109,7 +6131,7 @@ async function handleManagementAction(body, action, parsed) {
     const provider = providerOf(session)
     const supported = provider === 'codex' ? CODEX_EFFORTS : provider === 'pi' ? PI_EFFORTS : ['low', 'medium', 'high', 'max']
     if (!supported.includes(value)) return post(channel, '⚠️ That effort is no longer supported. No setting was changed; run `/sab-effort` for a fresh list.')
-    return dispatch('effort', [value], channel, null, { userId: body.user.id })
+    return dispatch('effort', [value], channel, null, { userId: body.user.id, expectedSessionId: session.id })
   }
 
   if (parsed.kind === 'terminal') {
@@ -6117,27 +6139,31 @@ async function handleManagementAction(body, action, parsed) {
         (!session && ['open', 'close'].includes(parsed.action))) {
       return post(channel, '❌ Invalid terminal control.')
     }
-    return dispatch('terminal', [parsed.action], channel, null, { userId: body.user.id })
+    return dispatch('terminal', [parsed.action], channel, null, {
+      userId: body.user.id, ...(session ? { expectedSessionId: session.id } : {}),
+    })
   }
 
   if (parsed.kind === 'update') {
     if (!['current', 'all'].includes(parsed.action) || (!session && parsed.action === 'current')) {
       return post(channel, '❌ Invalid update control.')
     }
-    return dispatch('update', [parsed.action], channel, null, { userId: body.user.id })
+    return dispatch('update', [parsed.action], channel, null, {
+      userId: body.user.id, ...(session ? { expectedSessionId: session.id } : {}),
+    })
   }
 
   if (parsed.kind === 'switch') {
     const provider = normalizeProvider(parsed.action, null)
     if (!session || !provider || provider === providerOf(session)) return post(channel, '❌ Invalid provider-switch control.')
-    return dispatch('switch', [provider], channel, null, { userId: body.user.id })
+    return dispatch('switch', [provider], channel, null, { userId: body.user.id, expectedSessionId: session.id })
   }
 
   if (parsed.kind === 'team') {
     if (!session || !['status', 'add', 'auto', 'manual', 'permissions', 'close'].includes(parsed.action)) {
       return post(channel, '❌ Invalid team-management control.')
     }
-    return dispatch('team', [parsed.action], channel, null, { userId: body.user.id })
+    return dispatch('team', [parsed.action], channel, null, { userId: body.user.id, expectedSessionId: session.id })
   }
 
   return post(channel, '❌ Unknown SAB management control. Run `/sab-status` for fresh controls.')

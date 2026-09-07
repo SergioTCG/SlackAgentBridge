@@ -213,6 +213,37 @@ test('clear cannot deadlock an in-flight status bump', async () => {
   assert.equal(slack.calls.filter(call => call[0] === 'delete').length, 2)
 })
 
+test('clear invalidates a bump waiting inside the channel delivery queue', async () => {
+  const slack = fakeSlack()
+  let release
+  let queuedResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const queued = new Promise(resolve => { queuedResolve = resolve })
+  let statusPosts = 0
+  const status = createStatusMessages(slack.web, {
+    postMessage: async (channel, text, { valid } = {}) => {
+      statusPosts++
+      if (statusPosts === 2) {
+        queuedResolve()
+        await gate
+        if (valid && !valid()) return null
+      }
+      return slack.web.chat.postMessage({ channel, text })
+    },
+  })
+  const session = { id: 'S1', channel: 'C1' }
+  await status.set(session, 'working')
+
+  const bumped = status.bump(session, { afterTs: '11.000000' })
+  await queued
+  const cleared = status.clear(session)
+  release()
+  await Promise.all([bumped, cleared])
+
+  assert.equal(slack.calls.filter(call => call[0] === 'post').length, 1)
+  assert.deepEqual(slack.calls.filter(call => call[0] === 'delete').map(call => call[1].ts), ['10.000001'])
+})
+
 test('status scheduler exposes bounded operational queue depth', async () => {
   const slack = fakeSlack()
   const status = createStatusMessages(slack.web)

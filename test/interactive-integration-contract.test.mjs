@@ -29,6 +29,9 @@ test('interactive actions are owner-only and revalidate exact authoritative bind
   assert.match(handler, /parseManagementActionId/)
   assert.match(daemon, /authoritativeManagementBinding\(state, channel, target\)/)
   assert.match(daemon, /authoritative\.id !== target/)
+  assert.match(daemon, /expectedSessionId: session\.id/)
+  assert.match(daemon, /request\?\.expectedSessionId/)
+  assert.match(daemon, /managementTargetStillAuthoritative\(channel, session, request\)/)
 })
 
 test('App Home uses the sole Socket Mode coordinator and hides data from non-owners', () => {

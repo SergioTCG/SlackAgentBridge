@@ -1,11 +1,37 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mdToMessages, reportSlashFailure } from '../daemon/slackout.mjs'
+import { enqueue, mdToMessages, reportSlashFailure } from '../daemon/slackout.mjs'
 
 const sectionsFor = markdown => mdToMessages(markdown)
   .flatMap(message => message.blocks || [])
   .filter(block => block.type === 'section')
   .map(block => block.text.text)
+
+test('a queued cosmetic Slack action is cancelled before it can delay later traffic', async () => {
+  const channel = `C_VALID_${Date.now()}`
+  let release
+  let startedResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const calls = []
+
+  const occupying = enqueue(channel, async () => {
+    calls.push('occupying')
+    startedResolve()
+    await gate
+  })
+  await started
+
+  let valid = true
+  const cosmetic = enqueue(channel, async () => calls.push('stale cosmetic'), {
+    valid: () => valid,
+  })
+  valid = false
+  release()
+  await Promise.all([occupying, cosmetic])
+
+  assert.deepEqual(calls, ['occupying'])
+})
 
 test('slash failures post visibly to the channel first', async () => {
   const calls = []
