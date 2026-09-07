@@ -50,6 +50,16 @@ test('team management actions reject a panel rendered for a replaced team', () =
   assert.match(daemon, /expectedTeamId: parsed\.binding/)
 })
 
+test('team management actions redraw state-dependent controls after refresh and mutations', () => {
+  const action = /if \(parsed\.kind === 'team'\) \{[\s\S]*?\n  \}/.exec(daemon)?.[0] || ''
+  assert.match(action, /interactiveManagement: true/)
+
+  const handler = /async function handleTeamCommand\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(handler, /request\?\.interactiveManagement/)
+  assert.match(handler, /sub === 'status'[\s\S]*postTeamManagement\(channel, session, team\)/)
+  assert.match(handler, /sub === 'auto' \|\| sub === 'manual'[\s\S]*postTeamManagement\(channel, session, team\)/)
+})
+
 test('session update ownership is reserved before Slack and released by immutable identity', () => {
   const reserve = /function reserveSessionMaintenance\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(reserve, /const sessionId = expectedSessionId \|\| session\?\.id/)

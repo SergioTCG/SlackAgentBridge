@@ -4881,10 +4881,10 @@ function revokeCancelledTeamTasks(ids) {
   }
 }
 
-async function handleTeamCommand(channel, rest) {
+async function handleTeamCommand(channel, rest, request = null) {
   const session = sessionByChannel(channel)
   if (!session) return post(channel, 'Use `/sab-team` in an authoritative SAB session channel.')
-  const interactive = rest.length === 0
+  const interactive = rest.length === 0 || request?.interactiveManagement === true
   const sub = String(rest[0] || 'status').toLowerCase()
   if (sub === 'create') {
     if (rest.length !== 2) return post(channel, 'Usage: `/sab-team create <name>`')
@@ -4917,9 +4917,11 @@ async function handleTeamCommand(channel, rest) {
       setContinuationMode(team, sub === 'auto' ? 'auto-until-blocked' : 'manual')
       saveStateNow(state)
       if (sub === 'auto') scheduleTeamContinuation(team.id)
-      return post(channel, sub === 'auto'
+      await post(channel, sub === 'auto'
         ? '▶️ *Automatic coordinator continuation enabled* — the team will proceed until a blocker or safety decision requires you.'
         : '⏸️ *Automatic coordinator continuation disabled* — worker results will wait for an owner turn.')
+      if (interactive) return postTeamManagement(channel, session, team)
+      return
     } catch (error) { return post(channel, `❌ ${error.message}`) }
   }
   if (activeTransition(channel)) return post(channel, '⏳ Wait for the provider switch to finish before changing team membership.')
@@ -5035,7 +5037,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     if (expectedTeamId && activeTeamForChannel(state, channel)?.id !== expectedTeamId) {
       return post(channel, '⚠️ This team control belongs to a team which is no longer active. No action was taken; run `/sab-team` for fresh controls.')
     }
-    return handleTeamCommand(channel, rest)
+    return handleTeamCommand(channel, rest, request)
   }
   if (channelSession && ingressProvider && SESSION_SCOPED_COMMANDS.has(name) && providerOf(channelSession) !== ingressProvider) {
     const actualProvider = providerOf(channelSession)
@@ -6331,6 +6333,7 @@ async function handleManagementAction(body, action, parsed) {
     }
     return dispatch('team', [parsed.action], channel, null, {
       userId: body.user.id, expectedSessionId, expectedTeamId: parsed.binding,
+      interactiveManagement: true,
     })
   }
 

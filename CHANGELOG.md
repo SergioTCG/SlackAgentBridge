@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.7] — 2026-09-07
+## [2.1.0-rc.8] — 2026-09-07
 
 ### Added
 
@@ -49,6 +49,9 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Interactive team Refresh and auto/manual actions now render a fresh team
+  status and control panel after they run, so state-dependent buttons cannot
+  remain stale and strand the owner on the previous continuation mode.
 - Codex semantic commentary and completed finals now cross the loopback event
   proxy in their exact App Server source order. A delayed earlier Slack/daemon
   delivery can no longer be overtaken by a later final and then rejected as
