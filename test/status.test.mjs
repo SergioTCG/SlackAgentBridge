@@ -325,6 +325,34 @@ test('clearing a session without a posted status does not consume the workspace 
   assert.deepEqual(slack.calls.map(call => call[0]), ['post'])
 })
 
+test('deferred clear deletes from the channel captured before provider handoff', async () => {
+  const slack = fakeSlack()
+  let release
+  let startedResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const originalUpdate = slack.web.chat.update
+  slack.web.chat.update = async args => {
+    startedResolve()
+    await gate
+    return originalUpdate(args)
+  }
+  const status = createStatusMessages(slack.web)
+  const session = { id: 'S1', channel: 'C-source' }
+  await status.set(session, 'working')
+
+  const update = status.set(session, 'working still')
+  await started
+  const clearing = status.clear(session)
+  session.channel = null
+  release()
+  await Promise.all([update, clearing])
+
+  const deletion = slack.calls.find(call => call[0] === 'delete')
+  assert.equal(deletion?.[1]?.channel, 'C-source')
+  assert.equal(deletion?.[1]?.ts, '10.000001')
+})
+
 test('bridge health exposes status-queue pressure without provider or Slack secrets', () => {
   const block = /if \(name === 'health'\) \{([\s\S]*?)\n  \}\n  if \(name === 'kill'\)/.exec(daemon)?.[1] || ''
   assert.match(block, /liveStatuses\.snapshot\(\)/)

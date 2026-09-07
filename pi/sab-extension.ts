@@ -17,6 +17,7 @@ type BridgeMessage = {
   action?: string;
   value?: unknown;
   requestId?: string;
+  expectedSessionId?: string;
 };
 
 let activeContext: ExtensionContext | undefined;
@@ -111,6 +112,13 @@ async function controlResult(ctx: ExtensionContext, message: BridgeMessage, resu
 
 async function handleControl(pi: ExtensionAPI, managed: any, ctx: ExtensionContext, message: BridgeMessage) {
   try {
+    if (["model", "effort"].includes(message.action || "") &&
+        ctx.sessionManager.getSessionId() !== message.expectedSessionId) {
+      return controlResult(ctx, message, {
+        ok: false,
+        error: "This setting control belongs to a native Pi session which is no longer active.",
+      });
+    }
     if (message.action === "abort") {
       const managedState = await managed.pauseForAbort(ctx);
       if (!managedState) ctx.abort();

@@ -59,6 +59,11 @@ test('session update ownership is reserved before Slack and released by immutabl
   assert.match(update, /updatingSessions\.delete\(updateSessionId\)/)
 })
 
+test('provider maintenance blocks overlapping session mutations but leaves observation available', () => {
+  assert.match(daemon, /const MAINTENANCE_SAFE_COMMANDS = new Set\(\['status', 'usage', 'terminal'\]\)/)
+  assert.match(daemon, /updatingSessions\.has\(channelSession\.id\)[\s\S]{0,500}MAINTENANCE_SAFE_COMMANDS\.has\(name\)/)
+})
+
 test('status dashboard binds the pre-await native session identity', () => {
   const status = /if \(name === 'status'\) \{[\s\S]*?\n  if \(name === 'health'\)/.exec(daemon)?.[0] || ''
   assert.match(status, /const statusSessionId = session\.id/)
@@ -71,4 +76,11 @@ test('App Home uses the sole Socket Mode coordinator and hides data from non-own
   assert.match(daemon, /app_home_opened: handleAppHomeOpened/)
   assert.match(daemon, /if \(!USER \|\| userId !== USER\) return appHomeOverviewView\(\{ authorized: false \}\)/)
   assert.match(daemon, /web\.views\.publish\(\{ user_id: userId, view \}\)/)
+})
+
+test('App Home stale-load fallback uses defined fresh stats and never invents switch success', () => {
+  assert.match(daemon, /function appHomeStats\(sessions = appHomeSessions\(\)\)/)
+  assert.doesNotMatch(daemon, /stats: appHomeStats\(\), sessions: appHomeSessions\(\)/)
+  assert.match(daemon, /Switch request processed\. The session channel contains the authoritative result\./)
+  assert.doesNotMatch(daemon, /Provider-switch review started\. Continue from the session channel\./)
 })

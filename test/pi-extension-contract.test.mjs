@@ -23,6 +23,16 @@ test('Pi transport uses native events and structured images without session-file
   assert.doesNotMatch(extension, /readFileSync\([^\n]*session_file/)
 })
 
+test('Pi setting controls reject a stale native session before mutating it', () => {
+  assert.match(extension, /expectedSessionId\?: string/)
+  const control = /async function handleControl\([\s\S]*?\n\}/.exec(extension)?.[0] || ''
+  const fence = 'ctx.sessionManager.getSessionId() !== message.expectedSessionId'
+  assert.match(control, new RegExp(fence.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.ok(control.indexOf(fence) < control.indexOf('await pi.setModel(model)'))
+  assert.ok(control.indexOf(fence) < control.indexOf('pi.setThinkingLevel(level as any)'))
+  assert.match(daemon, /sendPiControl\(session, name, value, 15000, controlSessionId\)/)
+})
+
 test('Pi safe-mode permission failures block tool execution', () => {
   assert.match(extension, /if \(!SAFE_MODE\) return undefined/)
   assert.match(extension, /return \{ block: true, reason: "Slack permission relay was unavailable\." \}/)

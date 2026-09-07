@@ -6,7 +6,7 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-## [2.1.0-rc.3] — 2026-09-07
+## [2.1.0-rc.4] — 2026-09-07
 
 ### Added
 
@@ -72,6 +72,15 @@ Notable changes to this project. Format based on
   notice, so delayed API calls cannot admit a second restart or lose a prompt.
   Status dashboards likewise bind the pre-await native identity, and empty
   status clears no longer consume workspace rate-limit slots.
+- Pi model and effort controls now carry the expected native session into the
+  extension and fail before mutation after a native conversation change.
+  Provider maintenance rejects overlapping setting or lifecycle actions while
+  retaining read-only management, and App Home no longer reports rejected
+  switch requests as started.
+- Deferred working-status cleanup retains the source channel captured when the
+  turn finished, so a provider handoff cannot strand the old leg's timer. App
+  Home stale-load recovery also renders a defined, internally consistent fresh
+  overview.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the
@@ -181,7 +190,7 @@ Notable changes to this project. Format based on
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
 
-[2.1.0-rc.3]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.3
+[2.1.0-rc.4]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.4
 
 ## [2.0.1] — 2026-08-26
 

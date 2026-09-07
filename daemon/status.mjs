@@ -222,6 +222,11 @@ export function createStatusMessages(web, {
 
   async function clear(session) {
     if (!session?.id) return false
+    // Provider switching deliberately removes `session.channel` from the
+    // source leg. A final may have already requested this clear while an older
+    // status mutation was still settling, so retain the channel which owned
+    // the status at the instant the turn completed.
+    const channel = session.channel || null
     const entry = entryFor(session.id)
     // Invalidate queued edits immediately. Their global queue entries test the
     // revision again immediately before Slack I/O, so an ended turn cannot
@@ -238,9 +243,9 @@ export function createStatusMessages(web, {
       const ts = entry.ts
       entry.ts = null
       entry.text = ''
-      if (!session.channel || !ts) return false
+      if (!channel || !ts) return false
       return scheduleApi(async () => {
-        try { await web.chat.delete({ channel: session.channel, ts }) } catch {}
+        try { await web.chat.delete({ channel, ts }) } catch {}
         return true
       }, { priority: true })
     })

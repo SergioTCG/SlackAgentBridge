@@ -237,7 +237,10 @@ The rendered identity remains immutable across asynchronous lookups even when a
 native `/clear` rebrands the in-memory session object. Team actions also carry
 the exact team ID so controls from a closed team cannot mutate its replacement.
 Stale controls fail visibly. Broad update and team-close actions require Slack
-confirmation. Explicit text forms remain available; `/sab-update current`
+confirmation. Mutable Pi controls are fenced again inside the native extension,
+before model or effort mutation, and an exact session reserved for provider
+maintenance rejects overlapping lifecycle/settings changes until it resumes.
+Explicit text forms remain available; `/sab-update current`
 directly updates the current session while no-argument `/sab-update` opens its
 chooser.
 

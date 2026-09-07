@@ -219,7 +219,11 @@ accounts, and the Mac user running the daemon.
   catalog, and normal command gates. A stale, rebound, switched, or
   cross-channel control reports an error and performs no mutation. Model and
   effort values are validated again at action time; broad update and team-close
-  actions require Slack confirmation.
+  actions require Slack confirmation. Pi model/effort controls also carry the
+  expected native session into the extension, which rejects the control before
+  mutation if Pi has changed conversations. Once provider-update maintenance
+  is reserved, overlapping lifecycle or setting mutations are rejected while
+  status, usage, and terminal-view operations remain available.
 - **Owner-private App Home:** `app_home_opened` may arrive for any workspace
   user, but only the configured owner receives bridge/session metadata or
   actions. Other users receive a static restricted view. Owner actions reuse

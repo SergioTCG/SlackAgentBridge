@@ -1952,7 +1952,7 @@ function injectQueuedPiPrompt(pid, value) {
   return injectToSession(pid, value?.text, value?.files, value?.privateContext, value?.route)
 }
 
-function sendPiControl(session, action, value = null, timeoutMs = 15000) {
+function sendPiControl(session, action, value = null, timeoutMs = 15000, expectedSessionId = null) {
   if (providerOf(session) !== 'pi') return Promise.reject(new Error('not a Pi session'))
   const stream = streams.get(session.pid)
   if (!stream || stream.provider !== 'pi') return Promise.reject(new Error('Pi control stream is not connected'))
@@ -1964,7 +1964,10 @@ function sendPiControl(session, action, value = null, timeoutMs = 15000) {
     }, timeoutMs)
     piControlWaiters.set(requestId, { resolve, reject, timer })
   })
-  stream.res.write(`data: ${JSON.stringify({ type: 'control', action, value, requestId })}\n\n`)
+  stream.res.write(`data: ${JSON.stringify({
+    type: 'control', action, value, requestId,
+    ...(expectedSessionId ? { expectedSessionId } : {}),
+  })}\n\n`)
   return result
 }
 
@@ -4517,30 +4520,35 @@ async function setCodexSetting(session, name, value, { expectedSessionId = null 
 
 async function setPiSetting(session, name, value, { expectedSessionId = null } = {}) {
   const field = name === 'effort' ? 'effort' : 'model'
+  const controlSessionId = expectedSessionId || session.id
+  const controlChannel = session.channel
+  if (!controlChannel || authoritativeManagementSession(controlChannel, controlSessionId) !== session) {
+    return post(controlChannel || state.control, '⚠️ The native Pi session changed before the setting could be applied. No setting was changed; use fresh controls.')
+  }
   if (!(session.pid && pidAlive(session.pid))) {
     session[field] = value
     saveState(state)
-    return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
+    return post(controlChannel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
   }
   let result
   try {
-    if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
+    if (authoritativeManagementSession(controlChannel, controlSessionId) !== session) {
       return post(session.channel, '⚠️ The native session changed before the setting could be sent. No setting was changed; use fresh controls.')
     }
-    result = await sendPiControl(session, name, value)
+    result = await sendPiControl(session, name, value, 15000, controlSessionId)
   }
-  catch (error) { return post(session.channel, `⚠️ Pi could not change ${name}: ${String(error?.message || error).slice(0, 300)}`) }
-  if (expectedSessionId && !authoritativeManagementSession(session.channel, expectedSessionId)) {
-    return post(session.channel, '⚠️ The native session changed while Pi was applying the setting. Refresh the session status before retrying.')
+  catch (error) { return post(controlChannel, `⚠️ Pi could not change ${name}: ${String(error?.message || error).slice(0, 300)}`) }
+  if (authoritativeManagementSession(controlChannel, controlSessionId) !== session) {
+    return post(controlChannel, '⚠️ The native session changed while Pi was applying the setting. Refresh the session status before retrying.')
   }
-  if (!result?.ok) return post(session.channel, `❌ Pi rejected ${name}: ${String(result?.error || 'unknown error').slice(0, 300)}`)
+  if (!result?.ok) return post(controlChannel, `❌ Pi rejected ${name}: ${String(result?.error || 'unknown error').slice(0, 300)}`)
   if (result.model) session.model = result.model
   if (result.model_name) session.modelName = result.model_name
   if (result.effort) session.effort = result.effort
   sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), model: session.modelName || session.model, effort: session.effort })
   saveState(state)
   await updateTopic(session)
-  return post(session.channel, `✅ ${name} → \`${name === 'model' ? session.model : session.effort}\``)
+  return post(controlChannel, `✅ ${name} → \`${name === 'model' ? session.model : session.effort}\``)
 }
 
 // Flags a provider-specific new session gets when none are given. Configurable because the
@@ -4700,6 +4708,15 @@ function appHomeSessions() {
   return sessions.sort((a, b) => String(a.cwd || '').localeCompare(String(b.cwd || '')) || a.id.localeCompare(b.id))
 }
 
+function appHomeStats(sessions = appHomeSessions()) {
+  const counts = { claude: 0, codex: 0, pi: 0, active: 0, dormant: 0 }
+  for (const session of sessions) {
+    counts[session.provider]++
+    counts[session.active ? 'active' : 'dormant']++
+  }
+  return { ...counts, uptime: appHomeUptime() }
+}
+
 async function buildAppHomeView(userId, { sessionId = null, notice = '' } = {}) {
   if (!USER || userId !== USER) return appHomeOverviewView({ authorized: false })
   const sessions = appHomeSessions()
@@ -4710,16 +4727,18 @@ async function buildAppHomeView(userId, { sessionId = null, notice = '' } = {}) 
       const rows = await terminalControl.list().catch(() => [])
       const afterTerminal = authoritativeManagementSession(authoritative.channel, sessionId)
       if (!afterTerminal) {
+        const freshSessions = appHomeSessions()
         return appHomeOverviewView({
-          authorized: true, stats: appHomeStats(), sessions: appHomeSessions(),
+          authorized: true, stats: appHomeStats(freshSessions), sessions: freshSessions,
           notice: '⚠️ The native session changed while App Home was loading. Select the current session again.',
         })
       }
       const models = await managementModelCatalog(afterTerminal)
       const current = authoritativeManagementSession(authoritative.channel, sessionId)
       if (!current) {
+        const freshSessions = appHomeSessions()
         return appHomeOverviewView({
-          authorized: true, stats: appHomeStats(), sessions: appHomeSessions(),
+          authorized: true, stats: appHomeStats(freshSessions), sessions: freshSessions,
           notice: '⚠️ The native session changed while App Home was loading. Select the current session again.',
         })
       }
@@ -4747,14 +4766,9 @@ async function buildAppHomeView(userId, { sessionId = null, notice = '' } = {}) 
     }
     notice = '⚠️ That session control is stale. The current authoritative session list is shown below.'
   }
-  const counts = { claude: 0, codex: 0, pi: 0, active: 0, dormant: 0 }
-  for (const session of sessions) {
-    counts[session.provider]++
-    counts[session.active ? 'active' : 'dormant']++
-  }
   return appHomeOverviewView({
     authorized: true,
-    stats: { ...counts, uptime: appHomeUptime() },
+    stats: appHomeStats(sessions),
     sessions,
     notice,
   })
@@ -4940,6 +4954,7 @@ async function handleTeamCommand(channel, rest) {
 }
 
 const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags', 'switch', 'run', 'terminal'])
+const MAINTENANCE_SAFE_COMMANDS = new Set(['status', 'usage', 'terminal'])
 const CLAUDE_ONLY_COMMANDS = new Set(['account'])
 const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup', 'team'])
 
@@ -4989,6 +5004,10 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   const channelTransition = activeTransition(channel)
   if (channelTransition && SESSION_SCOPED_COMMANDS.has(name) && !['status', 'switch', 'terminal'].includes(name)) {
     return post(channel, `⏳ Provider switch is in its \`${channelTransition.phase}\` phase. Wait for commit/rollback before changing or ending either native leg.`)
+  }
+  if (channelSession && updatingSessions.has(channelSession.id) &&
+      SESSION_SCOPED_COMMANDS.has(name) && !MAINTENANCE_SAFE_COMMANDS.has(name)) {
+    return post(channel, '⏳ Provider maintenance is already reserved for this exact session. Wait for its resume before changing or ending it.')
   }
   if (channelSession?.teamActiveTaskId && SESSION_SCOPED_COMMANDS.has(name) &&
       !['status', 'usage', 'stop', 'kill', 'terminal'].includes(name)) {
@@ -6154,7 +6173,7 @@ async function handleAppHomeAction(body, action, parsed) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid provider-switch control.' })
     }
     await dispatch('switch', [provider], destination, null, { userId, expectedSessionId })
-    return publishAppHome(userId, { sessionId: expectedSessionId, notice: '🔀 Provider-switch review started. Continue from the session channel.' })
+    return publishAppHome(userId, { sessionId: expectedSessionId, notice: 'ℹ️ Switch request processed. The session channel contains the authoritative result.' })
   }
 
   if (parsed.kind === 'dispatch') {
