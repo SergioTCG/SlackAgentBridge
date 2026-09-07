@@ -183,6 +183,8 @@ accounts, and the Mac user running the daemon.
   order before loopback delivery; a delayed earlier event therefore cannot be
   made stale by a later final. Shutdown interrupts commentary backoff and gives
   every already accepted stable final a bounded drain before the proxy exits;
+  final retries remain spaced during shutdown so transient pressure cannot be
+  collapsed into a lossy burst;
   the correlated App Server stays alive until that drain completes so ancestry
   proof remains possible. Drain exhaustion is explicit rather than silent.
   The runner propagates that exhaustion as a nonzero failure and prints only a

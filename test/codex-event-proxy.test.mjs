@@ -173,6 +173,113 @@ test('event proxy drains a queued fallback final when shutdown interrupts commen
   }
 })
 
+test('shutdown keeps transient final retries spaced and exits only after delivery succeeds', async () => {
+  const finalAttempts = []
+  const daemon = http.createServer(async (request, response) => {
+    for await (const _ of request) {} // drain request bytes before responding
+    if (request.url.startsWith('/codex/final')) {
+      finalAttempts.push(Date.now())
+      response.writeHead(finalAttempts.length === 1 ? 503 : 202)
+      response.end(finalAttempts.length === 1 ? 'retry' : 'accepted')
+    } else {
+      response.writeHead(202); response.end('accepted')
+    }
+  })
+  const daemonPort = await listen(daemon)
+  const upstream = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await once(upstream, 'listening')
+  const proxy = spawn(process.execPath, [proxyScript.pathname,
+    '--upstream', `ws://127.0.0.1:${upstream.address().port}`,
+    '--agent-pid', String(process.pid), '--tmux', 'ccs-final-retry-spacing',
+    '--daemon', `http://127.0.0.1:${daemonPort}/codex/commentary`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = ''
+  proxy.stdout.on('data', chunk => { stdout += chunk })
+  let client
+  try {
+    const proxyUrl = await waitFor(() => stdout.match(/ws:\/\/127\.0\.0\.1:\d+/)?.[0])
+    const serverConnection = once(upstream, 'connection')
+    client = new WebSocket(proxyUrl)
+    await once(client, 'open')
+    const [serverSocket] = await serverConnection
+    serverSocket.send(JSON.stringify({
+      method: 'item/completed', params: { threadId: 'thread-spacing', turnId: 'turn-spacing', item: {
+        id: 'final-spacing', type: 'agentMessage', phase: 'final_answer', text: 'Delivered after retry.',
+      } },
+    }))
+    serverSocket.send(JSON.stringify({
+      method: 'turn/completed', params: { threadId: 'thread-spacing', turn: {
+        id: 'turn-spacing', status: 'completed', items: [],
+      } },
+    }))
+    await waitFor(() => finalAttempts.length === 1)
+    proxy.kill('SIGTERM')
+    await once(proxy, 'exit')
+    assert.equal(proxy.exitCode, 0)
+    assert.equal(finalAttempts.length, 2)
+    assert.ok(finalAttempts[1] - finalAttempts[0] >= 200,
+      'shutdown must not collapse a final retry into an immediate burst')
+  } finally {
+    client?.terminate()
+    if (proxy.exitCode === null && proxy.signalCode === null) proxy.kill('SIGKILL')
+    upstream.close()
+    daemon.closeAllConnections?.()
+    daemon.close()
+  }
+})
+
+test('a rejected stable final makes the real proxy shutdown fail', async () => {
+  let finalRejected = false
+  const daemon = http.createServer(async (request, response) => {
+    for await (const _ of request) {}
+    if (request.url.startsWith('/codex/final')) finalRejected = true
+    response.writeHead(request.url.startsWith('/codex/final') ? 400 : 202)
+    response.end('rejected')
+  })
+  const daemonPort = await listen(daemon)
+  const upstream = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await once(upstream, 'listening')
+  const proxy = spawn(process.execPath, [proxyScript.pathname,
+    '--upstream', `ws://127.0.0.1:${upstream.address().port}`,
+    '--agent-pid', String(process.pid), '--tmux', 'ccs-final-rejection',
+    '--daemon', `http://127.0.0.1:${daemonPort}/codex/commentary`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = ''
+  let stderr = ''
+  proxy.stdout.on('data', chunk => { stdout += chunk })
+  proxy.stderr.on('data', chunk => { stderr += chunk })
+  let client
+  try {
+    const proxyUrl = await waitFor(() => stdout.match(/ws:\/\/127\.0\.0\.1:\d+/)?.[0])
+    const serverConnection = once(upstream, 'connection')
+    client = new WebSocket(proxyUrl)
+    await once(client, 'open')
+    const [serverSocket] = await serverConnection
+    serverSocket.send(JSON.stringify({
+      method: 'item/completed', params: { threadId: 'thread-rejected', turnId: 'turn-rejected', item: {
+        id: 'final-rejected', type: 'agentMessage', phase: 'final_answer', text: 'Must surface failure.',
+      } },
+    }))
+    serverSocket.send(JSON.stringify({
+      method: 'turn/completed', params: { threadId: 'thread-rejected', turn: {
+        id: 'turn-rejected', status: 'completed', items: [],
+      } },
+    }))
+    await waitFor(() => finalRejected)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    proxy.kill('SIGTERM')
+    await once(proxy, 'exit')
+    assert.equal(proxy.exitCode, 1)
+    assert.match(stderr, /final delivery failed/)
+  } finally {
+    client?.terminate()
+    if (proxy.exitCode === null && proxy.signalCode === null) proxy.kill('SIGKILL')
+    upstream.close()
+    daemon.closeAllConnections?.()
+    daemon.close()
+  }
+})
+
 test('shutdown skips every queued commentary before spending the final drain budget', async () => {
   const deliveries = []
   const daemon = http.createServer(async (request, response) => {

@@ -50,9 +50,12 @@ Notable changes to this project. Format based on
   prompt, so coordinator text cannot be pasted into an operator-choice UI.
 - Codex event-proxy shutdown now skips all queued commentary immediately rather
   than spending one request timeout per item ahead of an accepted stable final.
+  Stable finals retain their retry spacing during shutdown, and a rejected or
+  exhausted final makes the proxy/runner fail instead of reporting a clean drain.
   A reconnected Pi stream resumes the sole ordered maintenance-input drain, so
   accepted prompts cannot remain fenced after extension reconnect; a superseded
-  Pi stream cannot drain input reserved for its replacement.
+  Pi stream cannot drain input reserved for its replacement, and no Pi stream
+  can drain until the exact SessionStart metadata work has completed.
 - Drain activation is rechecked at the continuation claim boundary, instruction
   card revisions remain retryable when either audit card is absent, and idle
   restart adoption revalidates the exact provider process after asynchronous
@@ -61,10 +64,18 @@ Notable changes to this project. Format based on
   updates. The final dispatch claim is bound to that same fully audited
   instruction revision, preventing a replacement from racing into a worker
   under mixed or stale visible instructions.
+- Claude model selections made through Slack are now persisted just like effort
+  selections before the confirmation/topic update, so daemon restarts and
+  later session updates cannot fall back to the session's original model.
+- Replacement input-drain ownership now follows the stable session record
+  across native identity changes, preventing racing lifecycle/Pi-stream
+  callbacks from creating two queue consumers under the old and new ids.
 - An automatic coordinator wake left `active` by a daemon crash no longer wedges
   later events forever. SAB adopts it only when the exact provider turn remains
   live; otherwise it records an actionable interrupted outcome and never
-  replays the uncertain coordinator prompt.
+  replays the uncertain coordinator prompt. Persisted Codex/Pi start timestamps
+  are not sufficient proof: restart adoption requires a provider poller restored
+  from live post-restart evidence.
 
 ## [2.1.0-rc.11] — 2026-09-07
 

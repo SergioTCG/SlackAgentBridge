@@ -187,7 +187,9 @@ recovery accepts that wake only when the exact coordinator process and provider
 turn are still live. An unprovable provider attempt is marked interrupted and
 is never replayed; SAB posts an owner-actionable notice and leaves later durable
 events available rather than keeping the team permanently wedged behind an
-`active` journal entry.
+`active` journal entry. Persisted provider start timestamps alone are not live
+proof: a provider-specific post-restart event must restore the in-memory turn
+poller before the interrupted wake can be adopted.
 
 The same fallback covers an ordinary owner turn in a resumed Codex worker. Once
 the exact authoritative worker process has shown the unchanged idle input

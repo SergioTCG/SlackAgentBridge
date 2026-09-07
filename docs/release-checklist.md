@@ -74,6 +74,8 @@
 - [ ] Closing Codex while commentary delivery is backing off still drains its
       accepted App Server fallback final before the proxy exits, while the
       correlated App Server remains alive for daemon ancestry validation.
+- [ ] A transient final-delivery rejection during shutdown observes retry
+      spacing and succeeds when the loopback endpoint recovers.
 - [ ] Exhausting that bounded Codex shutdown drain produces a visible nonzero
       runner failure with a bounded diagnostic rather than silent success.
 - [ ] New sessions are headless; Slack interaction works with no Ghostty window.

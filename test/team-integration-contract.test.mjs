@@ -147,6 +147,15 @@ test('reviewed lifecycle races revalidate exact state at the last safe boundary'
 })
 
 test('an interrupted automatic coordinator wake is recovered without uncertain replay', () => {
+  const tracked = daemon.slice(
+    daemon.indexOf('function providerTurnTracked('),
+    daemon.indexOf('async function liveInterruptedContinuationTurn('),
+  )
+  assert.match(tracked, /pollers\.has\(session\.id\)/)
+  assert.match(tracked, /codexPollers\.has\(session\.id\)/)
+  assert.match(tracked, /piPollers\.has\(session\.id\)/)
+  assert.doesNotMatch(tracked, /codexTurnStartedAt|piTurnStartedAt/,
+    'persisted timestamps are not post-restart proof that a coordinator turn is live')
   const recovery = daemon.slice(
     daemon.indexOf('async function recoverInterruptedTeamContinuations('),
     daemon.indexOf('async function finishTeamTaskForSession('),

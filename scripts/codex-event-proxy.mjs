@@ -34,6 +34,7 @@ const deliveries = new Map()
 let deliveryTail = Promise.resolve()
 let shuttingDown = false
 let activeRequest = null
+let stableDeliveryFailure = null
 let resolveShutdownSignal
 const shutdownSignal = new Promise(resolve => { resolveShutdownSignal = resolve })
 const retryDelays = [0, 250, 1000, 3000, 7000, 15000]
@@ -44,15 +45,19 @@ const MAX_PENDING_FINALS = 128
 async function waitForRetry(delay, label) {
   if (shuttingDown && label === 'commentary') return false
   if (!delay) return true
-  if (!shuttingDown) {
-    await Promise.race([
-      new Promise(resolve => setTimeout(resolve, delay)),
-      shutdownSignal,
-    ])
+  if (label === 'final') {
+    // Stable finals retain their real backoff even after SIGTERM. Collapsing
+    // retries into a burst makes transient daemon/Slack pressure permanent.
+    await new Promise(resolve => setTimeout(resolve, delay))
+    return true
   }
+  await Promise.race([
+    new Promise(resolve => setTimeout(resolve, delay)),
+    shutdownSignal,
+  ])
   // Commentary is useful progress, but must not strand a stable fallback final
-  // behind backoff when the TUI is exiting. Finals retain bounded fast retries.
-  return true
+  // behind backoff when the TUI is exiting.
+  return !shuttingDown
 }
 
 async function postDelivery(endpoint, payload, label) {
@@ -82,19 +87,27 @@ function deliver({ key, payload, endpoint, label }) {
   // synchronously, then serialize stable commentary/final deliveries in the
   // exact order in which inspectFrame accepted them.
   const pending = deliveryTail.then(async () => {
+    let lastFailure = null
     for (const delay of retryDelays) {
       if (!(await waitForRetry(delay, label))) return
       try {
         const response = await postDelivery(endpoint, payload, label)
         if (response.ok) return
-        if (![409, 429, 503].includes(response.status)) return
-      } catch {}
+        lastFailure = new Error(`HTTP ${response.status}`)
+        if (![409, 429, 503].includes(response.status)) break
+      } catch (error) {
+        lastFailure = error
+      }
       if (shuttingDown && label === 'commentary') return
     }
-    process.stderr.write(`sab Codex event proxy: ${label} delivery timed out (${payload.itemId.slice(0, 12)})\n`)
+    const failure = new Error(`${label} delivery failed (${payload.itemId.slice(0, 12)}): ${String(lastFailure?.message || 'retry budget exhausted')}`)
+    process.stderr.write(`sab Codex event proxy: ${failure.message}\n`)
+    if (label === 'final') throw failure
   })
   deliveries.set(key, pending)
-  deliveryTail = pending.catch(() => {})
+  deliveryTail = pending.catch(error => {
+    if (label === 'final' && !stableDeliveryFailure) stableDeliveryFailure = error
+  })
   void pending.then(
     () => { if (deliveries.get(key) === pending) deliveries.delete(key) },
     () => { if (deliveries.get(key) === pending) deliveries.delete(key) },
@@ -207,7 +220,7 @@ function shutdown() {
   server.close()
   const timeout = new Promise(resolve => setTimeout(() => resolve(false), SHUTDOWN_DRAIN_MS))
   shutdownPromise = Promise.race([
-    deliveryTail.then(() => true),
+    deliveryTail.then(() => !stableDeliveryFailure),
     timeout,
   ]).then(drained => {
     if (!drained) {

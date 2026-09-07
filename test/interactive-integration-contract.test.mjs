@@ -90,6 +90,16 @@ test('replacement startup drains all queued input before releasing direct delive
   assert.doesNotMatch(start, /updatingSessions\.delete\(sid\)/)
 })
 
+test('replacement input drain ownership follows the session object across identity changes', () => {
+  assert.match(daemon, /const sessionInputDrainOwners = new WeakSet\(\)/)
+  const drain = /function scheduleSessionInputDrain\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(drain, /sessionInputDrainOwners\.has\(session\)/)
+  assert.ok(drain.indexOf('sessionInputDrainOwners.add(session)') < drain.indexOf('setTimeout('),
+    'drain ownership must be reserved synchronously before either native surface can schedule another consumer')
+  assert.match(drain, /finally \{[\s\S]*sessionInputDrainOwners\.delete\(session\)/,
+    'the stable session-object reservation must be released after success, failure, or a superseded timer')
+})
+
 test('the ordered startup drain is the sole consumer of maintenance input', () => {
   const resurrection = /async function resurrect\([\s\S]*?\n\}\nconst pendingBySid/.exec(daemon)?.[0] || ''
   assert.doesNotMatch(resurrection, /queued\.shift\(\)/,
@@ -102,6 +112,8 @@ test('the ordered startup drain is the sole consumer of maintenance input', () =
     'a reconnected Pi stream must ask the sole ordered drain to resume')
   assert.match(piStream, /session && !restarting\.has\(session\.id\)[\s\S]*scheduleSessionInputDrain/,
     'the superseded Pi stream must not drain input reserved for its replacement')
+  assert.match(piStream, /completedSessionStartTmux\.get\(session\.id\) === tmux[\s\S]*scheduleSessionInputDrain/,
+    'Pi stream attachment must not deliver input before SessionStart metadata is complete')
 
   const claudeStream = /if \(url\.pathname === '\/channel\/stream'\)[\s\S]*?\n  \}/.exec(daemon)?.[0] || ''
   assert.doesNotMatch(claudeStream, /pendingBySid\.(?:get|set)/,
@@ -148,4 +160,14 @@ test('App Home stale-load fallback uses defined fresh stats and never invents sw
   assert.doesNotMatch(daemon, /stats: appHomeStats\(\), sessions: appHomeSessions\(\)/)
   assert.match(daemon, /Switch request processed\. The session channel contains the authoritative result\./)
   assert.doesNotMatch(daemon, /Provider-switch review started\. Continue from the session channel\./)
+})
+
+test('Claude menu settings are durable before the visible topic confirms them', () => {
+  const settings = daemon.slice(
+    daemon.indexOf("if (name === 'model' || name === 'effort')"),
+    daemon.indexOf("if (name === 'stop')"),
+  )
+  assert.match(settings, /if \(name === 'model'\) session\.model = val/)
+  assert.match(settings, /if \(name === 'effort'\) session\.effort = val/)
+  assert.ok(settings.indexOf('saveStateNow(state)') < settings.indexOf('await updateTopic(session)'))
 })

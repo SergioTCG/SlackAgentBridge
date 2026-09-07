@@ -272,7 +272,9 @@ function consumeInjected(sid, prompt) {
 const restarting = new Set() // session ids intentionally restarting (suppress the "ended" notice)
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
 const drainingSessionInput = new Set() // exact sessions serially flushing input queued across a wake/restart
-const completedSessionStartTmux = new Map() // sid → tmux; dedupe native/synthetic start races
+const sessionInputDrainOwners = new WeakSet() // stable session objects reserve one scheduler across native id replacement
+const pendingSessionStartTmux = new Map() // sid → tmux while Slack/startup metadata is still being established
+const completedSessionStartTmux = new Map() // sid → tmux only after startup metadata is safe for input
 let bulkUpdateRunning = false
 function claudeBin() {
   const local = path.join(process.env.HOME, '.local', 'bin', 'claude') // native-install symlink
@@ -1440,10 +1442,16 @@ async function reportCodexModelMismatch(session) {
 function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
   if (!session?.id || !tmux ||
       (!updatingSessions.has(session.id) && !pendingBySid.get(session.id)?.length)) return false
+  // SessionStart and the Pi stream can race, and the native session id may be
+  // replaced while the first delivery is awaiting tmux/provider I/O. Reserve
+  // the stable record synchronously so neither surface can start a second queue
+  // consumer under the replacement id.
+  if (sessionInputDrainOwners.has(session)) return false
+  sessionInputDrainOwners.add(session)
   updatingSessions.add(session.id)
   const timer = setTimeout(async () => {
-    if (!updatingSessions.has(session.id)) return
     try {
+      if (!updatingSessions.has(session.id)) return
       await drainSessionInputQueue(() => session.id, {
         pendingBySession: pendingBySid,
         updatingSessionIds: updatingSessions,
@@ -1478,6 +1486,8 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
       })
       await post(session.channel,
         '⚠️ The resumed provider did not accept its queued input. The queue remains fenced; retry this exact session with `/sab-update`.').catch(() => {})
+    } finally {
+      sessionInputDrainOwners.delete(session)
     }
   }, Math.max(0, Number(delay) || 0))
   timer.unref?.()
@@ -1487,8 +1497,8 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
 async function completeAuthoritativeSessionStart(session, provider, source) {
   const sid = session.id
   const tmux = session.tmux || ''
-  if (completedSessionStartTmux.get(sid) === tmux) return false
-  completedSessionStartTmux.set(sid, tmux)
+  if (completedSessionStartTmux.get(sid) === tmux || pendingSessionStartTmux.get(sid) === tmux) return false
+  pendingSessionStartTmux.set(sid, tmux)
   // Install the input fence synchronously, before any Slack API await below.
   // Maintenance already owns this fence; ordinary resurrection acquires it
   // whenever an accepted prompt is waiting for the replacement input surface.
@@ -1502,6 +1512,12 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
     if (provider === 'codex') await reportCodexModelMismatch(session)
     automationLifecycle.correlateSessionStart(session)
 
+    // Publish completion only after every awaited metadata operation succeeds.
+    // A Pi stream may attach while this handler is still running, but it must
+    // not deliver preserved input until this exact startup is fully accepted.
+    if (pendingSessionStartTmux.get(sid) === tmux) pendingSessionStartTmux.delete(sid)
+    completedSessionStartTmux.set(sid, tmux)
+
     // Keep the fence until the sole ordered consumer has delivered every item,
     // including messages arriving while an earlier paste is in flight.
     if (updatingSessions.has(sid) && tmux) {
@@ -1511,6 +1527,7 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
     }
     return true
   } catch (error) {
+    if (pendingSessionStartTmux.get(sid) === tmux) pendingSessionStartTmux.delete(sid)
     if (completedSessionStartTmux.get(sid) === tmux) completedSessionStartTmux.delete(sid)
     const recovery = recoverSessionInputFence(session.id, {
       pendingBySession: pendingBySid,
@@ -4307,8 +4324,11 @@ function matchingContinuationTurn(session, team, event) {
 }
 
 function providerTurnTracked(session) {
-  return Boolean(session && (pollers.has(session.id) || codexPollers.has(session.id) || piPollers.has(session.id) ||
-    session.codexTurnStartedAt || session.piTurnStartedAt))
+  // Persisted start timestamps explain a prior turn, but cannot prove that the
+  // provider is still executing after this daemon started. Readoption restores
+  // a provider poller only after provider-specific live evidence, so the
+  // in-memory poller is the recovery fence for an interrupted continuation.
+  return Boolean(session && (pollers.has(session.id) || codexPollers.has(session.id) || piPollers.has(session.id)))
 }
 
 async function liveInterruptedContinuationTurn(team, event, coordinator) {
@@ -5960,9 +5980,18 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
                 || models.find(m => m.alias.toLowerCase() === want)
       if (pick) val = pick.id
     }
+    const settingSessionId = session.id
     await sendMenuCommand(session.tmux, `/${name} ${val}`)
+    if (authoritativeManagementSession(channel, settingSessionId) !== session || session.id !== settingSessionId) {
+      return post(channel, '⚠️ The native Claude session changed while its setting was being applied. Refresh the session before retrying.')
+    }
     sessionMeta.set(session.id, { ...meta, [name]: val })
-    if (name === 'effort') { session.effort = val; saveState(state) } // persist so resume restores it
+    if (name === 'model') session.model = val
+    if (name === 'effort') session.effort = val
+    // The model cache is presentation-only. Persist both native settings before
+    // confirming them so a daemon restart or /sab-update resumes this choice.
+    saveStateNow(state)
+    await updateTopic(session)
     return post(channel, `✅ ${name} → \`${val}\``)
   }
   if (name === 'stop') {
@@ -6572,7 +6601,9 @@ http.createServer(async (req, res) => {
     // that process is stopped. Only a non-restarting stream (including the
     // replacement after its SessionStart cleared the restart fence) may resume
     // the ordered input drain.
-    if (session && !restarting.has(session.id)) scheduleSessionInputDrain(session, 'pi', tmux, 0)
+    if (session && !restarting.has(session.id) && completedSessionStartTmux.get(session.id) === tmux) {
+      scheduleSessionInputDrain(session, 'pi', tmux, 0)
+    }
     const ka = setInterval(() => { try { res.write(': ka\n\n') } catch {} }, 15000)
     req.on('close', () => { clearInterval(ka); if (streams.get(pid)?.res === res) streams.delete(pid) })
     return

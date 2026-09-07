@@ -211,8 +211,12 @@ Replacement startup keeps direct input closed while Slack metadata is refreshed.
 One ordered drain is the sole queue consumer: provider launch arguments and
 Claude/Pi stream attachment cannot remove or reorder prompts. It remains active
 until every queued prompt, including prompts arriving during the drain, reaches
-the exact replacement input surface. A failed delivery restores the undelivered
-tail; a failed wake or metadata setup releases only the stale maintenance marker
+the exact replacement input surface. Drain ownership follows the stable session
+record across native identity replacement, so competing lifecycle and Pi-stream
+callbacks cannot start consumers under the old and new ids. A Pi stream can
+schedule that drain only after the exact SessionStart has completed its Slack
+metadata work. A failed delivery restores the undelivered tail; a failed wake
+or metadata setup releases only the stale maintenance marker
 so an explicit update or later message can retry the dormant session. A stale
 reservation still cannot stop or resume an unrelated replacement. Standby,
 provisional, stale, dormant, and rebound records are never bulk-restarted.
@@ -317,7 +321,9 @@ coordinator is missing, busy, or a safety/product decision is required.
 On restart, a journaled active wake is accepted as delivered only when the exact
 coordinator PID/tmux and provider turn are re-adopted. Otherwise it is settled
 as interrupted, its matching bridge-owned authority is released, and the
-uncertain prompt is never replayed.
+uncertain prompt is never replayed. A persisted provider start timestamp is
+historical context, not live-turn proof; recovery requires the provider poller
+to have been restored from provider-specific post-restart evidence.
 An independent durable `draining` mode lets active workers finish while blocking
 queued claims and continuation wakes until dispatch is explicitly resumed.
 
@@ -462,10 +468,11 @@ transcript or terminal. It never emits commands, command output, diffs, plans,
 reasoning, or deltas. Stable commentary/final deliveries retain their App
 Server source order across loopback retries, so a later final cannot overtake
 an earlier response. On proxy shutdown, commentary backoff is curtailed and
-the accepted delivery tail is drained for up to 30 seconds, ensuring a stable
-fallback final gets its bounded local retry opportunity before the sidecar
-exits. The runner keeps the correlated App Server alive until that drain
-finishes so the daemon can still prove the delivery's process ancestry. Drain
+the accepted delivery tail is drained for up to 30 seconds. Stable finals keep
+their real retry spacing during that drain, so transient pressure is not turned
+into an immediate exhausted burst. The runner keeps the correlated App Server
+alive until that drain finishes so the daemon can still prove the delivery's
+process ancestry. Drain
 exhaustion is printed with the proxy diagnostic and makes the runner fail
 rather than silently treating a possibly missing final as success. Before
 applying the exact-process fence, the daemon
