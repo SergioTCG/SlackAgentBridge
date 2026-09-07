@@ -28,7 +28,7 @@ test('team tools remain provider-neutral and cannot acquire Slack credentials or
 })
 
 test('team task injection is journal-first and uncertain claims are not replayed', () => {
-  const claim = daemon.indexOf('claimTeamTask(state, task.id')
+  const claim = daemon.indexOf('claimTeamTaskForSession(state, task.id')
   const persist = daemon.indexOf('saveStateNow(state)', claim)
   const inject = daemon.indexOf('injectText(target, prompt', claim)
   assert.ok(claim > 0 && persist > claim && inject > persist)
@@ -62,11 +62,100 @@ test('team lifecycle recovery cannot rebind, lose finals, or fence a worker inde
   assert.match(daemon, /const workerProof = appended\.accepted[\s\S]*session\.teamActiveTaskId === task\.id[\s\S]*recordTeamWorkerProof\(session, task\)/)
   assert.match(daemon, /const startCodexStatus = recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)[\s\S]*updateTeamTaskAudit\(task\)/)
   assert.match(daemon, /target\.teamActiveTaskId !== task\.id/)
+  assert.match(daemon, /claimTeamTaskForSession\(state, task\.id, target[\s\S]*saveStateNow\(state\)[\s\S]*injectText\(target, prompt/)
   assert.match(daemon, /teamInputReservation/)
   assert.match(daemon, /InputError[\s\S]*clearTeamInputReservation\(session\)/)
   assert.match(daemon, /dispatchClaimedAt[\s\S]*discardQueuedTeamTaskPrompt\(target, task\.id\)/)
   assert.match(daemon, /abandonedInput = clearTeamInputReservation\(s\)/)
   assert.match(daemon, /markTeamTaskRunning\(state, teamTaskId\)[\s\S]*updateTeamTaskAudit\(task\)/)
+})
+
+test('hookless successful workers complete with warning and cannot race an authenticated final', () => {
+  const start = daemon.indexOf('function startCodexPoller(')
+  const end = daemon.indexOf('function startPiPoller(', start)
+  const poller = daemon.slice(start, end)
+  assert.match(poller, /await validProviderRootClaim[\s\S]*if \(p\.stopped\) return[\s\S]*finishTeamTaskWithWarningForSession/)
+  assert.match(poller, /finishTeamTaskWithWarningForSession\(session, task\.status === 'running'/)
+  assert.match(poller, /omitted its acknowledgement and completion hooks/)
+  assert.match(daemon, /completed_with_warning/)
+})
+
+test('team task control is journal-first, exact-task scoped, and drain-aware', () => {
+  assert.match(daemon, /appendCoordinatorTaskMessage\(state, task\.id[\s\S]*saveStateNow\(state\)[\s\S]*ensureCoordinatorTaskMessageDelivery/)
+  assert.match(daemon, /target\.teamActiveTaskId !== task\.id[\s\S]*target_authority_lost/)
+  assert.match(daemon, /providerDeliveryStatus = 'delivering'[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
+  assert.match(daemon, /teamDispatchMode\(team\) === 'draining'/)
+  assert.match(daemon, /tasksPageForChannel/)
+})
+
+test('restart re-adoption proves active turns but fails closed for already-idle historical tasks', () => {
+  const readopt = daemon.slice(daemon.indexOf('async function readoptStatus('), daemon.indexOf('function isSystemPrompt('))
+  const piReadopt = readopt.slice(readopt.indexOf("providerOf(s) === 'pi'"), readopt.indexOf("providerOf(s) === 'codex'"))
+  assert.doesNotMatch(piReadopt, /teamTurnProof\.add|startPiPoller/)
+  assert.match(piReadopt, /awaiting post-restart Pi activity proof/)
+  const piStatus = daemon.slice(daemon.indexOf("provider === 'pi' && (ev === 'Status'"), daemon.indexOf("provider === 'pi' && ev === 'AgentStart'"))
+  assert.match(piStatus, /session\.piTurnStartedAt && !piPollers\.has\(session\.id\)[\s\S]*startPiPoller\(session\)/)
+  assert.match(piStatus, /session\.teamActiveTaskId[\s\S]*teamTurnProof\.add\(session\.id\)/)
+  for (const provider of ['Codex', 'Claude Code', 'Pi']) {
+    assert.match(daemon, new RegExp(`releaseIdleReadoptedTeamTaskIfStillIdle\\(s, idleTask, '${provider}'\\)`))
+  }
+  assert.match(daemon, /historical worker turn could not be proven complete and was released without replay/)
+  assert.match(daemon, /let teamRecoveryComplete = false/)
+  assert.match(daemon, /function scheduleTeamContinuation[\s\S]*if \(!teamRecoveryComplete\) return/)
+  assert.match(daemon, /function startTeamReconciler[\s\S]*teamRecoveryComplete = true/)
+  assert.ok(daemon.lastIndexOf('await readoptStatus()') < daemon.lastIndexOf('await recoverInterruptedTeamContinuations()'))
+  assert.ok(daemon.lastIndexOf('await recoverInterruptedTeamContinuations()') < daemon.lastIndexOf('startTeamReconciler()'))
+})
+
+test('reviewed lifecycle races revalidate exact state at the last safe boundary', () => {
+  const continuation = daemon.slice(
+    daemon.indexOf('async function runTeamContinuation('),
+    daemon.indexOf('function teamTaskStatusText('),
+  )
+  const claim = continuation.indexOf('const event = claimContinuation(team)')
+  assert.ok(claim > 0)
+  assert.ok(continuation.lastIndexOf("teamDispatchMode(team) === 'draining'", claim) > 0)
+
+  const readopt = daemon.slice(daemon.indexOf('async function readoptStatus('), daemon.indexOf('function isSystemPrompt('))
+  assert.match(readopt, /const idleTask = readoptedTeamTaskFingerprint\(s\)[\s\S]*releaseIdleReadoptedTeamTaskIfStillIdle/)
+  assert.doesNotMatch(readopt, /releaseIdleReadoptedTeamTaskIfStillIdle\(s[\s\S]*clearTeamInputReservation\(s\)/)
+  assert.match(daemon, /function releaseIdleReadoptedTeamTaskIfStillIdle[\s\S]*validProviderRootClaim[\s\S]*readoptedTeamTaskStillIdle[\s\S]*clearTeamTurn[\s\S]*clearTeamInputReservation/)
+
+  const messageDelivery = daemon.slice(
+    daemon.indexOf('function coordinatorTaskMessageTargetMatches('),
+    daemon.indexOf('function ensureCoordinatorTaskMessageDelivery('),
+  )
+  assert.match(messageDelivery, /Object\.freeze\(\{[\s\S]*pid: target\.pid[\s\S]*tmux: target\.tmux/)
+  assert.match(messageDelivery, /validProviderRootClaim\(expected\.pid, expected\.tmux, expected\.provider\)/)
+  assert.match(messageDelivery, /await tmuxPaste\(expected\.tmux, prompt\)[\s\S]*coordinatorTaskMessageTargetMatches/)
+  assert.doesNotMatch(messageDelivery, /injectText\(/)
+
+  assert.match(messageDelivery, /!qforms\.has\(expected\.sid\) && !hasPendingPerm\(target\)/)
+
+  const audit = daemon.slice(
+    daemon.indexOf('async function performTeamTaskPayloadAuditUpdate('),
+    daemon.indexOf('async function updateTeamTaskAudit('),
+  )
+  assert.match(audit, /if \(!ts\)[\s\S]*failure \|\|=/)
+  assert.match(audit, /const instructionVersion[\s\S]*const snapshots[\s\S]*payloadAuditInstructionVersion = instructionVersion/)
+  assert.match(audit, /teamPayloadAuditTails\.get\(task\.id\)[\s\S]*teamPayloadAuditTails\.set\(task\.id, operation\)/)
+
+  const dispatch = daemon.slice(daemon.indexOf('async function dispatchTeamTask('), daemon.indexOf('async function reconcileTeamTasks('))
+  assert.match(dispatch, /expectedInstructionVersion[\s\S]*expectedAuditInstructionVersion[\s\S]*claimTeamTaskForSession/)
+  assert.match(dispatch, /task_revision_changed[\s\S]*task_audit_stale/)
+  assert.match(daemon, /stopPoller\(target\)[\s\S]*clearTeamTurn\(target\)[\s\S]*no live-turn proof returned; SAB released it/)
+})
+
+test('an interrupted automatic coordinator wake is recovered without uncertain replay', () => {
+  const recovery = daemon.slice(
+    daemon.indexOf('async function recoverInterruptedTeamContinuations('),
+    daemon.indexOf('async function finishTeamTaskForSession('),
+  )
+  assert.match(recovery, /liveInterruptedContinuationTurn[\s\S]*settleContinuation\(team, event\.id, \{ status: 'succeeded' \}\)/)
+  assert.match(recovery, /status: 'needs_owner'/)
+  assert.match(recovery, /did not replay/)
+  assert.match(recovery, /matchingContinuationTurn[\s\S]*clearTeamTurn\(coordinator\)[\s\S]*clearTeamInputReservation\(coordinator\)/)
+  assert.doesNotMatch(recovery, /deferContinuation|injectText|queueContinuation/)
 })
 
 test('automatic continuation recovers a hookless idle Codex coordinator without replaying backlog', () => {
@@ -80,8 +169,8 @@ test('automatic continuation recovers a hookless idle Codex coordinator without 
 test('hookless resumed Codex workers release stale owner fences before queued dispatch', () => {
   assert.match(daemon, /observeIdleCodexTurn\(session,/)
   assert.match(daemon, /allowDelegatedTask: true/)
-  assert.match(daemon, /Codex delegated task fallback failed \(Stop hook missing\)/)
-  assert.match(daemon, /released this task without replaying it/)
+  assert.match(daemon, /Codex delegated task fallback completed with warning \(Stop hook missing\)/)
+  assert.match(daemon, /omitted its acknowledgement and completion hooks[\s\S]*did not replay it/)
   assert.match(daemon, /Codex idle fallback released owner turn \(Stop hook missing\)/)
   assert.match(daemon, /state\.sessions\?\.\[expected\.sid\] !== session[\s\S]*state\.channels\?\.\[session\.channel\] !== expected\.sid/)
   assert.match(daemon, /validProviderRootClaim\(expected\.pid, expected\.tmux, 'codex'\)/)
@@ -109,6 +198,22 @@ test('completion, pruning, and retry side effects remain durable and idempotent'
   assert.doesNotMatch(daemon, /updateTeamTaskAudit\(task, \{ strict: true \}\)/)
   const persistPrune = daemon.indexOf('for (const removed of result.pruned || []) removeTeamTaskFiles(removed)')
   assert.ok(daemon.lastIndexOf('saveStateNow(state)', persistPrune) < persistPrune)
+})
+
+test('worker lifecycle transitions and coordinator wakes share one atomic state write', () => {
+  const stageStart = daemon.indexOf('function stageTeamContinuation(')
+  const persistStart = daemon.indexOf('function persistTeamLifecycle(', stageStart)
+  const nextFunction = daemon.indexOf('function teamContinuationBusyReason(', persistStart)
+  const stage = daemon.slice(stageStart, persistStart)
+  const persist = daemon.slice(persistStart, nextFunction)
+  assert.match(stage, /queueContinuation\(team/)
+  assert.match(persist, /stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
+
+  const completion = /async function finishTeamTaskForSession\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(completion, /completeTeamTask\(state[\s\S]*persistTeamLifecycle\(task\)[\s\S]*ensureTeamCompletionDelivery/)
+
+  const reply = /async reply\(caller, request\) \{[\s\S]*?\n  },\n  async cancel/.exec(daemon)?.[0] || ''
+  assert.match(reply, /appendTeamTaskReply\(state[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
 })
 
 test('nested provider utilities are not registered as SAB sessions', () => {

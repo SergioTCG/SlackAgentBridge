@@ -138,6 +138,31 @@
       workers. Confirm private role context, alias-only peer discovery, safe busy
       queueing, explicit interim reply, stable final return, and status cards in
       both channels.
+- [ ] Confirm a dispatch claim populates `startedAt` and changes durable worker
+      availability to busy in the same state write; no status read can show a
+      dispatching/running task on a ready worker.
+- [ ] Exercise `sab team inbox` with active/target/status/since filters and two
+      opaque cursor pages. Confirm the original instruction is present and an
+      unrelated channel cannot see the task.
+- [ ] While one worker runs and another task is queued, enable team drain.
+      Confirm active work finishes, no queued task or continuation starts, and
+      resume dispatches the exact queued task once. Cancel and replace queued
+      tasks idempotently, and send one audited coordinator message to an exact
+      active task; a stale/rebound session and a worker showing a question or
+      permission prompt must reject it. Race two replacements with dispatch and
+      confirm only the exact revision visible in both audit cards is claimed.
+- [ ] Suppress a Codex worker completion hook and confirm two stable live idle
+      observations produce `completed_with_warning`, release the worker, and
+      dispatch fresh queued work exactly once. Restart with an unproven
+      historical task and confirm it fails closed without replay, while a live
+      active turn is re-adopted without manual activation.
+- [ ] Restart during a Pi worker turn. Confirm its persisted start timestamp
+      alone does not restore worker proof or polling, a new native Pi event does,
+      and an unproved historical turn releases its stale task/poller/input fences
+      without replay after the recovery grace period.
+- [ ] Repeat ordinary and dispatch-healing worker replies. Confirm each exact
+      task/reply/lifecycle version produces at most one coordinator wake and a
+      later real lifecycle version still wakes once.
 - [ ] Confirm a collaborator coordinator prompt cannot dispatch, a worker cannot
       address another worker, a stale/rebound leg cannot call `sab team`, and
       daemon restart neither duplicates a queued task nor retries an uncertain

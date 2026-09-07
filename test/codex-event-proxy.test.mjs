@@ -172,3 +172,67 @@ test('event proxy drains a queued fallback final when shutdown interrupts commen
     daemon.close()
   }
 })
+
+test('shutdown skips every queued commentary before spending the final drain budget', async () => {
+  const deliveries = []
+  const daemon = http.createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += chunk
+    deliveries.push({ url: request.url, body: JSON.parse(body) })
+    if (request.url.startsWith('/codex/final')) {
+      response.writeHead(202); response.end('accepted')
+    }
+    // Commentary intentionally never receives a response. Once shutdown begins,
+    // queued commentary must not spend one three-second request apiece ahead of
+    // the already accepted stable final.
+  })
+  const daemonPort = await listen(daemon)
+  const upstream = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await once(upstream, 'listening')
+  const proxy = spawn(process.execPath, [proxyScript.pathname,
+    '--upstream', `ws://127.0.0.1:${upstream.address().port}`,
+    '--agent-pid', String(process.pid),
+    '--tmux', 'ccs-shutdown-backlog',
+    '--daemon', `http://127.0.0.1:${daemonPort}/codex/commentary`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = ''
+  proxy.stdout.on('data', chunk => { stdout += chunk })
+
+  let client
+  try {
+    const proxyUrl = await waitFor(() => stdout.match(/ws:\/\/127\.0\.0\.1:\d+/)?.[0])
+    const serverConnection = once(upstream, 'connection')
+    client = new WebSocket(proxyUrl)
+    await once(client, 'open')
+    const [serverSocket] = await serverConnection
+    for (let index = 0; index < 6; index++) {
+      serverSocket.send(JSON.stringify({
+        method: 'item/completed',
+        params: { threadId: 'thread-backlog', turnId: 'turn-backlog', item: {
+          id: `comment-backlog-${index}`, type: 'agentMessage', phase: 'commentary', text: `Update ${index}`,
+        } },
+      }))
+    }
+    serverSocket.send(JSON.stringify({
+      method: 'item/completed', params: { threadId: 'thread-backlog', turnId: 'turn-backlog', item: {
+        id: 'final-backlog', type: 'agentMessage', phase: 'final_answer', text: 'Stable final.',
+      } },
+    }))
+    serverSocket.send(JSON.stringify({
+      method: 'turn/completed', params: { threadId: 'thread-backlog', turn: {
+        id: 'turn-backlog', status: 'completed', items: [],
+      } },
+    }))
+    await waitFor(() => deliveries.some(delivery => delivery.url.startsWith('/codex/commentary')))
+    proxy.kill('SIGTERM')
+    await waitFor(() => deliveries.some(delivery =>
+      delivery.url.startsWith('/codex/final') && delivery.body.itemId === 'final-backlog'), 2500)
+  } finally {
+    client?.terminate()
+    if (proxy.exitCode === null && proxy.signalCode === null) proxy.kill('SIGKILL')
+    await Promise.race([once(proxy, 'exit'), new Promise(resolve => setTimeout(resolve, 500))]).catch(() => {})
+    upstream.close()
+    daemon.closeAllConnections?.()
+    daemon.close()
+  }
+})

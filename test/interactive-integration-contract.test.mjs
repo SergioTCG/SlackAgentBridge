@@ -58,6 +58,7 @@ test('team management actions redraw state-dependent controls after refresh and 
   assert.match(handler, /request\?\.interactiveManagement/)
   assert.match(handler, /sub === 'status'[\s\S]*postTeamManagement\(channel, session, team\)/)
   assert.match(handler, /sub === 'auto' \|\| sub === 'manual'[\s\S]*postTeamManagement\(channel, session, team\)/)
+  assert.match(handler, /sub === 'drain' \|\| sub === 'resume'[\s\S]*setTeamDispatchMode/)
 })
 
 test('session update ownership is reserved before Slack and follows a native identity replacement', () => {
@@ -80,7 +81,9 @@ test('session update ownership is reserved before Slack and follows a native ide
 test('replacement startup drains all queued input before releasing direct delivery', () => {
   const completion = /async function completeAuthoritativeSessionStart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(completion, /updatingSessions\.add\(sid\)/)
-  assert.match(completion, /drainSessionInputQueue\(\(\) => session\.id/)
+  assert.match(completion, /scheduleSessionInputDrain\(session, provider, tmux\)/)
+  const drain = /function scheduleSessionInputDrain\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(drain, /drainSessionInputQueue\(\(\) => session\.id/)
   assert.doesNotMatch(completion, /pendingBySid\.set\(sid, \[\]\)[\s\S]*setTimeout/)
 
   const start = /if \(ev === 'SessionStart'\) \{[\s\S]{0,1200}completeAuthoritativeSessionStart/.exec(daemon)?.[0] || ''
@@ -95,6 +98,10 @@ test('the ordered startup drain is the sole consumer of maintenance input', () =
   const piStream = /if \(url\.pathname === '\/pi\/stream'[\s\S]*?\n  \}/.exec(daemon)?.[0] || ''
   assert.doesNotMatch(piStream, /pendingBySid\.(?:get|set)/,
     'Pi stream attachment must not bypass the ordered startup drain')
+  assert.match(piStream, /scheduleSessionInputDrain\(session, 'pi'/,
+    'a reconnected Pi stream must ask the sole ordered drain to resume')
+  assert.match(piStream, /session && !restarting\.has\(session\.id\)[\s\S]*scheduleSessionInputDrain/,
+    'the superseded Pi stream must not drain input reserved for its replacement')
 
   const claudeStream = /if \(url\.pathname === '\/channel\/stream'\)[\s\S]*?\n  \}/.exec(daemon)?.[0] || ''
   assert.doesNotMatch(claudeStream, /pendingBySid\.(?:get|set)/,

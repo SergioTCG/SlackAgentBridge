@@ -3,11 +3,11 @@ import assert from 'node:assert/strict'
 import {
   claimContinuationDispatchAuthority, clearContinuationWaiting, coalesceContinuations, continuationFor, noteContinuationWaiting,
   observeIdleCodexCoordinator, observeIdleCodexTurn, setContinuationMode, queueContinuation, claimContinuation, settleContinuation,
-  shouldWakeForTeamReply,
+  shouldWakeForTeamReply, TEAM_CONTINUATION_MAX_PENDING,
 } from '../daemon/team-continuation.mjs'
 import {
   addTeamWorker, assertCoordinatorDispatch, beginCollaboratorTeamTurn, beginOwnerTeamTurn,
-  claimTeamTask, createTeam, createTeamTask, failTeamTask, markTeamTaskRunning,
+  claimTeamTask, claimTeamTaskForSession, createTeam, createTeamTask, failTeamTask, markTeamTaskRunning,
 } from '../daemon/teams.mjs'
 
 test('continuations remain disabled by default and duplicate events are idempotent', () => {
@@ -41,6 +41,23 @@ test('continuation claim and settlement survive one event at a time', () => {
   const settled = settleContinuation(team, event.id, { status: 'succeeded' })
   assert.equal(settled.status, 'succeeded')
   assert.equal(continuationFor(team).active, null)
+  assert.equal(queueContinuation(team, { taskId: 'task_1', kind: 'blocked' }).created, false)
+})
+
+test('settled notification identities remain durably deduplicated by lifecycle version', () => {
+  const team = { id: 'team_1' }
+  setContinuationMode(team, 'auto-until-blocked')
+  const first = queueContinuation(team, {
+    taskId: 'task_1', kind: 'reply', replyId: 'reply_1', lifecycleVersion: 3,
+  })
+  settleContinuation(team, claimContinuation(team).id)
+  assert.equal(queueContinuation(team, {
+    taskId: 'task_1', kind: 'reply', replyId: 'reply_1', lifecycleVersion: 3,
+  }).created, false)
+  assert.equal(queueContinuation(team, {
+    taskId: 'task_1', kind: 'completed', lifecycleVersion: 4,
+  }).created, true)
+  assert.ok(team.continuation.seenKeys.includes(first.event.key))
 })
 
 test('invalid continuation mode is rejected', () => {
@@ -67,6 +84,26 @@ test('one continuation wake durably subsumes the current event backlog', () => {
   queueContinuation(team, { taskId: 'task_3', kind: 'failed', now: 6000 })
   assert.equal(coalesceContinuations(team, { now: 7000 }).count, 4)
   assert.deepEqual(continuationFor(team).pending[0].coalescedTaskIds, ['task_1', 'task_2', 'task_3'])
+})
+
+test('a saturated continuation backlog coalesces instead of losing the next wake', () => {
+  const team = { id: 'team_1' }
+  setContinuationMode(team, 'auto-until-blocked')
+  for (let index = 0; index < TEAM_CONTINUATION_MAX_PENDING; index++) {
+    assert.equal(queueContinuation(team, {
+      taskId: `task_${index}`, kind: 'reply', replyId: `reply_${index}`, lifecycleVersion: index + 1,
+    }).created, true)
+  }
+  const firstKey = team.continuation.pending[0].key
+  const overflow = queueContinuation(team, {
+    taskId: 'task_overflow', kind: 'completed', lifecycleVersion: 99,
+  })
+  assert.equal(overflow.created, true)
+  assert.equal(team.continuation.pending.length, 2)
+  assert.ok(team.continuation.pending[0].coalescedKeys.includes(firstKey))
+  assert.equal(queueContinuation(team, {
+    taskId: 'task_0', kind: 'reply', replyId: 'reply_0', lifecycleVersion: 1,
+  }).created, false)
 })
 
 test('an authenticated worker event renews one exhausted coordinator dispatch budget', () => {
@@ -193,11 +230,10 @@ test('hookless resumed worker releases stale owner busy state and claims only th
   // reconciliation. The exact queued task can then be claimed once.
   delete worker.codexTurnStartedAt
   delete worker.teamInputReservation
-  const claimed = claimTeamTask(state, fresh.id, {
-    targetSessionId: worker.id, targetProvider: 'codex', now: 26_000,
+  const claimed = claimTeamTaskForSession(state, fresh.id, worker, {
+    targetProvider: 'codex', now: 26_000,
   })
-  worker.teamActiveTaskId = claimed.id
-  assert.equal(claimed.startedAt, undefined)
+  assert.equal(claimed.startedAt, new Date(26_000).toISOString())
   assert.equal(claimed.targetSessionId, worker.id)
   markTeamTaskRunning(state, claimed.id, { now: 27_000 })
   assert.equal(claimed.status, 'running')

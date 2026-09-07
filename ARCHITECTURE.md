@@ -127,8 +127,10 @@ and bounded workers by immutable channel ID with presentation aliases and
 per-worker file permission. `state.teamTasks[taskId]` is the bounded,
 immediately persisted delivery journal: request/payload digest, exact source and
 target channel/session/provider/node identities, dispatch phase, Slack audit
-timestamps, replies, stable result/error, and expiry. Plaintext task input is
-removed after provider acceptance. Team membership survives provider switching
+timestamps, the bounded original instruction, replies, coordinator messages,
+stable result/error/warning, lifecycle versions, and expiry. The mutable delivery
+envelope is removed after provider acceptance, while the instruction remains for
+bounded inbox observability. Team membership survives provider switching
 because every send/reply revalidates the channel's current active leg.
 
 A missing `session.nodeId` and missing `state.channelNodes[channelId]` resolve to
@@ -296,9 +298,12 @@ derives the source from process ancestry and requires exact PID, tmux, provider,
 native session, active channel mapping, and local node. Agent-visible peers and
 tasks contain aliases and authorized envelopes rather than raw destination
 IDs. A short-lived bounded `session.teamTurn` gives only a current
-owner-initiated coordinator turn dispatch authority; collaborator and local
-terminal turns clear it. A delegated worker task is narrower still: only its
-exact assigned live session may reply.
+owner-initiated coordinator turn dispatch and task-control authority;
+collaborator and local terminal turns clear it. A delegated worker task is
+narrower still: only its exact assigned live session may reply. The coordinator
+may cancel/replace its exact queued tasks and send an audited message to the
+exact authoritative session owning an active task; every operation is bounded,
+idempotent, and journaled before Slack or provider effects.
 
 Teams may opt into `auto-until-blocked` continuation. Every authenticated
 worker reply—including ordinary progress and idempotent retries that heal a
@@ -309,6 +314,12 @@ context before dispatching. Existing teams remain `manual` by default;
 automatic continuation is serialized per team, survives daemon restart through
 the state journal, and pauses with an actionable owner notification when the
 coordinator is missing, busy, or a safety/product decision is required.
+On restart, a journaled active wake is accepted as delivered only when the exact
+coordinator PID/tmux and provider turn are re-adopted. Otherwise it is settled
+as interrupted, its matching bridge-owned authority is released, and the
+uncertain prompt is never replayed.
+An independent durable `draining` mode lets active workers finish while blocking
+queued claims and continuation wakes until dispatch is explicitly resumed.
 
 The same coordinator provider turn may remain active across many worker refill
 cycles. Its dispatch budget is never made unlimited: after the current budget is
@@ -321,8 +332,10 @@ worker event remain denied.
 
 Because the inbox is authoritative, all events pending when a continuation is
 claimed are durably coalesced into one wake rather than replayed as separate
-model turns. Covered event keys remain in the bounded record for retry
-idempotency. A resumed Codex coordinator may exceptionally omit both prompt and
+model turns. A task/reply lifecycle transition and its continuation event enter
+the same atomic state write before any Slack delivery or provider wake. Covered
+event keys bind task, reply, and task-lifecycle version and remain in the bounded
+record after settlement for retry idempotency. A resumed Codex coordinator may exceptionally omit both prompt and
 completion hooks. SAB may release only its bridge-owned turn/input fences after
 the exact authoritative PID/tmux has shown the native idle input surface twice,
 unchanged, after a grace period. This path never parses a transcript or terminal
@@ -340,6 +353,22 @@ requires no delegated task and the exact channel/session mapping, a fresh
 queued task can claim that worker once without replaying a failed pre-reboot
 task or mutating a replacement session.
 
+A delegated Codex task uses a stricter variant of the same live proof. If the
+exact continuously observed process returns to idle twice after the grace
+period, the injected turn is over even when acknowledgement and completion
+hooks are absent. SAB records `completed_with_warning`, never fabricates a
+stable final, and releases the worker without replay. An idle task discovered
+during boot has no continuous delivery proof and therefore fails closed instead;
+a genuinely live turn is re-adopted and may continue. This distinction preserves
+historical no-replay guarantees while allowing fresh queued work to reach an
+already idle re-adopted session without manual activation.
+
+Pi restart adoption never treats its persisted turn-start timestamp as current
+liveness. SAB restores Pi polling and delegated-task proof only after a new
+native extension status/start event from the exact re-adopted process. If that
+proof does not arrive within the recovery grace period, the historical task and
+all of its stale poller/input fences are released without replay.
+
 The process claim also requires the provider to be the root provider process
 under the SAB tmux pane. Nested utilities such as `codex review` inherit the
 parent environment but are rejected before SessionStart registration and before
@@ -354,8 +383,12 @@ Task delivery is journal-first:
    payload and idempotent status cards in both Slack channels.
 3. Wait while the target is dormant, busy, switching, asking a question,
    awaiting permission, under maintenance, or owned by managed Pi work.
-4. Reserve the worker input surface, atomically change `queued → dispatching`,
-   and bind the exact target native session before provider injection. A restart
+4. Serialize both visible instruction-card updates for each replacement and
+   bind the final claim to that exact fully audited instruction revision. Then
+   reserve the worker input surface, atomically change `queued → dispatching`,
+   populate `startedAt`, and bind `session.teamActiveTaskId` plus the exact target
+   native session before provider injection. Availability derives from the same
+   durable record, so no dispatching worker can be reported ready. A restart
    never retries an uncertain dispatch claim.
 5. Accept `running` when the provider acknowledges the injected immutable task
    marker, or when the exact process-bound worker successfully journals a reply
@@ -363,7 +396,8 @@ Task delivery is journal-first:
    its prompt hook; it is not final-result proof. Claude's completed transcript
    path, Codex's Stop hook or matching successful App Server turn, or Pi's
    extension final event may complete only the same task/session binding.
-6. Persist completion and a delivery claim before updating both audit cards and
+6. Persist `completed`, `completed_with_warning`, failure, or cancellation and a
+   delivery claim before updating both audit cards and
    idempotently posting the stable result in the coordinator channel. A missing
    or uneditable audit card is reported with the result but cannot suppress it;
    reconciliation retries incomplete result delivery before releasing bounded
@@ -372,7 +406,12 @@ Task delivery is journal-first:
 
 Interim provider commentary remains in the worker channel; a worker explicitly
 uses `sab team reply` to put selected progress in the source mailbox. Questions
-and permissions stay on the worker's normal Slack surface. Interrupt, kill,
+and permissions stay on the worker's normal Slack surface. A coordinator uses
+`sab team message` to answer or amend an exact active task, with a visible copy
+in both channels; SAB refuses delivery while a question or permission surface
+is open, and an uncertain provider attempt is never replayed. Filtered,
+cursor-paginated inbox reads expose only the caller's task envelopes and retain
+the original instruction for that bounded journal lifetime. Interrupt, kill,
 session death, team removal/closure, and expiry produce visible task failure or
 cancellation. Bulk updates skip active worker tasks and cleanup preserves
 dormant team channels.
@@ -555,7 +594,8 @@ Team endpoints are:
 
 - `GET /team/context`, `/team/peers`, and `/team/inbox`
 - `GET /team/tasks/:taskId`
-- `POST /team/send` and `/team/reply`
+- `POST /team/send`, `/team/reply`, `/team/message`, `/team/replace`,
+  `/team/cancel`, and `/team/mode`
 
 Every endpoint rejects browser origins and non-loopback Host values. Team
 mutations additionally require exact provider-process/tmux ancestry; no bearer

@@ -16,11 +16,15 @@ function usage(message = '') {
   process.stderr.write(`Usage:
   sab team context [--json]
   sab team peers [--json]
-  sab team inbox [--after TASK_ID] [--limit N] [--json]
+  sab team inbox [--active] [--target ALIAS] [--status STATUS[,STATUS]] [--since ISO] [--cursor CURSOR] [--after TASK_ID] [--limit N] [--page] [--json]
   sab team send --to ALIAS (--stdin | --message TEXT) [--request-id ID]
   sab team send-file (--to ALIAS | --task TASK_ID) [--message TEXT] [--request-id ID] -- FILE_PATH [FILE_PATH ...]
   sab team wait --task TASK_ID [--timeout SECONDS] [--json]
   sab team reply --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
+  sab team message --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
+  sab team replace --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
+  sab team cancel --task TASK_ID [--reason TEXT] [--request-id ID]
+  sab team mode <active|draining>
 
 Team identity and destinations are resolved by the bridge. These commands must
 run inside an authoritative live Slack Agent Bridge session.\n`)
@@ -135,14 +139,35 @@ try {
   } else if (command === 'inbox') {
     let limit = 100
     let after = null
+    let cursor = null
+    let active = false
+    let target = null
+    let status = null
+    let since = null
+    let page = false
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--json') continue
+      if (args[i] === '--active') { active = true; continue }
+      if (args[i] === '--page') { page = true; continue }
       if (args[i] === '--limit') { limit = Number(value(args, i, args[i])); i++; continue }
       if (args[i] === '--after') { after = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--cursor') { cursor = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--target') { target = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--status') { status = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--since') { since = value(args, i, args[i]); i++; continue }
       usage(`unknown inbox option: ${args[i]}`)
     }
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) usage('--limit must be an integer from 1 to 200')
-    output((await request(`/team/inbox?limit=${limit}${after ? `&after=${encodeURIComponent(after)}` : ''}`)).tasks)
+    if (after && (cursor || active || target || status || since)) usage('--after is the legacy new-items cursor and cannot be combined with inbox filters or --cursor')
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (after) params.set('after', after)
+    if (cursor) params.set('cursor', cursor)
+    if (active) params.set('active', 'true')
+    if (target) params.set('target', target)
+    if (status) params.set('status', status)
+    if (since) params.set('since', since)
+    const result = await request(`/team/inbox?${params}`)
+    output(page ? { tasks: result.tasks, nextCursor: result.nextCursor || null } : result.tasks)
   } else if (command === 'send') {
     const parsed = commonMessageArgs(args)
     if (!parsed.to || !parsed.text) usage('send requires --to and either --stdin or --message')
@@ -172,6 +197,31 @@ try {
       method: 'POST', body: { taskId: parsed.taskId, text: parsed.text, paths: [], requestId: parsed.requestId || crypto.randomUUID() },
     })
     output(result.reply)
+  } else if (command === 'message' || command === 'replace') {
+    const parsed = commonMessageArgs(args)
+    if (!parsed.taskId || !parsed.text) usage(`${command} requires --task and either --stdin or --message`)
+    const result = await request(`/team/${command}`, {
+      method: 'POST', body: { taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId || crypto.randomUUID() },
+    })
+    output(result.message || result.task)
+  } else if (command === 'cancel') {
+    let taskId = null
+    let reason = 'Cancelled by the coordinator.'
+    let requestId = null
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--task') { taskId = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--reason') { reason = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--request-id') { requestId = value(args, i, args[i]); i++; continue }
+      usage(`unknown cancel option: ${args[i]}`)
+    }
+    if (!taskId) usage('cancel requires --task')
+    const result = await request('/team/cancel', {
+      method: 'POST', body: { taskId, reason, requestId: requestId || crypto.randomUUID() },
+    })
+    output(result.task)
+  } else if (command === 'mode') {
+    if (args.length !== 1 || !['active', 'draining'].includes(args[0])) usage('mode requires active or draining')
+    output(await request('/team/mode', { method: 'POST', body: { mode: args[0] } }))
   } else if (command === 'wait') {
     let taskId = null
     let timeoutSeconds = 3600
@@ -187,14 +237,14 @@ try {
     let task
     do {
       task = (await request(`/team/tasks/${encodeURIComponent(taskId)}`)).task
-      if (['completed', 'failed', 'cancelled'].includes(task.status)) break
+      if (['completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)) break
       await new Promise(resolve => setTimeout(resolve, 1000))
     } while (Date.now() < deadline)
-    if (!task || !['completed', 'failed', 'cancelled'].includes(task.status)) {
+    if (!task || !['completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)) {
       throw Object.assign(new Error(`timed out waiting for ${taskId}; the task remains active`), { exitCode: 1 })
     }
     output(task)
-    if (task.status !== 'completed') process.exitCode = 1
+    if (!['completed', 'completed_with_warning'].includes(task.status)) process.exitCode = 1
   } else usage(`unknown command: ${command}`)
 } catch (error) {
   process.stderr.write(`sab team: ${error?.message || error}\n`)

@@ -127,11 +127,16 @@ generated MCP configuration. Do not print secrets during diagnostics.
   `auto-until-blocked` continuation turn—may dispatch to linked workers; collaborators
   have no lateral authority. An exhausted automatic turn may renew one bounded
   dispatch budget only by atomically claiming an authenticated pending worker
-  event for that exact team. Worker replies/finals bind to one exact task and
-  authoritative native session. Journal before Slack/provider side effects,
-  never retry an uncertain dispatch after restart, and keep every transfer
-  visible in both affected channels. Worker-to-worker relay and arbitrary
-  history access remain disabled.
+  event for that exact team. Durable drain mode must let active work finish while
+  blocking queued claims and continuation wakes. Worker replies/finals and
+  coordinator task messages bind to one exact task and authoritative native
+  session; cancel/replace may affect only queued work. Journal before
+  Slack/provider side effects, never retry an uncertain dispatch or task message,
+  and keep every transfer visible in both affected channels. A continuously
+  observed hookless Codex worker may complete only with an explicit warning;
+  boot-time idle without continuous proof fails closed. Continuation events
+  deduplicate by task, reply, and lifecycle version. Worker-to-worker relay and
+  arbitrary history access remain disabled.
 - Team files use a separate task-bound permission—not artifact grants. Enforce
   source-workspace realpath containment, private copied bytes, content hashes,
   fixed linked destinations, explicit per-worker enablement, and bounded

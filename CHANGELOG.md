@@ -6,6 +6,66 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.12] — 2026-09-08
+
+### Added
+
+- Session teams can now enter durable `draining` mode: active work may finish,
+  but queued work cannot dispatch until the owner or coordinator resumes the
+  team. Coordinators can idempotently cancel or replace an exact queued task and
+  can send a journaled, visibly audited message to the exact live worker that
+  owns an active task.
+- `sab team inbox` now retains the original bounded task instruction and adds
+  `--active`, `--target`, `--status`, `--since`, opaque cursor pagination, and a
+  page-shaped JSON result. The legacy `--after` form remains compatible.
+
+### Fixed
+
+- A live Codex worker that demonstrably returns to the idle input surface after
+  an injected task no longer records successful work as failed merely because
+  the completion hook was omitted. SAB records `completed_with_warning`, never
+  replays the turn, releases worker availability, and dispatches the next queued
+  task once. Boot-time idle without continuous delivery proof still fails
+  closed, preserving the no-replay boundary for historical pre-restart work.
+- Worker availability and task lifecycle now move together in one persisted
+  dispatch claim. A `dispatching` task has `startedAt` immediately, and durable
+  active-task state prevents a transient ready report or duplicate claim even
+  if session-local state is stale.
+- Automatic coordinator notifications are durably deduplicated by task, reply,
+  and lifecycle version, and pending events are coalesced before a continuation
+  wake. Ordinary worker replies and idempotent dispatch-healing retries still
+  enqueue exactly one wake.
+- Restart adoption now distinguishes live provider-turn proof from an already
+  idle historical task, preserves active tasks without manual session
+  activation, and releases unprovable work without replay before fresh queued
+  work can dispatch. A persisted Pi start timestamp is no longer treated as
+  post-restart liveness: native Pi activity must return before SAB restores its
+  poller or delegated-task authority, and an unproved turn releases all stale
+  poller/input state when the recovery grace period expires.
+- Coordinator task messages bind the exact task, channel, native session, PID,
+  and input surface; the journal is persisted before Slack/provider effects and
+  an uncertain provider attempt is never retried. The final provider attempt is
+  single-transport and revalidates that immutable binding after submission.
+  Delivery also refuses an input surface displaying a question or permission
+  prompt, so coordinator text cannot be pasted into an operator-choice UI.
+- Codex event-proxy shutdown now skips all queued commentary immediately rather
+  than spending one request timeout per item ahead of an accepted stable final.
+  A reconnected Pi stream resumes the sole ordered maintenance-input drain, so
+  accepted prompts cannot remain fenced after extension reconnect; a superseded
+  Pi stream cannot drain input reserved for its replacement.
+- Drain activation is rechecked at the continuation claim boundary, instruction
+  card revisions remain retryable when either audit card is absent, and idle
+  restart adoption revalidates the exact provider process after asynchronous
+  Slack cleanup before releasing task or owner-turn fences.
+- Concurrent queued-task replacements serialize their paired Slack audit-card
+  updates. The final dispatch claim is bound to that same fully audited
+  instruction revision, preventing a replacement from racing into a worker
+  under mixed or stale visible instructions.
+- An automatic coordinator wake left `active` by a daemon crash no longer wedges
+  later events forever. SAB adopts it only when the exact provider turn remains
+  live; otherwise it records an actionable interrupted outcome and never
+  replays the uncertain coordinator prompt.
+
 ## [2.1.0-rc.11] — 2026-09-07
 
 ### Fixed

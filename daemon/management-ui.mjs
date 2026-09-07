@@ -240,6 +240,8 @@ export function teamPickerBlocks({ sessionId, team }) {
     elements.push(button('Add worker', 'team', target, 'add', { binding }))
     elements.push(button(team.continuation === 'auto-until-blocked' ? 'Use manual mode' : 'Enable auto mode',
       'team', target, team.continuation === 'auto-until-blocked' ? 'manual' : 'auto', { binding }))
+    elements.push(button(team.dispatchMode === 'draining' ? 'Resume dispatch' : 'Drain queue',
+      'team', target, team.dispatchMode === 'draining' ? 'resume' : 'drain', { binding }))
     elements.push(button('Permissions', 'team', target, 'permissions', { binding }))
     elements.push(button('Close team', 'team', target, 'close', {
       binding,
@@ -254,6 +256,8 @@ export function teamPickerBlocks({ sessionId, team }) {
   }
   return [
     { type: 'header', text: { type: 'plain_text', text: 'Session team controls' } },
-    { type: 'actions', block_id: `sab_team_${target}`, elements },
+    ...Array.from({ length: Math.ceil(elements.length / 5) }, (_, index) => ({
+      type: 'actions', block_id: `sab_team_${target}_${index + 1}`, elements: elements.slice(index * 5, index * 5 + 5),
+    })),
   ]
 }

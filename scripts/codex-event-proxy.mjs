@@ -42,6 +42,7 @@ const pendingFinalAnswers = new Map()
 const MAX_PENDING_FINALS = 128
 
 async function waitForRetry(delay, label) {
+  if (shuttingDown && label === 'commentary') return false
   if (!delay) return true
   if (!shuttingDown) {
     await Promise.race([
@@ -51,7 +52,7 @@ async function waitForRetry(delay, label) {
   }
   // Commentary is useful progress, but must not strand a stable fallback final
   // behind backoff when the TUI is exiting. Finals retain bounded fast retries.
-  return !(shuttingDown && label === 'commentary')
+  return true
 }
 
 async function postDelivery(endpoint, payload, label) {

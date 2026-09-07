@@ -5,6 +5,7 @@ import { beginContinuationTeamTurn } from './teams.mjs'
 // remain manual, preserving the owner-turn safety boundary.
 export const TEAM_CONTINUATION_MODES = new Set(['manual', 'auto-until-blocked'])
 export const TEAM_CONTINUATION_MAX_PENDING = 64
+export const TEAM_CONTINUATION_MAX_SEEN = 256
 export const TEAM_CONTINUATION_IDLE_GRACE_MS = 15_000
 export const TEAM_CONTINUATION_IDLE_CONFIRMATIONS = 2
 export const TEAM_CONTINUATION_WAIT_NOTICE_MS = 60_000
@@ -16,6 +17,7 @@ export function continuationFor(team, { create = false } = {}) {
   if (create) {
     team.continuation ||= { mode: 'manual', pending: [], active: null }
     team.continuation.pending ||= []
+    team.continuation.seenKeys ||= []
   }
   return team.continuation || null
 }
@@ -34,19 +36,26 @@ const eventKeys = event => Array.isArray(event?.coalescedKeys)
   ? event.coalescedKeys
   : event?.key ? [event.key] : []
 
-export function queueContinuation(team, { taskId, kind = 'completed', replyId = null, now = Date.now() } = {}) {
+export function queueContinuation(team, {
+  taskId, kind = 'completed', replyId = null, lifecycleVersion = null, now = Date.now(),
+} = {}) {
   const continuation = continuationFor(team, { create: true })
   if (continuation.mode !== 'auto-until-blocked') return { created: false, event: null }
-  const key = `${String(taskId || '')}:${String(kind || 'completed')}:${String(replyId || '')}`
+  const key = `${String(taskId || '')}:${String(kind || 'completed')}:${String(replyId || '')}:${lifecycleVersion == null ? '' : String(lifecycleVersion)}`
   const existing = continuation.pending.find(event => eventKeys(event).includes(key)) ||
     (eventKeys(continuation.active).includes(key) ? continuation.active : null)
-  if (existing) return { created: false, event: existing }
+  if (existing || continuation.seenKeys.includes(key)) return { created: false, event: existing || null }
   if (continuation.pending.length >= TEAM_CONTINUATION_MAX_PENDING) {
-    throw new Error('Team continuation queue is full; owner attention is required.')
+    // A burst of replies must not force the caller to choose between persisting
+    // the authenticated task transition and its coordinator wake. One wake
+    // already instructs the coordinator to reread the authoritative inbox, so
+    // compact the pending backlog before adding the new lifecycle identity.
+    coalesceContinuations(team, { now })
   }
   const event = {
     id: `team_event_${crypto.randomBytes(10).toString('base64url')}`,
     key, taskId: String(taskId || ''), replyId: replyId ? String(replyId) : null, kind: String(kind || 'completed'),
+    lifecycleVersion: lifecycleVersion == null ? null : Number(lifecycleVersion),
     status: 'queued', createdAt: nowIso(now), updatedAt: nowIso(now),
   }
   continuation.pending.push(event)
@@ -79,7 +88,7 @@ export function coalesceContinuations(team, { now = Date.now() } = {}) {
     Array.isArray(event.coalescedTaskIds) ? event.coalescedTaskIds : [event.taskId]).filter(Boolean))]
   const count = pending.reduce((total, event) => total + Math.max(1, Number(event.coalescedCount) || 1), 0)
   latest.coalescedCount = count
-  latest.coalescedKeys = keys.slice(-TEAM_CONTINUATION_MAX_PENDING)
+  latest.coalescedKeys = keys.slice(-TEAM_CONTINUATION_MAX_SEEN)
   latest.coalescedTaskIds = taskIds.slice(-TEAM_CONTINUATION_MAX_PENDING)
   latest.firstCreatedAt = pending[0].firstCreatedAt || pending[0].createdAt
   latest.updatedAt = nowIso(now)
@@ -131,9 +140,9 @@ export function observeIdleCodexTurn(session, {
   // Callers that already possess the exact Codex turn timestamp may observe
   // that provider-only fence; team reconciliation keeps the stricter default.
   allowProviderTurn = false,
-  // A delegated worker task is handled by the caller after a stable idle
-  // observation so it can fail that exact journal entry and release the worker
-  // without replaying it or fabricating a final answer.
+  // A delegated worker task is handled by the live caller after a stable idle
+  // observation so it can complete that exact journal entry with a warning and
+  // release the worker without replaying it or fabricating a final answer.
   allowDelegatedTask = false,
   now = Date.now(),
   graceMs = TEAM_CONTINUATION_IDLE_GRACE_MS,
@@ -210,6 +219,13 @@ export function settleContinuation(team, eventId, { status = 'succeeded', error 
   continuation.active.error = error ? String(error).slice(0, 1000) : null
   continuation.active.updatedAt = nowIso(now)
   const event = continuation.active
+  continuation.seenKeys ||= []
+  for (const key of eventKeys(event)) {
+    if (!continuation.seenKeys.includes(key)) continuation.seenKeys.push(key)
+  }
+  if (continuation.seenKeys.length > TEAM_CONTINUATION_MAX_SEEN) {
+    continuation.seenKeys.splice(0, continuation.seenKeys.length - TEAM_CONTINUATION_MAX_SEEN)
+  }
   continuation.active = null
   return event
 }

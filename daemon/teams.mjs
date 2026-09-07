@@ -14,8 +14,9 @@ export const TEAM_TURN_TTL_MS = 12 * 60 * 60 * 1000
 const TEAM_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/
 const TEAM_ALIAS_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/
 const REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const TASK_STATES = new Set(['queued', 'dispatching', 'running', 'completed', 'failed', 'cancelled'])
+const TASK_STATES = new Set(['queued', 'dispatching', 'running', 'completed', 'completed_with_warning', 'failed', 'cancelled'])
 const ACTIVE_TASK_STATES = new Set(['queued', 'dispatching', 'running'])
+const TASK_CONTROL_MAX = 32
 
 export class TeamError extends Error {
   constructor(code, message, status = 400) {
@@ -30,6 +31,11 @@ const nowIso = now => new Date(now).toISOString()
 const randomId = prefix => `${prefix}_${crypto.randomBytes(12).toString('base64url')}`
 const textBytes = text => Buffer.byteLength(String(text || ''), 'utf8')
 const hash = text => crypto.createHash('sha256').update(String(text || '')).digest('hex')
+const bumpTask = (task, now) => {
+  task.lifecycleVersion = Math.max(1, Number(task.lifecycleVersion) || 1) + 1
+  task.updatedAt = nowIso(now)
+  return task
+}
 
 function normalizeSlug(value, kind, pattern) {
   const slug = String(value || '').trim().toLowerCase()
@@ -91,6 +97,7 @@ export function createTeam(state, {
     createdBy: String(createdBy),
     coordinatorChannel: channel,
     version: 1,
+    dispatchMode: 'active',
     members: {
       [channel]: { role: 'coordinator', alias: 'coordinator', files: false, joinedAt: nowIso(now) },
     },
@@ -99,6 +106,23 @@ export function createTeam(state, {
   }
   teams[team.id] = team
   return team
+}
+
+export function teamDispatchMode(team) {
+  return team?.dispatchMode === 'draining' ? 'draining' : 'active'
+}
+
+export function setTeamDispatchMode(team, mode, { now = Date.now() } = {}) {
+  const next = String(mode || '').trim().toLowerCase()
+  if (!['active', 'draining'].includes(next)) {
+    throw new TeamError('invalid_dispatch_mode', 'Team dispatch mode must be active or draining.')
+  }
+  if (teamDispatchMode(team) !== next || !Object.hasOwn(team || {}, 'dispatchMode')) {
+    team.dispatchMode = next
+    team.dispatchModeChangedAt = nowIso(now)
+    team.version = Math.max(1, Number(team.version) || 1) + 1
+  }
+  return { mode: next, changedAt: team.dispatchModeChangedAt || null }
 }
 
 export function addTeamWorker(state, teamId, {
@@ -172,6 +196,7 @@ export function teamContext(state, channel) {
     id: team.id,
     name: team.name,
     version: team.version,
+    dispatchMode: teamDispatchMode(team),
     role: member.role,
     alias: member.alias,
     files: Boolean(member.files),
@@ -191,7 +216,8 @@ export function coordinatorPromptContext(state, channel) {
       `Team: ${context.name}`,
       'Role: coordinator',
       `Workers: ${names}`,
-      'You may inspect live team state with `sab team context --json`, delegate with `sab team send --to ALIAS --stdin`, and collect results with `sab team wait --task TASK_ID --json` or `sab team inbox --json`.',
+      'You may inspect live team state with `sab team context --json`, delegate with `sab team send --to ALIAS --stdin`, and collect bounded results with `sab team wait --task TASK_ID --json` or `sab team inbox --active --limit 20 --page --json`.',
+      'Use `sab team message --task TASK_ID --stdin` to amend or answer an active task, `sab team replace` or `sab team cancel` for queued work, and `sab team mode draining` to finish active work without dispatching more.',
       'Only explicitly linked workers are reachable. Do not reveal or fabricate SAB task identities.',
     ].join('\n')
   }
@@ -269,6 +295,9 @@ export function createTeamTask(state, {
     targetProvider: null,
     targetNodeId: null,
     status: 'queued',
+    lifecycleVersion: 1,
+    instructionVersion: 1,
+    instruction: prompt,
     text: prompt,
     files: files.map(file => ({
       path: file.path, filename: file.filename, size: file.size, sha256: file.sha256 || null,
@@ -277,6 +306,8 @@ export function createTeamTask(state, {
     fileDeliveryError: null,
     payloadHash,
     replies: [],
+    messages: [],
+    controlRequests: [],
     result: null,
     error: null,
     completionDeliveryStatus: null,
@@ -324,12 +355,42 @@ export function claimTeamTask(state, taskId, {
 } = {}) {
   const task = teamTask(state, taskId)
   if (task.status !== 'queued') throw new TeamError('task_not_queued', 'Only a queued task may be claimed.', 409)
+  if (teamDispatchMode(teamById(state, task.teamId)) === 'draining') {
+    throw new TeamError('team_draining', 'This team is draining active work and will not dispatch queued tasks.', 409)
+  }
   task.status = 'dispatching'
   task.targetSessionId = String(targetSessionId || '')
   task.targetProvider = String(targetProvider || '')
   task.targetNodeId = String(targetNodeId || 'local')
   task.dispatchClaimedAt = nowIso(now)
-  task.updatedAt = nowIso(now)
+  return bumpTask(task, now)
+}
+
+export function claimTeamTaskForSession(state, taskId, session, options = {}) {
+  if (!session || typeof session !== 'object' || !session.id) {
+    throw new TeamError('invalid_worker_session', 'An authoritative worker session is required.', 500)
+  }
+  const {
+    expectedInstructionVersion = null,
+    expectedAuditInstructionVersion = null,
+    ...claimOptions
+  } = options
+  const queued = teamTask(state, taskId)
+  const instructionVersion = Math.max(1, Number(queued.instructionVersion) || 1)
+  const auditInstructionVersion = Math.max(1, Number(queued.payloadAuditInstructionVersion) || 1)
+  if (expectedInstructionVersion !== null && instructionVersion !== expectedInstructionVersion) {
+    throw new TeamError('task_revision_changed',
+      'The queued task instruction changed before its dispatch claim.', 409)
+  }
+  if (expectedAuditInstructionVersion !== null &&
+      (auditInstructionVersion !== expectedAuditInstructionVersion ||
+       auditInstructionVersion !== instructionVersion)) {
+    throw new TeamError('task_audit_stale',
+      'The queued task instruction has not been fully reflected in its Slack audit cards.', 409)
+  }
+  const task = claimTeamTask(state, taskId, { ...claimOptions, targetSessionId: session.id })
+  task.startedAt ||= task.dispatchClaimedAt
+  session.teamActiveTaskId = task.id
   return task
 }
 
@@ -338,11 +399,11 @@ export function markTeamTaskRunning(state, taskId, { now = Date.now() } = {}) {
   if (!['dispatching', 'running'].includes(task.status)) throw new TeamError('task_not_dispatching', 'The task is not being dispatched.', 409)
   task.status = 'running'
   task.startedAt ||= nowIso(now)
-  task.updatedAt = nowIso(now)
-  // The source and Slack audit card retain the human-readable request. Once the
-  // provider accepted it, state needs only its hash and file metadata.
+  task.acceptedAt ||= nowIso(now)
+  // Retain the original instruction separately for bounded inbox/audit output.
+  // The mutable delivery envelope can still be released after acceptance.
   task.text = ''
-  return task
+  return bumpTask(task, now)
 }
 
 export function appendTeamTaskReply(state, taskId, {
@@ -387,7 +448,8 @@ export function appendTeamTaskReply(state, taskId, {
   task.replies.push(reply)
   const accepted = task.status === 'dispatching'
   if (accepted) markTeamTaskRunning(state, task.id, { now })
-  else task.updatedAt = nowIso(now)
+  else bumpTask(task, now)
+  reply.lifecycleVersion = task.lifecycleVersion
   return { reply, created: true, accepted }
 }
 
@@ -409,8 +471,34 @@ export function completeTeamTask(state, taskId, {
   task.completionDeliveryStatus = 'pending'
   task.completionDeliveryError = null
   task.completedAt = nowIso(now)
-  task.updatedAt = nowIso(now)
-  return task
+  return bumpTask(task, now)
+}
+
+export function completeTeamTaskWithWarning(state, taskId, {
+  targetSessionId,
+  result,
+  warning,
+  now = Date.now(),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (!['dispatching', 'running'].includes(task.status)) {
+    throw new TeamError('task_not_running', 'Only the assigned active task may complete.', 409)
+  }
+  if (task.targetSessionId !== targetSessionId) {
+    throw new TeamError('task_target_changed', 'The task belongs to another native session.', 409)
+  }
+  const text = String(result || '').trim()
+  task.status = 'completed_with_warning'
+  task.result = textBytes(text) > TEAM_MESSAGE_MAX_BYTES
+    ? Buffer.from(text, 'utf8').subarray(0, TEAM_MESSAGE_MAX_BYTES).toString('utf8') + '\n\n[Result truncated in the team journal; see the worker Slack channel for the complete response.]'
+    : text
+  task.warning = String(warning || 'The provider completed without a reliable lifecycle completion hook.').slice(0, 2000)
+  task.text = ''
+  task.files = []
+  task.completionDeliveryStatus = 'pending'
+  task.completionDeliveryError = null
+  task.completedAt = nowIso(now)
+  return bumpTask(task, now)
 }
 
 export function failTeamTask(state, taskId, error, { now = Date.now(), cancelled = false } = {}) {
@@ -423,8 +511,110 @@ export function failTeamTask(state, taskId, error, { now = Date.now(), cancelled
   task.completionDeliveryStatus = 'pending'
   task.completionDeliveryError = null
   task.completedAt = nowIso(now)
-  task.updatedAt = nowIso(now)
-  return task
+  return bumpTask(task, now)
+}
+
+function taskControlRequest(task, requestId, kind, payloadHash) {
+  const key = String(requestId || '')
+  if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
+  task.controlRequests ||= []
+  const existing = task.controlRequests.find(request => request.requestId === key)
+  if (existing && (existing.kind !== kind || existing.payloadHash !== payloadHash)) {
+    throw new TeamError('request_conflict', 'That request ID was already used for a different task operation.', 409)
+  }
+  return { key, existing }
+}
+
+function rememberTaskControl(task, requestId, kind, payloadHash, now) {
+  task.controlRequests ||= []
+  if (task.controlRequests.length >= TASK_CONTROL_MAX) {
+    throw new TeamError('task_control_limit', 'This task reached its bounded control-operation limit.', 409)
+  }
+  task.controlRequests.push({ requestId, kind, payloadHash, createdAt: nowIso(now) })
+}
+
+export function cancelQueuedTeamTask(state, taskId, {
+  sourceChannel,
+  reason = 'Cancelled by the coordinator.',
+  requestId = `cancel:${String(taskId || '')}`,
+  now = Date.now(),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (task.sourceChannel !== sourceChannel) {
+    throw new TeamError('task_control_not_allowed', 'Only the task coordinator may cancel queued work.', 403)
+  }
+  const body = String(reason || 'Cancelled by the coordinator.').slice(0, 2000)
+  const payloadHash = hash(body)
+  const control = taskControlRequest(task, requestId, 'cancel', payloadHash)
+  if (task.status === 'cancelled') return task
+  if (control.existing) return task
+  if (task.status !== 'queued') throw new TeamError('task_not_queued', 'Only queued work may be cancelled.', 409)
+  // Cancellation is the terminal safety valve and must remain available even
+  // after the bounded replace/message idempotency journal is full. A terminal
+  // cancelled task itself makes subsequent cancellation retries harmless.
+  if (task.controlRequests.length < TASK_CONTROL_MAX) {
+    rememberTaskControl(task, control.key, 'cancel', payloadHash, now)
+  }
+  return failTeamTask(state, task.id, body, { now, cancelled: true })
+}
+
+export function replaceQueuedTeamTask(state, taskId, {
+  sourceChannel,
+  text,
+  requestId,
+  now = Date.now(),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (task.sourceChannel !== sourceChannel) {
+    throw new TeamError('task_control_not_allowed', 'Only the task coordinator may replace queued work.', 403)
+  }
+  const body = String(text || '').trim()
+  if (!body) throw new TeamError('empty_task', 'A replacement task needs text.')
+  if (textBytes(body) > TEAM_MESSAGE_MAX_BYTES) throw new TeamError('message_too_large', `Team messages may be at most ${TEAM_MESSAGE_MAX_BYTES} bytes.`, 413)
+  const payloadHash = hash(body)
+  const control = taskControlRequest(task, requestId, 'replace', payloadHash)
+  if (control.existing) return { task, created: false }
+  if (task.status !== 'queued') throw new TeamError('task_not_queued', 'Only queued work may be replaced.', 409)
+  rememberTaskControl(task, control.key, 'replace', payloadHash, now)
+  task.instruction = body
+  task.text = body
+  task.instructionVersion = Math.max(1, Number(task.instructionVersion) || 1) + 1
+  task.currentPayloadHash = taskPayloadHash({ text: body, files: task.files })
+  bumpTask(task, now)
+  return { task, created: true }
+}
+
+export function appendCoordinatorTaskMessage(state, taskId, {
+  sourceChannel,
+  text,
+  requestId,
+  now = Date.now(),
+  id = randomId('message'),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (task.sourceChannel !== sourceChannel) {
+    throw new TeamError('task_control_not_allowed', 'Only the task coordinator may message its worker.', 403)
+  }
+  const body = String(text || '').trim()
+  if (!body) throw new TeamError('empty_message', 'A task message needs text.')
+  if (textBytes(body) > TEAM_MESSAGE_MAX_BYTES) throw new TeamError('message_too_large', `Team messages may be at most ${TEAM_MESSAGE_MAX_BYTES} bytes.`, 413)
+  const payloadHash = hash(body)
+  const control = taskControlRequest(task, requestId, 'message', payloadHash)
+  task.messages ||= []
+  const existing = task.messages.find(message => message.requestId === control.key)
+  if (control.existing || existing) return { message: existing, created: false }
+  if (!['dispatching', 'running'].includes(task.status)) {
+    throw new TeamError('task_not_active', 'Only an active task accepts coordinator messages.', 409)
+  }
+  rememberTaskControl(task, control.key, 'message', payloadHash, now)
+  const message = {
+    id: String(id), requestId: control.key, payloadHash, text: body,
+    deliveryStatus: 'pending', deliveryError: null, sourceSlackTs: null,
+    targetSlackTs: null, createdAt: nowIso(now),
+  }
+  task.messages.push(message)
+  bumpTask(task, now)
+  return { message, created: true }
 }
 
 function cancelTasks(state, predicate, reason, now) {
@@ -452,6 +642,53 @@ export function tasksForChannel(state, channel, { limit = 100, after = null } = 
     .slice(0, Math.max(1, Math.min(Number(limit) || 100, 200)))
 }
 
+function decodeTaskCursor(cursor) {
+  try {
+    const parsed = JSON.parse(Buffer.from(String(cursor || ''), 'base64url').toString('utf8'))
+    if (!parsed?.createdAt || !parsed?.id) throw new Error('invalid')
+    return parsed
+  } catch {
+    throw new TeamError('invalid_cursor', 'That inbox cursor is invalid.', 400)
+  }
+}
+
+function encodeTaskCursor(task) {
+  return Buffer.from(JSON.stringify({ createdAt: task.createdAt, id: task.id })).toString('base64url')
+}
+
+export function tasksPageForChannel(state, channel, {
+  limit = 100,
+  cursor = null,
+  active = false,
+  target = null,
+  status = null,
+  since = null,
+} = {}) {
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 200))
+  const statuses = status == null ? null : new Set((Array.isArray(status) ? status : [status]).map(String))
+  if (statuses && [...statuses].some(value => !TASK_STATES.has(value))) {
+    throw new TeamError('invalid_status', 'One or more inbox task statuses are invalid.')
+  }
+  const sinceTime = since == null ? null : Date.parse(String(since))
+  if (since != null && !Number.isFinite(sinceTime)) throw new TeamError('invalid_since', 'Inbox since must be an ISO timestamp.')
+  const pageAfter = cursor ? decodeTaskCursor(cursor) : null
+  const selector = target == null ? null : String(target).trim().toLowerCase()
+  const visible = Object.values(stores(state).tasks)
+    .filter(task => task.sourceChannel === channel || task.targetChannel === channel)
+    .filter(task => !active || ACTIVE_TASK_STATES.has(task.status))
+    .filter(task => !statuses || statuses.has(task.status))
+    .filter(task => !selector || task.targetAlias === selector || String(task.targetChannel).toLowerCase() === selector)
+    .filter(task => sinceTime == null || Date.parse(task.createdAt) >= sinceTime)
+    .filter(task => !pageAfter || String(task.createdAt) < String(pageAfter.createdAt) ||
+      (task.createdAt === pageAfter.createdAt && task.id < pageAfter.id))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || String(b.id).localeCompare(String(a.id)))
+  const page = visible.slice(0, boundedLimit)
+  return {
+    tasks: page,
+    nextCursor: visible.length > boundedLimit && page.length ? encodeTaskCursor(page.at(-1)) : null,
+  }
+}
+
 export function publicTeamTask(task, callerChannel) {
   if (callerChannel !== task.sourceChannel && callerChannel !== task.targetChannel) {
     throw new TeamError('task_not_visible', 'That task does not belong to this channel.', 403)
@@ -463,6 +700,8 @@ export function publicTeamTask(task, callerChannel) {
     sourceAlias: 'coordinator',
     targetAlias: task.targetAlias,
     status: task.status,
+    lifecycleVersion: Math.max(1, Number(task.lifecycleVersion) || 1),
+    instruction: task.instruction ?? task.text ?? '',
     fileDeliveryStatus: task.fileDeliveryStatus,
     fileDeliveryError: task.fileDeliveryError,
     completionDeliveryStatus: task.completionDeliveryStatus || null,
@@ -479,7 +718,15 @@ export function publicTeamTask(task, callerChannel) {
       fileDeliveryError: reply.fileDeliveryError,
       createdAt: reply.createdAt,
     })),
+    messages: (task.messages || []).map(message => ({
+      id: message.id,
+      text: message.text,
+      deliveryStatus: message.deliveryStatus,
+      deliveryError: message.deliveryError,
+      createdAt: message.createdAt,
+    })),
     result: task.result,
+    warning: task.warning || null,
     error: task.error,
     createdAt: task.createdAt,
     startedAt: task.startedAt || null,
@@ -515,7 +762,8 @@ export function teamTaskDeliverySettled(task) {
       (reply.fileDeliveryStatus === 'failed' && Boolean(reply.fileDeliveryNotifiedAt))
     return text && files
   })
-  return completion && replies
+  const messages = (task?.messages || []).every(message => ['delivered', 'failed'].includes(message.deliveryStatus))
+  return completion && replies && messages
 }
 
 export function delegatedTaskPrompt(team, task, destinationFiles = []) {
@@ -612,6 +860,20 @@ export function assertCoordinatorDispatch(session, {
   if (!(turn.remaining > 0)) {
     throw new TeamError('dispatch_budget_exhausted',
       'This turn used its bounded team dispatch budget. Automatic mode can renew it from the next authenticated worker event.', 429)
+  }
+  return turn
+}
+
+export function assertCoordinatorTaskControl(session, {
+  now = Date.now(), teamId = null, allowContinuation = false,
+} = {}) {
+  const turn = session?.teamTurn
+  const authorizedActor = turn?.actor === 'owner' || (
+    allowContinuation && turn?.actor === 'continuation' && turn.teamId === teamId
+  )
+  if (!turn || !authorizedActor || Date.parse(turn.expiresAt || 0) <= now) {
+    throw new TeamError('owner_turn_required',
+      'Team task control is available only during a current owner or authorized automatic-continuation turn.', 403)
   }
   return turn
 }

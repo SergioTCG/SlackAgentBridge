@@ -200,6 +200,10 @@ sab account add work
 sab upload --grant TOKEN -- FILE_PATH...
 sab team context --json
 sab team send --to WORKER_ALIAS --stdin
+sab team inbox --active --limit 20 --page --json
+sab team message --task TASK_ID --stdin
+sab team cancel --task TASK_ID
+sab team mode draining
 sab team wait --task TASK_ID --json
 sab automation create ...
 sab automation status EXTERNAL_KEY
@@ -237,7 +241,7 @@ A session channel always acts on its authoritative provider.
 | `/sab-run …` | Control Pi adaptive routing and managed runs |
 | `/sab-account [name\|default]` | Show or change a Claude subscription |
 | `/sab-terminal [list\|open\|close\|open-all\|close-all]` | Manage optional viewports |
-| `/sab-team [create\|add\|status\|auto\|manual\|permissions\|remove\|close]` | Link SAB sessions for auditable delegation and optional continuation |
+| `/sab-team [create\|add\|status\|auto\|manual\|drain\|resume\|permissions\|remove\|close]` | Link SAB sessions for auditable delegation, bounded continuation, and queue control |
 | `/sab-health` | Show daemon health |
 | `/sab-cleanup` | Archive dormant session channels |
 | `/sab-claim` | Claim an unowned bridge |
@@ -360,6 +364,7 @@ giving an agent Slack credentials or arbitrary channel access:
 /sab-team permissions codex-barrique-parallel-1 files on
 /sab-team status
 /sab-team auto   # opt into bounded continuation; use /sab-team manual to disable
+/sab-team drain  # finish active tasks but dispatch nothing queued; resume later
 ```
 
 The owner chooses workers with Slack's private-channel picker. Team identity is
@@ -374,13 +379,31 @@ budget; it does not grant unlimited dispatch. If a resumed Codex coordinator omi
 SAB uses bounded exact-process idle confirmation to release only the stale turn
 fence; prolonged legitimate waits are reported once in the coordinator channel.
 
+Drain mode is separate from continuation mode. `/sab-team drain` lets active
+workers finish while preventing every queued claim and automatic coordinator
+wake; `/sab-team resume` makes queued work eligible again. It does not cancel
+or stop a provider. From an authenticated coordinator turn, `sab team cancel`
+and `sab team replace` control one exact queued task, while `sab team message`
+adds an audited instruction or answer to the exact worker/session currently
+owning an active task.
+
 Eligible owner turns receive private, provider-neutral role/tool context. A
 delegated worker receives an exact task header, while collaborators receive no
 lateral authority. The JSON-safe `sab team` CLI supports peers, send, bounded
-mailbox/inbox, wait, reply, and task-bound file transfer. Tasks are atomically
+filtered/paginated inbox, wait, reply, queued-task cancel/replace, active-task
+messaging, drain/resume, and task-bound file transfer. Tasks are atomically
 journaled, visibly posted in both channels, queued only for a safe idle worker,
 correlated with provider-stable final output, and fenced against restart/stale
 leg duplication. Dormant peers are never resurrected by another agent.
+
+If an exact live Codex worker visibly returns to its idle prompt after a task
+but omits the completion hook, SAB records `completed_with_warning` and releases
+the worker instead of fabricating a failure or replaying the work. An already
+idle task found during daemon boot has no equivalent continuous proof and still
+fails closed; fresh queued tasks can then dispatch once to the re-adopted idle
+session. Availability and the `queued → dispatching` task claim are persisted
+together, so a worker cannot briefly appear ready while its task is being
+assigned.
 
 See [Session teams](docs/session-teams.md) for the complete workflow, limits,
 recovery behavior, and file boundary. Initial relay is local-node only; the

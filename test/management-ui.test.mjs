@@ -104,9 +104,11 @@ test('team close is coordinator-only and confirmed', () => {
   const worker = teamPickerBlocks({ sessionId: SID, team: { id: 'team_old', coordinator: false, continuation: 'manual' } })
   assert.equal(worker.find(block => block.type === 'actions').elements.length, 1)
   const coordinator = teamPickerBlocks({ sessionId: SID, team: { id: 'team_old', coordinator: true, continuation: 'manual' } })
-  const close = coordinator.find(block => block.type === 'actions').elements
+  const actions = coordinator.filter(block => block.type === 'actions').flatMap(block => block.elements)
+  const close = actions
     .find(action => parseManagementActionId(action.action_id)?.action === 'close')
   assert.equal(close.style, 'danger')
   assert.match(close.confirm.title.text, /close/i)
   assert.equal(parseManagementActionId(close.action_id).binding, 'team_old')
+  assert.ok(actions.some(action => parseManagementActionId(action.action_id)?.action === 'drain'))
 })
