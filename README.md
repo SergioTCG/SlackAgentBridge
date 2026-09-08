@@ -160,6 +160,13 @@ run from the checkout already named by the live LaunchAgent; invoking it from
 an isolated development worktree fails before changing hooks, configuration,
 Git state, or the public `sab` link.
 
+Existing 2.0 installations should read [Migrating to
+2.1](docs/migrating-to-2.1.md). Version 2.1 adds interactive management, App
+Home, durable team scheduling, and the lifecycle/delivery hardening needed for
+long-running coordinator and worker sessions. It does not bulk-migrate session
+state or change the historical LaunchAgent, local port, configuration path, or
+Slack token set.
+
 ## Local CLI
 
 Start a provider session in the current directory:

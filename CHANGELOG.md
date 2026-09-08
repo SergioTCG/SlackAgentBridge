@@ -6,6 +6,53 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-09-08
+
+### Added
+
+- Owner-only interactive Slack management and App Home controls now sit over
+  the existing `/sab-*` dispatcher. Parameterized commands remain compatible,
+  while stale panels and provider/session mismatches fail closed.
+- Session teams now support bounded automatic coordinator continuation,
+  atomic worker dispatch, durable drain mode, exact queued-task cancellation
+  and replacement, coordinator messages to active tasks, filtered cursor-based
+  inboxes, and task-bound file delivery.
+- The compatibility-preserving multi-node foundation adds authenticated node
+  enrollment, pinned Ed25519 identities, connection epochs, scoped operators,
+  and strict protocol validation. Remote provider routing remains deliberately
+  disabled until its authenticated delivery path is complete.
+
+### Changed
+
+- Provider sessions remain tmux-owned and headless across daemon restarts,
+  preserving the latest confirmed model and effort. Terminal windows remain
+  optional viewports and do not control provider lifetime.
+- Codex semantic commentary, completed finals, working status, and lifecycle
+  recovery now use separate ordered, rate-safe paths so cosmetic status traffic
+  cannot starve actual responses.
+
+### Fixed
+
+- Missing provider completion hooks, host restarts, replacement native session
+  IDs, queued maintenance input, Slack rate limits, and delayed Codex finals now
+  reconcile without replaying uncertain work, duplicating prompts, dropping
+  accepted finals, or leaving workers permanently busy.
+- Team lifecycle transitions atomically bind task, worker, channel, native
+  session, PID/tmux authority, and lifecycle version. Successful hookless
+  Codex workers become `completed_with_warning`; historical unproved work still
+  fails closed and fresh queued work starts exactly once.
+- Claude structured questions retain their prompt, recommendation,
+  descriptions, and previews in Slack, and detached starts use the explicitly
+  approved channel and workspace-trust paths.
+
+### Security
+
+- Artifact grants and team operations remain exact-session capabilities.
+  Concurrent native replacement hooks now retain separate prompt-scoped grant
+  authority, coordinator task messages journal before delivery, and stale,
+  rebound, cross-node, cross-provider, or collaborator claims are rejected
+  before mutation.
+
 ## [2.1.0-rc.17] — 2026-09-08
 
 ### Fixed
@@ -406,6 +453,7 @@ Notable changes to this project. Format based on
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
 
+[2.1.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0
 [2.1.0-rc.7]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.7
 
 ## [2.0.1] — 2026-08-26
