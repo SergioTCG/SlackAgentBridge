@@ -5,10 +5,12 @@ import {
   activeTeamForChannel,
   addTeamWorker,
   appendCoordinatorTaskMessage,
+  appendTeamTaskCheckpoint,
   appendTeamTaskReply,
   assertCoordinatorTaskControl,
   assertTeamTaskRetry,
   beginCollaboratorTeamTurn,
+  beginCoordinatorTaskMessageDelivery,
   beginContinuationTeamTurn,
   beginOwnerTeamTurn,
   cancelQueuedTeamTask,
@@ -23,17 +25,23 @@ import {
   createTeam,
   createTeamTask,
   delegatedTaskPrompt,
+  deferCoordinatorTaskMessageDelivery,
   markTeamTaskRunning,
   publicTeamTask,
+  reconcileTeamSessionBindings,
+  releaseTeamTask,
   pruneTeamTasks,
   removeTeamWorker,
   replaceQueuedTeamTask,
+  reportTeamTaskTurn,
+  requestTeamTaskCompletion,
   setTeamDispatchMode,
   setTeamWorkerFiles,
   taskMarker,
   tasksForChannel,
   tasksPageForChannel,
   teamDispatchMode,
+  teamMutationForRequest,
   teamContext,
   teamTaskDeliverySettled,
   withoutDelegatedTaskPrompt,
@@ -160,6 +168,7 @@ test('task phase transitions bind an exact worker session and clear pending cont
   assert.equal(task.replies.length, 1)
   assert.throws(() => appendTeamTaskReply(state, task.id, { fromChannel: 'C-WORKER-2', text: 'Spoof.', requestId: 'reply-2' }),
     error => error.code === 'reply_not_allowed')
+  delete task.completionPolicy // persisted pre-two-phase task
   completeTeamTask(state, task.id, { targetSessionId: 'worker-sid', result: 'Finished.', now: 6000 })
   assert.equal(task.status, 'completed')
   assert.equal(task.result, 'Finished.')
@@ -204,6 +213,210 @@ test('an authenticated task-bound worker reply proves provider acceptance withou
   assert.equal(duplicate.created, false)
   assert.equal(duplicate.accepted, false)
   assert.equal(task.startedAt, new Date(4000).toISOString())
+})
+
+test('new tasks separate provider turn reports from explicit coordinator release', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Run CI and merge.', requestId: 'two-phase-1', id: 'task_two_phase', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+
+  appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: worker.channel,
+    text: 'Implementation is done; CI is still running.',
+    pendingGates: ['ci', 'merge'],
+    requestId: 'checkpoint-1',
+    now: 5000,
+  })
+  assert.deepEqual(task.pendingGates, ['ci', 'merge'])
+  assert.throws(() => requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel, summary: 'Done.', requestId: 'complete-too-soon', now: 5100,
+  }), error => error.code === 'task_gates_pending')
+
+  appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: worker.channel,
+    text: 'CI passed and the merge completed.',
+    pendingGates: [],
+    requestId: 'checkpoint-2',
+    now: 6000,
+  })
+  const declared = requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id,
+    fromChannel: worker.channel,
+    summary: 'Merged after CI passed.',
+    requestId: 'complete-1',
+    now: 7000,
+  })
+  assert.equal(declared.created, true)
+  assert.equal(requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id,
+    fromChannel: worker.channel,
+    summary: 'Merged after CI passed.',
+    requestId: 'complete-1',
+    now: 7100,
+  }).created, false)
+
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id,
+    result: 'Final provider report.',
+    now: 8000,
+  })
+  assert.equal(task.status, 'awaiting_release')
+  assert.equal(task.reports.length, 1)
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id,
+    result: 'A duplicate lifecycle path must not create another report.',
+    now: 8100,
+  })
+  assert.equal(task.reports.length, 1)
+  assert.equal(task.result, 'Final provider report.')
+  assert.throws(() => reportTeamTaskTurn(state, task.id, {
+    targetSessionId: 'stale-worker-leg', result: 'Spoofed duplicate.', now: 8200,
+  }), error => error.code === 'task_target_changed')
+  assert.equal(worker.teamActiveTaskId, task.id)
+  assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, true)
+  const followUp = appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'One final confirmation?', requestId: 'follow-up-1', now: 8500,
+  })
+  assert.equal(task.completionRequest, null)
+  assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, false)
+  assert.throws(() => releaseTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'release-stale', now: 8600,
+  }), error => error.code === 'completion_not_declared')
+  beginCoordinatorTaskMessageDelivery(state, task.id, followUp.message.id, { now: 8700 })
+  assert.equal(task.status, 'running')
+  deferCoordinatorTaskMessageDelivery(state, task.id, followUp.message.id, { now: 8750 })
+  assert.equal(task.status, 'awaiting_release')
+  beginCoordinatorTaskMessageDelivery(state, task.id, followUp.message.id, { now: 8775 })
+  assert.equal(task.status, 'running')
+
+  requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id,
+    fromChannel: worker.channel,
+    summary: 'Final confirmation supplied.',
+    requestId: 'complete-2',
+    now: 8800,
+  })
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id,
+    result: 'Confirmed after follow-up.',
+    now: 8900,
+  })
+  assert.equal(teamMutationForRequest(state, worker.channel, 'complete-1', { taskId: task.id }).status, 'accepted')
+
+  const released = releaseTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'release-1', now: 9000,
+  })
+  assert.equal(released.created, true)
+  assert.equal(task.status, 'completed')
+  assert.equal(task.lastTransition.reason, 'coordinator_released')
+  assert.equal(releaseTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'release-1', now: 9100,
+  }).created, false)
+})
+
+test('provider final remains backward-compatible for tasks without a completion policy', () => {
+  const { state, team } = fixture()
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'claude',
+    target: 'parallel-1', text: 'Legacy work.', requestId: 'legacy-final-1', id: 'task_legacy_final', now: 2000,
+  })
+  delete task.completionPolicy
+  claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'claude', now: 3000 })
+  reportTeamTaskTurn(state, task.id, { targetSessionId: 'worker', result: 'Legacy done.', now: 4000 })
+  assert.equal(task.status, 'completed')
+  assert.equal(task.result, 'Legacy done.')
+})
+
+test('mutation receipts expose accepted state and session binding repair is exact', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Repair me.', requestId: 'repair-send', id: 'task_repair', now: 2000,
+  })
+  claimTeamTask(state, task.id, { targetSessionId: worker.id, targetProvider: 'codex', now: 3000 })
+  assert.equal(worker.teamActiveTaskId, undefined)
+  const repair = reconcileTeamSessionBindings(state, { now: 4000 })
+  assert.equal(repair.changed, true)
+  assert.equal(worker.teamActiveTaskId, task.id)
+  assert.equal(worker.teamAvailabilityReason, 'restored_durable_task_binding')
+  const receipt = teamMutationForRequest(state, 'C-MASTER', 'repair-send', { taskId: task.id })
+  assert.deepEqual({ kind: receipt.kind, taskId: receipt.taskId, status: receipt.status }, {
+    kind: 'send', taskId: task.id, status: 'accepted',
+  })
+  task.status = 'completed'
+  reconcileTeamSessionBindings(state, { now: 5000 })
+  assert.equal(worker.teamActiveTaskId, undefined)
+})
+
+test('binding repair refuses to choose between conflicting durable tasks', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  for (const [id, requestId] of [['task_conflict_a', 'conflict-a'], ['task_conflict_b', 'conflict-b']]) {
+    const task = createTeamTask(state, {
+      teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+      target: 'parallel-1', text: id, requestId, id, now: 2000,
+    }).task
+    claimTeamTask(state, task.id, { targetSessionId: worker.id, targetProvider: 'codex', now: 3000 })
+  }
+
+  const reconciliation = reconcileTeamSessionBindings(state, { now: 4000 })
+  assert.equal(reconciliation.changed, false)
+  assert.equal(worker.teamActiveTaskId, undefined)
+  assert.deepEqual(reconciliation.anomalies[0].taskIds, ['task_conflict_a', 'task_conflict_b'])
+})
+
+test('an awaiting-release task survives restart and fences the next queued task until release', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const first = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'First task.', requestId: 'restart-release-1', id: 'task_restart_release', now: 2000,
+  }).task
+  const second = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Second task.', requestId: 'restart-release-2', id: 'task_after_release', now: 2100,
+  }).task
+  claimTeamTaskForSession(state, first.id, worker, { targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, first.id, { now: 4000 })
+  requestTeamTaskCompletion(state, first.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel,
+    summary: 'First task is complete.', requestId: 'restart-complete', now: 5000,
+  })
+  reportTeamTaskTurn(state, first.id, { targetSessionId: worker.id, result: 'Ready.', now: 6000 })
+
+  const recovered = JSON.parse(JSON.stringify(state))
+  delete recovered.sessions[worker.id].teamActiveTaskId
+  const repair = reconcileTeamSessionBindings(recovered, { now: 7000 })
+  assert.equal(repair.changed, true)
+  assert.equal(recovered.sessions[worker.id].teamActiveTaskId, first.id)
+  assert.equal(recovered.teamTasks[first.id].status, 'awaiting_release')
+  assert.equal(recovered.teamTasks[second.id].status, 'queued')
+  assert.throws(() => claimTeamTaskForSession(recovered, second.id, recovered.sessions[worker.id], {
+    targetProvider: 'codex', now: 7500,
+  }), error => error.code === 'worker_busy')
+
+  releaseTeamTask(recovered, first.id, {
+    sourceChannel: 'C-MASTER', requestId: 'restart-release-final', now: 8000,
+  })
+  delete recovered.sessions[worker.id].teamActiveTaskId
+  claimTeamTaskForSession(recovered, second.id, recovered.sessions[worker.id], {
+    targetProvider: 'codex', now: 9000,
+  })
+  assert.equal(recovered.teamTasks[second.id].status, 'dispatching')
 })
 
 test('a rejected worker reply cannot acknowledge a dispatching task', () => {
@@ -257,6 +470,7 @@ test('bounded journal pruning returns exact removed records for staged-file clea
       now: 1000 + index,
     })
     claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 2000 + index })
+    delete task.completionPolicy
     completeTeamTask(state, task.id, { targetSessionId: 'worker', result: 'done', now: 3000 + index })
     task.completionDeliveryStatus = 'delivered'
   }
@@ -273,6 +487,7 @@ test('journal pruning retains terminal tasks until every durable delivery settle
       target: 'parallel-1', text: id, requestId: id, id: `task_${id}`, now,
     })
     claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: now + 1 })
+    delete task.completionPolicy
     completeTeamTask(state, task.id, { targetSessionId: 'worker', result: 'done', now: now + 2 })
     return task
   }
@@ -298,6 +513,7 @@ test('restart recovery preserves one dispatch claim and rejects late completion 
     target: 'parallel-1', text: 'Exactly once.', requestId: 'restart-1', id: 'task_restart', now: 2000,
   })
   claimTeamTask(state, 'task_restart', { targetSessionId: 'worker-original', targetProvider: 'claude', now: 3000 })
+  delete state.teamTasks.task_restart.completionPolicy
   const recovered = JSON.parse(JSON.stringify(state))
   assert.equal(recovered.teamTasks.task_restart.status, 'dispatching')
   assert.throws(() => claimTeamTask(recovered, 'task_restart', {
@@ -458,6 +674,7 @@ test('an idle acknowledged worker can complete with a lifecycle warning instead 
   })
   claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 3000 })
   markTeamTaskRunning(state, task.id, { now: 4000 })
+  delete task.completionPolicy
   completeTeamTaskWithWarning(state, task.id, {
     targetSessionId: 'worker', result: 'Last authenticated progress.',
     warning: 'Provider completion hook was missing.', now: 5000,
@@ -511,6 +728,7 @@ test('coordinator can cancel or replace only queued work and message only its ac
     sourceChannel: 'C-MASTER', text: 'Yes, proceed.', requestId: 'message-1', now: 8500,
   }).created, false)
   assert.equal(publicTeamTask(active, 'C-MASTER').messages[0].text, 'Yes, proceed.')
+  delete active.completionPolicy
   completeTeamTask(state, active.id, { targetSessionId: 'worker', result: 'Done.', now: 8750 })
   assert.equal(appendCoordinatorTaskMessage(state, active.id, {
     sourceChannel: 'C-MASTER', text: 'Yes, proceed.', requestId: 'message-1', now: 8800,
@@ -533,6 +751,31 @@ test('queued cancellation remains available after the bounded control journal fi
     sourceChannel: 'C-MASTER', requestId: 'cancel-final', now: 3000,
   }).status, 'cancelled')
   assert.equal(task.controlRequests.length, 32)
+})
+
+test('coordinator release remains available after the bounded control journal fills', () => {
+  const { state, team } = fixture()
+  const task = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Long task.', requestId: 'long-release', id: 'task_long_release', now: 2000,
+  }).task
+  claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: 'worker', fromChannel: 'C-WORKER-1', summary: 'Ready.',
+    requestId: 'long-release-ready', now: 4500,
+  })
+  reportTeamTaskTurn(state, task.id, { targetSessionId: 'worker', result: 'Done.', now: 5000 })
+  task.controlRequests = Array.from({ length: 32 }, (_, index) => ({
+    requestId: `control-${index}`, kind: 'message', payloadHash: `hash-${index}`, createdAt: new Date(5100 + index).toISOString(),
+  }))
+
+  assert.equal(releaseTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'release-after-limit', now: 6000,
+  }).task.status, 'completed')
+  assert.equal(releaseTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'release-after-limit', now: 6100,
+  }).created, false)
 })
 
 test('coordinator task control requires a current owner or matching continuation turn without spending dispatch budget', () => {

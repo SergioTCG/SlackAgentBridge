@@ -8,7 +8,7 @@ const teamModules = ['teams.mjs', 'team-auth.mjs', 'team-files.mjs', 'team-http.
   .map(file => fs.readFileSync(new URL(`../daemon/${file}`, import.meta.url), 'utf8'))
   .join('\n')
 
-test('all provider-stable final paths complete the exact delegated team task', () => {
+test('all provider-stable final paths report the exact delegated team task', () => {
   for (const fn of ['finalizeTurn', 'finalizeCodexTurn', 'finalizePiTurn']) {
     const body = new RegExp(`async function ${fn}\\([\\s\\S]*?\\n}`, 'm').exec(daemon)?.[0] || ''
     assert.match(body, /finishTeamTaskForSession/, `${fn} lost team final correlation`)
@@ -70,14 +70,14 @@ test('team lifecycle recovery cannot rebind, lose finals, or fence a worker inde
   assert.match(daemon, /markTeamTaskRunning\(state, teamTaskId\)[\s\S]*updateTeamTaskAudit\(task\)/)
 })
 
-test('hookless successful workers complete with warning and cannot race an authenticated final', () => {
+test('hookless successful workers report with warning and cannot race an authenticated final', () => {
   const start = daemon.indexOf('function startCodexPoller(')
   const end = daemon.indexOf('function startPiPoller(', start)
   const poller = daemon.slice(start, end)
   assert.match(poller, /await validProviderRootClaim[\s\S]*if \(p\.stopped\) return[\s\S]*finishTeamTaskWithWarningForSession/)
   assert.match(poller, /finishTeamTaskWithWarningForSession\(session, task\.status === 'running'/)
   assert.match(poller, /omitted its acknowledgement and completion hooks/)
-  assert.match(daemon, /completed_with_warning/)
+  assert.match(daemon, /reportTeamTaskTurn/)
 })
 
 test('team task control is journal-first, exact-task scoped, and drain-aware', () => {
@@ -191,7 +191,8 @@ test('hookless resumed Codex workers release stale owner fences before queued di
   assert.match(daemon, /state\.sessions\?\.\[expected\.sid\] !== session[\s\S]*state\.channels\?\.\[session\.channel\] !== expected\.sid/)
   assert.match(daemon, /validProviderRootClaim\(expected\.pid, expected\.tmux, 'codex'\)/)
   assert.match(daemon, /clearTeamInputReservation\(session\)[\s\S]*saveStateNow\(state\)[\s\S]*reconcileTeamTasks\(\)/)
-  assert.match(daemon, /teamActiveTaskId \|\| session\.teamInputReservation[\s\S]*pollers\.has\(session\.id\)[\s\S]*codexPollers\.has\(session\.id\)/)
+  assert.match(daemon, /function teamTargetBusyReasons[\s\S]*session\.teamActiveTaskId[\s\S]*teamInputReservation[\s\S]*codexPollers\.has\(session\.id\)/)
+  assert.match(daemon, /reconcileTeamSessionBindings\(state/)
 })
 
 test('automatic continuation renews exhausted dispatch authority before task side effects', () => {
@@ -226,10 +227,34 @@ test('worker lifecycle transitions and coordinator wakes share one atomic state 
   assert.match(persist, /stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
 
   const completion = /async function finishTeamTaskForSession\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
-  assert.match(completion, /completeTeamTask\(state[\s\S]*persistTeamLifecycle\(task\)[\s\S]*ensureTeamCompletionDelivery/)
+  assert.match(completion, /reportTeamTaskTurn\(state[\s\S]*persistTeamLifecycle\(task\)[\s\S]*ensureTeamReportDelivery/)
 
-  const reply = /async reply\(caller, request\) \{[\s\S]*?\n  },\n  async cancel/.exec(daemon)?.[0] || ''
-  assert.match(reply, /appendTeamTaskReply\(state[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
+  const reply = /async reply\(caller, request\) \{[\s\S]*?\n  },\n  async checkpoint/.exec(daemon)?.[0] || ''
+  assert.match(reply, /appendTeamTaskReply[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
+})
+
+test('provider turn reporting preserves task and process ownership until explicit release', () => {
+  const completion = /async function finishTeamTaskForSession\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(completion, /reportTeamTaskTurn/)
+  assert.match(completion, /task\.status === 'awaiting_release'[\s\S]*return true[\s\S]*if \(error\)/)
+  assert.match(completion, /if \(isTerminalTeamTask\(task\)\) \{[\s\S]*delete session\.teamActiveTaskId/)
+  assert.doesNotMatch(completion, /process\.kill|tmuxKill/)
+  assert.match(daemon, /task\.status === 'awaiting_release'[\s\S]*Preserve[\s\S]*task reservation/)
+  assert.match(daemon, /providerMissing && task\.status !== 'awaiting_release'/)
+  assert.match(daemon, /SessionEnd[\s\S]*failTeamTaskForSession\(session,[\s\S]*preserveReported: true/)
+  assert.match(daemon, /preserveReported && existingTask\?\.status === 'awaiting_release'/)
+  assert.match(daemon, /releaseTeamTask\(state[\s\S]*delete target\.teamActiveTaskId[\s\S]*persistTeamLifecycle\(task\)/)
+  assert.match(daemon, /beginCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
+  assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
+  const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
+  assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
+})
+
+test('team mutation responses carry the journaled receipt from the original authority check', () => {
+  assert.match(daemon, /function acceptedTeamMutation\([\s\S]*teamMutationForRequest/)
+  assert.match(daemon, /mutation: acceptedTeamMutation\(session, result\.task, request\.requestId\)/)
+  assert.match(cli, /verify acceptance with sab team mutation --request-id/)
+  assert.match(teamModules, /result\?\.mutation \|\| await service\.mutation/)
 })
 
 test('nested provider utilities are not registered as SAB sessions', () => {

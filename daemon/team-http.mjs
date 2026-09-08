@@ -51,15 +51,24 @@ function decoded(segment) {
 
 export async function handleTeamHttp(req, res, url, service) {
   const taskMatch = /^\/team\/tasks\/([^/]+)$/.exec(url.pathname)
+  const mutationMatch = /^\/team\/mutations\/([^/]+)$/.exec(url.pathname)
   const known = [
     '/team/context', '/team/peers', '/team/inbox', '/team/send', '/team/reply',
-    '/team/cancel', '/team/replace', '/team/message', '/team/mode',
-  ].includes(url.pathname) || taskMatch
+    '/team/checkpoint', '/team/complete', '/team/release', '/team/continue', '/team/cancel',
+    '/team/replace', '/team/message', '/team/mode',
+  ].includes(url.pathname) || taskMatch || mutationMatch
   if (!known) return false
   try {
     const mutation = req.method === 'POST'
     requireScriptClient(req, { json: mutation })
     const caller = callerRequest(req, url)
+    const mutate = async (status, operation) => {
+      const body = await readJson(req)
+      const result = await operation(body)
+      const taskId = result?.task?.id || body.taskId || null
+      const mutation = result?.mutation || await service.mutation(caller, body.requestId, taskId)
+      sendJson(res, status, { ok: true, ...result, mutation })
+    }
     if (url.pathname === '/team/context' && req.method === 'GET') {
       sendJson(res, 200, { ok: true, context: await service.context(caller) })
       return true
@@ -90,24 +99,45 @@ export async function handleTeamHttp(req, res, url, service) {
       sendJson(res, 200, { ok: true, task: await service.task(caller, decoded(taskMatch[1])) })
       return true
     }
+    if (mutationMatch && req.method === 'GET') {
+      sendJson(res, 200, { ok: true, mutation: await service.mutation(
+        caller, decoded(mutationMatch[1]), url.searchParams.get('taskId')) })
+      return true
+    }
     if (url.pathname === '/team/send' && req.method === 'POST') {
-      sendJson(res, 202, { ok: true, ...(await service.send(caller, await readJson(req))) })
+      await mutate(202, body => service.send(caller, body))
       return true
     }
     if (url.pathname === '/team/reply' && req.method === 'POST') {
-      sendJson(res, 200, { ok: true, ...(await service.reply(caller, await readJson(req))) })
+      await mutate(200, body => service.reply(caller, body))
+      return true
+    }
+    if (url.pathname === '/team/checkpoint' && req.method === 'POST') {
+      await mutate(200, body => service.checkpoint(caller, body))
+      return true
+    }
+    if (url.pathname === '/team/complete' && req.method === 'POST') {
+      await mutate(202, body => service.complete(caller, body))
+      return true
+    }
+    if (url.pathname === '/team/release' && req.method === 'POST') {
+      await mutate(200, body => service.release(caller, body))
+      return true
+    }
+    if (url.pathname === '/team/continue' && req.method === 'POST') {
+      await mutate(202, body => service.continue(caller, body))
       return true
     }
     if (url.pathname === '/team/cancel' && req.method === 'POST') {
-      sendJson(res, 200, { ok: true, ...(await service.cancel(caller, await readJson(req))) })
+      await mutate(200, body => service.cancel(caller, body))
       return true
     }
     if (url.pathname === '/team/replace' && req.method === 'POST') {
-      sendJson(res, 200, { ok: true, ...(await service.replace(caller, await readJson(req))) })
+      await mutate(200, body => service.replace(caller, body))
       return true
     }
     if (url.pathname === '/team/message' && req.method === 'POST') {
-      sendJson(res, 200, { ok: true, ...(await service.message(caller, await readJson(req))) })
+      await mutate(200, body => service.message(caller, body))
       return true
     }
     if (url.pathname === '/team/mode' && req.method === 'POST') {

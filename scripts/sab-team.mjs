@@ -21,9 +21,14 @@ function usage(message = '') {
   sab team send-file (--to ALIAS | --task TASK_ID) [--message TEXT] [--request-id ID] -- FILE_PATH [FILE_PATH ...]
   sab team wait --task TASK_ID [--timeout SECONDS] [--json]
   sab team reply --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
+  sab team checkpoint --task TASK_ID --pending GATE[,GATE]|none (--stdin | --message TEXT) [--request-id ID]
+  sab team complete --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
+  sab team release --task TASK_ID [--request-id ID]
+  sab team continue --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
   sab team message --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
   sab team replace --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
   sab team cancel --task TASK_ID [--reason TEXT] [--request-id ID]
+  sab team mutation --request-id ID [--task TASK_ID]
   sab team mode <active|draining>
 
 Team identity and destinations are resolved by the bridge. These commands must
@@ -124,6 +129,44 @@ function output(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`)
 }
 
+async function mutate(pathname, body, { timeout = 30_000 } = {}) {
+  const requestId = body.requestId || crypto.randomUUID()
+  try {
+    return await request(pathname, { method: 'POST', body: { ...body, requestId }, timeout })
+  } catch (error) {
+    const task = body.taskId ? ` --task ${body.taskId}` : ''
+    error.message = `${error.message}; retry safely with --request-id ${requestId}, or verify acceptance with sab team mutation --request-id ${requestId}${task}`
+    throw error
+  }
+}
+
+function taskRequestArgs(args, { text = false, pending = false } = {}) {
+  let taskId = null
+  let requestId = null
+  let mode = null
+  let message = ''
+  let pendingValue = null
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === '--task') { taskId = value(args, i, arg); i++; continue }
+    if (arg === '--request-id') { requestId = value(args, i, arg); i++; continue }
+    if (pending && arg === '--pending') { pendingValue = value(args, i, arg); i++; continue }
+    if (text && arg === '--stdin') {
+      if (mode) usage('choose only one of --stdin or --message')
+      mode = 'stdin'; continue
+    }
+    if (text && arg === '--message') {
+      if (mode) usage('choose only one of --stdin or --message')
+      mode = 'message'; message = value(args, i, arg); i++; continue
+    }
+    usage(`unknown option: ${arg}`)
+  }
+  const pendingGates = pendingValue === null ? null
+    : pendingValue.toLowerCase() === 'none' ? []
+      : pendingValue.split(',').map(item => item.trim()).filter(Boolean)
+  return { taskId, requestId, text: mode ? readText(mode, message).trim() : '', pendingGates }
+}
+
 requireSession()
 const args = process.argv.slice(2)
 const command = args.shift()
@@ -171,8 +214,8 @@ try {
   } else if (command === 'send') {
     const parsed = commonMessageArgs(args)
     if (!parsed.to || !parsed.text) usage('send requires --to and either --stdin or --message')
-    const result = await request('/team/send', {
-      method: 'POST', body: { to: parsed.to, text: parsed.text, paths: [], requestId: parsed.requestId || crypto.randomUUID() },
+    const result = await mutate('/team/send', {
+      to: parsed.to, text: parsed.text, paths: [], requestId: parsed.requestId,
     })
     output(result.task)
   } else if (command === 'send-file') {
@@ -181,35 +224,58 @@ try {
     const requestId = parsed.requestId || crypto.randomUUID()
     const body = { text: parsed.text, paths: parsed.paths, requestId }
     try {
-      const options = { method: 'POST', body, timeout: 10 * 60_000 }
       const result = parsed.to
-        ? await request('/team/send', { ...options, body: { ...body, to: parsed.to } })
-        : await request('/team/reply', { ...options, body: { ...body, taskId: parsed.taskId } })
+        ? await mutate('/team/send', { ...body, to: parsed.to }, { timeout: 10 * 60_000 })
+        : await mutate('/team/reply', { ...body, taskId: parsed.taskId }, { timeout: 10 * 60_000 })
       output(result.task || result.reply)
     } catch (error) {
-      error.message = `${error.message}; retry safely with --request-id ${requestId}`
       throw error
     }
   } else if (command === 'reply') {
     const parsed = commonMessageArgs(args)
     if (!parsed.taskId || !parsed.text) usage('reply requires --task and either --stdin or --message')
-    const result = await request('/team/reply', {
-      method: 'POST', body: { taskId: parsed.taskId, text: parsed.text, paths: [], requestId: parsed.requestId || crypto.randomUUID() },
+    const result = await mutate('/team/reply', {
+      taskId: parsed.taskId, text: parsed.text, paths: [], requestId: parsed.requestId,
     })
     output(result.reply)
+  } else if (command === 'checkpoint') {
+    const parsed = taskRequestArgs(args, { text: true, pending: true })
+    if (!parsed.taskId || !parsed.text || parsed.pendingGates === null) {
+      usage('checkpoint requires --task, --pending GATE[,GATE]|none, and either --stdin or --message')
+    }
+    const result = await mutate('/team/checkpoint', {
+      taskId: parsed.taskId, text: parsed.text, pendingGates: parsed.pendingGates,
+      requestId: parsed.requestId,
+    })
+    output(result.reply)
+  } else if (command === 'complete') {
+    const parsed = taskRequestArgs(args, { text: true })
+    if (!parsed.taskId || !parsed.text) usage('complete requires --task and either --stdin or --message')
+    const result = await mutate('/team/complete', {
+      taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId,
+    })
+    output(result.task)
+  } else if (command === 'release') {
+    const parsed = taskRequestArgs(args)
+    if (!parsed.taskId) usage('release requires --task')
+    const result = await mutate('/team/release', {
+      taskId: parsed.taskId, requestId: parsed.requestId,
+    })
+    output(result.task)
+  } else if (command === 'continue') {
+    const parsed = taskRequestArgs(args, { text: true })
+    if (!parsed.taskId || !parsed.text) usage('continue requires --task and either --stdin or --message')
+    const result = await mutate('/team/continue', {
+      taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId,
+    })
+    output(result.task)
   } else if (command === 'message' || command === 'replace') {
     const parsed = commonMessageArgs(args)
     if (!parsed.taskId || !parsed.text) usage(`${command} requires --task and either --stdin or --message`)
-    const requestId = parsed.requestId || crypto.randomUUID()
-    try {
-      const result = await request(`/team/${command}`, {
-        method: 'POST', body: { taskId: parsed.taskId, text: parsed.text, requestId },
-      })
-      output(result.message || result.task)
-    } catch (error) {
-      error.message = `${error.message}; retry safely with --request-id ${requestId}`
-      throw error
-    }
+    const result = await mutate(`/team/${command}`, {
+      taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId,
+    })
+    output(result.message || result.task)
   } else if (command === 'cancel') {
     let taskId = null
     let reason = 'Cancelled by the coordinator.'
@@ -221,10 +287,15 @@ try {
       usage(`unknown cancel option: ${args[i]}`)
     }
     if (!taskId) usage('cancel requires --task')
-    const result = await request('/team/cancel', {
-      method: 'POST', body: { taskId, reason, requestId: requestId || crypto.randomUUID() },
-    })
+    const result = await mutate('/team/cancel', { taskId, reason, requestId })
     output(result.task)
+  } else if (command === 'mutation') {
+    const parsed = taskRequestArgs(args)
+    if (!parsed.requestId) usage('mutation requires --request-id')
+    const params = new URLSearchParams()
+    if (parsed.taskId) params.set('taskId', parsed.taskId)
+    const suffix = params.size ? `?${params}` : ''
+    output((await request(`/team/mutations/${encodeURIComponent(parsed.requestId)}${suffix}`)).mutation)
   } else if (command === 'mode') {
     if (args.length !== 1 || !['active', 'draining'].includes(args[0])) usage('mode requires active or draining')
     output(await request('/team/mode', { method: 'POST', body: { mode: args[0] } }))

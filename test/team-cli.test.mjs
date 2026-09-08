@@ -36,8 +36,19 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
       ok: true, task: { id: 'task_warning', status: 'completed_with_warning', result: '', warning: 'Hook omitted.' },
     }))
     if (req.url.startsWith('/team/tasks/')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'completed', result: 'Done.' } }))
+    if (req.url.startsWith('/team/mutations/')) return res.end(JSON.stringify({
+      ok: true, mutation: { requestId: decodeURIComponent(req.url.split('/').at(-1).split('?')[0]), status: 'accepted' },
+    }))
     if (req.url.startsWith('/team/send')) return res.end(JSON.stringify({ ok: true, created: true, task: { id: 'task_one', status: 'queued' } }))
+    if (req.url.startsWith('/team/reply') && JSON.parse(body).text === 'Uncertain reply.') {
+      res.writeHead(503)
+      return res.end(JSON.stringify({ ok: false, error: 'temporary bridge failure' }))
+    }
     if (req.url.startsWith('/team/reply')) return res.end(JSON.stringify({ ok: true, reply: { id: 'reply_one', text: body ? JSON.parse(body).text : '' } }))
+    if (req.url.startsWith('/team/checkpoint')) return res.end(JSON.stringify({ ok: true, reply: { id: 'reply_checkpoint' } }))
+    if (req.url.startsWith('/team/complete')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', completionRequestedAt: 'now' } }))
+    if (req.url.startsWith('/team/release')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'completed' } }))
+    if (req.url.startsWith('/team/continue')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_two', parentTaskId: 'task_one' } }))
     if (req.url.startsWith('/team/cancel')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'cancelled' } }))
     if (req.url.startsWith('/team/replace')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', instruction: JSON.parse(body).text } }))
     if (req.url.startsWith('/team/message') && JSON.parse(body).text === 'Uncertain delivery.') {
@@ -65,6 +76,12 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   assert.equal(JSON.parse(sent.stdout).id, 'task_one')
   const replied = await run(['reply', '--task', 'task_one', '--message', 'Progress.'], env)
   assert.equal(replied.status, 0, replied.stderr)
+  const checkpoint = await run(['checkpoint', '--task', 'task_one', '--pending', 'ci,merge', '--message', 'Still running.'], env)
+  assert.equal(checkpoint.status, 0, checkpoint.stderr)
+  assert.equal((await run(['complete', '--task', 'task_one', '--message', 'Everything passed.'], env)).status, 0)
+  assert.equal((await run(['release', '--task', 'task_one'], env)).status, 0)
+  assert.equal((await run(['continue', '--task', 'task_one', '--message', 'Follow up.'], env)).status, 0)
+  assert.equal((await run(['mutation', '--request-id', 'stable-request-1', '--task', 'task_one'], env)).status, 0)
   const file = await run(['send-file', '--task', 'task_one', '--message', 'Report.', '--', 'report final.pdf'], env)
   assert.equal(file.status, 0, file.stderr)
   const inbox = await run(['inbox', '--limit', '5', '--active', '--target', 'parallel-1', '--status', 'queued,running', '--since', '2026-01-01T00:00:00.000Z', '--json'], env)
@@ -81,6 +98,12 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
     request.url.startsWith('/team/message') && request.body?.text === 'Uncertain delivery.')
   assert.match(uncertainRequest.body.requestId, /^[0-9a-f-]{36}$/)
   assert.match(uncertainMessage.stderr, new RegExp(`retry safely with --request-id ${uncertainRequest.body.requestId}`))
+  assert.match(uncertainMessage.stderr, /verify acceptance with sab team mutation/)
+  const uncertainReply = await run(['reply', '--task', 'task_one', '--message', 'Uncertain reply.'], env)
+  assert.equal(uncertainReply.status, 1)
+  const uncertainReplyRequest = requests.find(request =>
+    request.url.startsWith('/team/reply') && request.body?.text === 'Uncertain reply.')
+  assert.match(uncertainReply.stderr, new RegExp(`retry safely with --request-id ${uncertainReplyRequest.body.requestId}`))
   assert.equal((await run(['mode', 'draining'], env)).status, 0)
   const waited = await run(['wait', '--task', 'task_one', '--timeout', '2', '--json'], env)
   assert.equal(waited.status, 0, waited.stderr)

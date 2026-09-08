@@ -85,14 +85,19 @@ import {
   stageTeamFiles as stagePrivateTeamFiles, teamSourceFileMetadata,
 } from './team-files.mjs'
 import {
-  TeamError, activeTeamForChannel, addTeamWorker, appendCoordinatorTaskMessage, appendTeamTaskReply,
+  TeamError, activeTeamForChannel, addTeamWorker, appendCoordinatorTaskMessage, appendTeamTaskCheckpoint,
+  appendTeamTaskReply,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
-  closeTeam, completeTeamTask, completeTeamTaskWithWarning, consumeCoordinatorDispatch, coordinatorPromptContext,
+  beginCoordinatorTaskMessageDelivery, closeTeam, consumeCoordinatorDispatch, coordinatorPromptContext,
   createTeam, createTeamTask, delegatedTaskPrompt, failTeamTask, markTeamTaskRunning, normalizeTeamAlias,
-  publicTeamTask, removeTeamWorker, replaceQueuedTeamTask, resolveTeamPeer, setTeamDispatchMode,
+  isActiveTeamTask, isTerminalTeamTask, isWorkerBoundTeamTask, publicTeamTask, reconcileTeamSessionBindings,
+  deferCoordinatorTaskMessageDelivery, releaseTeamTask, removeTeamWorker, replaceQueuedTeamTask, reportTeamTaskTurn,
+  requestTeamTaskCompletion,
+  resolveTeamPeer, setTeamDispatchMode,
   setTeamWorkerFiles, taskMarker, tasksForChannel, tasksPageForChannel, teamById, teamContext,
-  teamDispatchMode, teamTask, teamTaskDeliverySettled, teamTaskForRequest, withoutDelegatedTaskPrompt,
+  teamDispatchMode, teamMutationForRequest, teamTask, teamTaskDeliverySettled, teamTaskForRequest,
+  withoutDelegatedTaskPrompt,
 } from './teams.mjs'
 import {
   claimContinuation, claimContinuationDispatchAuthority, clearContinuationWaiting, coalesceContinuations, deferContinuation,
@@ -863,7 +868,7 @@ function startCodexPoller(session) {
           turn: p.turnStartedAt,
           taskId: session.teamActiveTaskId,
         }
-        if (!task || !['dispatching', 'running'].includes(task.status) || task.targetSessionId !== expected.sid ||
+        if (!task || !isWorkerBoundTeamTask(task) || task.targetSessionId !== expected.sid ||
             task.targetChannel !== session.channel || state.channels?.[session.channel] !== expected.sid ||
             !Number.isFinite(expected.turn) || expected.turn <= 0 || session.codexTurnStartedAt !== expected.turn ||
             !(expected.pid > 1) || !expected.tmux || state.sessions?.[expected.sid] !== session ||
@@ -2012,7 +2017,9 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
   if (ev === 'SessionEnd') {
     stopPoller(session)
     await clearStatus(session)
-    await failTeamTaskForSession(session, 'The worker session ended before completing its delegated task.')
+    await failTeamTaskForSession(session, 'The worker session ended before completing its delegated task.', {
+      preserveReported: true,
+    })
     clearTeamInputReservation(session)
     teamTurnProof.delete(session.id)
     const failedPrivate = failPrivateTurn(session, new Error('agent session ended during a private bridge turn'), targetClaim)
@@ -3476,6 +3483,7 @@ let teamReconciler = null
 let teamReconcileRunning = false
 const teamTaskFileDeliveries = new Map()
 const teamReplyDeliveries = new Map()
+const teamReportDeliveries = new Map()
 const teamMessageDeliveries = new Map()
 const teamCompletionDeliveries = new Map()
 const teamPayloadAuditTails = new Map()
@@ -3709,11 +3717,18 @@ function teamTaskStatusText(task) {
     : task.status === 'completed_with_warning' ? '⚠️'
       : task.status === 'failed' ? '❌'
       : task.status === 'cancelled' ? '🚫'
+        : task.status === 'awaiting_release' ? '🧾'
         : task.status === 'running' ? '⚙️'
           : task.status === 'dispatching' ? '📨' : '⏳'
-  const detail = task.error ? ` — ${String(task.error).slice(0, 600)}`
+  const releaseDetail = task.status === 'awaiting_release'
+    ? task.pendingGates?.length
+      ? ` — pending: ${task.pendingGates.join(', ')}`
+      : task.completionRequest ? ' — ready for coordinator release' : ' — worker remains reserved'
+    : task.pendingGates?.length ? ` — pending: ${task.pendingGates.join(', ')}`
+      : task.completionRequest && task.status === 'running' ? ' — completion declared; awaiting turn report' : ''
+  const issue = task.error ? ` — ${String(task.error).slice(0, 600)}`
     : task.warning ? ` — ${String(task.warning).slice(0, 600)}` : ''
-  return `${icon} *Team task* \`${task.id}\` · ${task.status}${detail}`
+  return `${icon} *Team task* \`${task.id}\` · ${task.status}${issue}${releaseDetail}`
 }
 
 function teamAuditClientId(task, side) {
@@ -3835,8 +3850,11 @@ async function updateTeamTaskAudit(task) {
 }
 
 async function performTeamCompletionDelivery(task) {
-  if (!['completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)) return false
+  if (!isTerminalTeamTask(task)) return false
   if (task.completionDeliveryStatus === 'delivered') return true
+  for (const report of task.reports || []) {
+    if (report.deliveryStatus !== 'delivered') await ensureTeamReportDelivery(task, report)
+  }
   task.completionDeliveryStatus = 'delivering'
   task.completionDeliveryAttempts = Number(task.completionDeliveryAttempts || 0) + 1
   saveStateNow(state)
@@ -3881,18 +3899,33 @@ function ensureTeamCompletionDelivery(task) {
   })
 }
 
-function teamTargetBusy(session) {
-  const durableTask = Object.values(state.teamTasks || {}).some(task =>
-    task.targetChannel === session?.channel && ['dispatching', 'running'].includes(task.status))
-  return Boolean(
-    durableTask || session.teamActiveTaskId || session.teamInputReservation ||
-    pollers.has(session.id) || codexPollers.has(session.id) || piPollers.has(session.id) ||
-    session.codexTurnStartedAt || session.piTurnStartedAt || pendingBySid.get(session.id)?.length ||
-    qforms.has(session.id) || hasPendingPerm(session) || activeTransition(session.channel) ||
-    updatingSessions.has(session.id) || restarting.has(session.id) || resurrectInFlight.has(session.id) || switchingSids.has(session.id) ||
-    internalTurns.has(session.id) || ['active', 'paused'].includes(session.managed?.status) ||
-    session.piRouting?.status === 'routing'
-  )
+function teamTargetBusyReasons(session) {
+  if (!session) return ['session unavailable']
+  const reasons = []
+  const durableTask = Object.values(state.teamTasks || {}).find(task =>
+    task.targetChannel === session.channel && isWorkerBoundTeamTask(task))
+  if (durableTask) reasons.push(`task ${durableTask.status}`)
+  if (session.teamActiveTaskId && !durableTask) reasons.push('task binding')
+  if (session.teamInputReservation) reasons.push('input reserved')
+  if (pollers.has(session.id) || codexPollers.has(session.id) || piPollers.has(session.id) ||
+      session.codexTurnStartedAt || session.piTurnStartedAt) reasons.push('provider turn')
+  if (pendingBySid.get(session.id)?.length) reasons.push('queued input')
+  if (qforms.has(session.id)) reasons.push('question')
+  if (hasPendingPerm(session)) reasons.push('permission')
+  if (activeTransition(session.channel) || switchingSids.has(session.id)) reasons.push('provider switch')
+  if (updatingSessions.has(session.id) || restarting.has(session.id) || resurrectInFlight.has(session.id)) reasons.push('maintenance')
+  if (internalTurns.has(session.id)) reasons.push('private turn')
+  if (['active', 'paused'].includes(session.managed?.status)) reasons.push('managed Pi run')
+  if (session.piRouting?.status === 'routing') reasons.push('Pi routing')
+  return reasons
+}
+
+function teamTargetBusy(session) { return teamTargetBusyReasons(session).length > 0 }
+
+function noteTeamAvailability(session, reason, now = Date.now()) {
+  if (!session) return
+  session.teamAvailabilityChangedAt = new Date(now).toISOString()
+  session.teamAvailabilityReason = String(reason || 'team_state_changed').slice(0, 200)
 }
 
 function removeTeamFiles(id) {
@@ -3989,8 +4022,13 @@ async function notifyTeamReplyFileFailure(task, reply) {
 
 async function performTeamReplyDelivery(task, reply) {
   if (reply.text && !reply.textSlackTs) {
+    const gates = reply.kind === 'checkpoint'
+      ? reply.pendingGates?.length
+        ? `\n\nPending gates: ${reply.pendingGates.map(gate => `\`${gate}\``).join(', ')}`
+        : '\n\nPending gates: none'
+      : ''
     const message = await postSlackMessage(task.sourceChannel, {
-      text: `📨 *Team update from* <#${task.targetChannel}> · \`${task.id}\`\n\n${reply.text}`,
+      text: `📨 *Team update from* <#${task.targetChannel}> · \`${task.id}\`\n\n${reply.text}${gates}`,
       unfurl_links: false,
       client_msg_id: teamAuditClientId(task, reply.id),
     })
@@ -4045,13 +4083,58 @@ function ensureTeamReplyDelivery(task, reply) {
   })
 }
 
+async function performTeamReportDelivery(task, report) {
+  if (report.deliveryStatus === 'delivered') return true
+  report.deliveryStatus = 'delivering'
+  saveStateNow(state)
+  try {
+    const auditUpdated = await updateTeamTaskAudit(task)
+    const gates = task.pendingGates?.length
+      ? `\n\nPending gates: ${task.pendingGates.map(gate => `\`${gate}\``).join(', ')}`
+      : ''
+    const readiness = task.completionRequest && !task.pendingGates?.length
+      ? '\n\n✅ The worker declared this task ready; the coordinator may release it.'
+      : '\n\nThe worker remains reserved. Send a follow-up or wait for an explicit readiness declaration.'
+    const warning = report.warning ? `\n\n⚠️ ${report.warning}` : ''
+    const auditWarning = auditUpdated ? '' : '\n\n⚠️ One or more task status cards could not be updated.'
+    if (!report.slackTs) {
+      const posted = await postSlackMessage(task.sourceChannel, {
+        text: `🧾 *Worker turn report from* <#${task.targetChannel}> · \`${task.id}\`\n\n${report.result || '_The provider turn ended without stable text._'}${gates}${readiness}${warning}${auditWarning}`,
+        unfurl_links: false,
+        client_msg_id: teamAuditClientId(task, report.id),
+      })
+      report.slackTs = posted?.ts || null
+    }
+    report.deliveryStatus = 'delivered'
+    report.deliveryError = auditUpdated ? null : 'The report was delivered, but one or more task cards could not be updated.'
+    report.deliveredAt = new Date().toISOString()
+    saveStateNow(state)
+    return true
+  } catch (error) {
+    report.deliveryStatus = 'pending'
+    report.deliveryError = String(error?.data?.error || error?.message || error).slice(0, 1000)
+    saveStateNow(state)
+    throw new TeamError('report_delivery_failed', 'Slack did not accept the worker turn report; SAB will retry it.', 502)
+  }
+}
+
+function ensureTeamReportDelivery(task, report) {
+  const existing = teamReportDeliveries.get(report.id)
+  if (existing) return existing
+  const operation = performTeamReportDelivery(task, report)
+  teamReportDeliveries.set(report.id, operation)
+  return operation.finally(() => {
+    if (teamReportDeliveries.get(report.id) === operation) teamReportDeliveries.delete(report.id)
+  })
+}
+
 function coordinatorTaskMessageTargetMatches(task, target, expected) {
   return Boolean(target && expected && state.sessions?.[expected.sid] === target &&
     target.id === expected.sid && target.pid === expected.pid && target.tmux === expected.tmux &&
     target.channel === expected.channel && providerOf(target) === expected.provider &&
     nodeIdForSession(target) === expected.nodeId && target.teamActiveTaskId === task.id &&
     task.id === expected.taskId && task.targetSessionId === expected.sid &&
-    task.targetChannel === expected.channel && ['dispatching', 'running'].includes(task.status) &&
+    task.targetChannel === expected.channel && isWorkerBoundTeamTask(task) &&
     state.channels?.[expected.channel] === expected.sid && expected.pid > 1 &&
     expected.tmux && pidAlive(expected.pid) && !updatingSessions.has(expected.sid) &&
     !drainingSessionInput.has(expected.sid) && !pendingBySid.get(expected.sid)?.length &&
@@ -4108,6 +4191,13 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     nodeId: nodeIdForSession(target),
     taskId: task.id,
   }) : null
+  const durableAwaitingTarget = task.status === 'awaiting_release' && target &&
+    state.sessions?.[target.id] === target && target.channel === task.targetChannel &&
+    state.channels?.[task.targetChannel] === target.id && target.teamActiveTaskId === task.id
+  if (durableAwaitingTarget && (!(target.pid && pidAlive(target.pid)) || !target.tmux)) {
+    throw new TeamError('worker_dormant',
+      'The coordinator message is durable and will be delivered after the reserved worker session resumes.', 409)
+  }
   if (!(await validateCoordinatorTaskMessageTarget(task, target, expected))) {
     message.deliveryStatus = 'failed'
     message.deliveryError = 'The exact active worker session is no longer authoritative.'
@@ -4138,6 +4228,8 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       throw new TeamError('target_authority_lost', 'The exact active worker changed or entered maintenance before provider delivery.', 409)
     }
     message.providerDeliveryStatus = 'delivering'
+    beginCoordinatorTaskMessageDelivery(state, task.id, message.id)
+    if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_submitting')
     saveStateNow(state)
     providerAttempted = true
     await injectCoordinatorTaskMessageOnce(task, target, expected, [
@@ -4150,13 +4242,20 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     message.deliveryStatus = 'delivered'
     message.deliveryError = null
     message.deliveredAt = new Date().toISOString()
+    if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_delivered')
     saveStateNow(state)
+    if (message.resumesTask) await updateTeamTaskAudit(task).catch(error =>
+      log('team follow-up lifecycle audit deferred', task.id, String(error?.message || error)))
     return true
   } catch (error) {
     const failure = teamMessageFailureDisposition({ providerAttempted, error })
     message.providerDeliveryStatus = failure.providerDeliveryStatus
     message.deliveryStatus = failure.deliveryStatus
     message.deliveryError = String(error?.data?.error || error?.message || error).slice(0, 1000)
+    if (failure.retryable) {
+      deferCoordinatorTaskMessageDelivery(state, task.id, message.id)
+      if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_not_delivered')
+    }
     saveStateNow(state)
     throw new TeamError(failure.retryable ? 'task_message_retryable' : 'task_message_failed',
       `Coordinator message delivery failed: ${message.deliveryError}`, failure.retryable ? 503 : 502)
@@ -4202,26 +4301,36 @@ function teamRuntimeContext(session) {
     const channel = Object.entries(team.members || {}).find(([, member]) => member.alias === peer.alias)?.[0]
     const target = channel ? sessionByChannel(channel) : null
     const activeTask = channel ? Object.values(state.teamTasks || {}).find(task =>
-      task.targetChannel === channel && ['dispatching', 'running'].includes(task.status)) : null
+      task.targetChannel === channel && isWorkerBoundTeamTask(task)) : null
     const authoritative = Boolean(target && state.channels?.[channel] === target.id && target.channel === channel)
     const live = authoritative && target.pid && pidAlive(target.pid)
+    const busyReasons = authoritative ? teamTargetBusyReasons(target) : []
     const availability = !authoritative ? 'unavailable'
       : activeTransition(channel) ? 'switching'
         : !live ? 'dormant'
-          : activeTask || teamTargetBusy(target) ? 'busy' : 'ready'
+          : activeTask || busyReasons.length ? 'busy' : 'ready'
     return {
       ...peer,
       provider: authoritative ? providerOf(target) : null,
       availability,
+      availabilityReason: !authoritative ? 'no authoritative session'
+        : !live ? 'provider process is dormant'
+          : availability === 'switching' ? 'provider switch in progress'
+            : busyReasons.join(', ') || 'idle and dispatchable',
+      observedAt: new Date().toISOString(),
+      lastAvailabilityChangeAt: target?.teamAvailabilityChangedAt || null,
+      lastAvailabilityChangeReason: target?.teamAvailabilityReason || null,
       activeTask: activeTask ? {
         id: activeTask.id,
         status: activeTask.status,
         startedAt: activeTask.startedAt || activeTask.dispatchClaimedAt || null,
         lifecycleVersion: Math.max(1, Number(activeTask.lifecycleVersion) || 1),
+        updatedAt: activeTask.updatedAt || activeTask.createdAt,
+        lastTransition: activeTask.lastTransition || null,
       } : null,
     }
   })
-  return { ...context, peers }
+  return { ...context, observedAt: new Date().toISOString(), peers }
 }
 
 async function dispatchTeamTask(task) {
@@ -4300,6 +4409,7 @@ async function dispatchTeamTask(task) {
     return true
   } catch (error) {
     delete target.teamActiveTaskId
+    noteTeamAvailability(target, 'provider_injection_failed')
     failTeamTask(state, task.id, `Provider injection failed: ${String(error?.message || error).slice(0, 1000)}`)
     persistTeamLifecycle(task)
     await updateTeamTaskAudit(task)
@@ -4312,9 +4422,24 @@ async function reconcileTeamTasks() {
   teamReconcileRunning = true
   try {
     const now = Date.now()
+    const bindingRepair = reconcileTeamSessionBindings(state, { now })
+    if (bindingRepair.changed) {
+      saveStateNow(state)
+      for (const repair of bindingRepair.repairs) {
+        log('reconciled team/session binding', repair.sessionId.slice(0, 8), repair.taskId, repair.reason)
+        if (repair.reason === 'restored_durable_task_binding' &&
+            (pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId) || piPollers.has(repair.sessionId))) {
+          teamTurnProof.add(repair.sessionId)
+        }
+      }
+    }
+    for (const anomaly of bindingRepair.anomalies) {
+      log('team/session binding conflict retained fail-closed', anomaly.sessionId.slice(0, 8),
+        anomaly.activeTaskId, anomaly.taskIds?.join(',') || anomaly.taskId)
+    }
     const tasks = Object.values(state.teamTasks || {}).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
     for (const task of tasks) {
-      const terminal = ['completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)
+      const terminal = isTerminalTeamTask(task)
       // Tasks written by the first session-team implementation predate the
       // durable completion-delivery claim. Their terminal result was already
       // posted synchronously, so mark it delivered instead of duplicating it
@@ -4332,6 +4457,12 @@ async function reconcileTeamTasks() {
             log('team reply reconciliation failed', task.id, reply.id, String(error?.message || error)))
         }
       }
+      for (const report of task.reports || []) {
+        if (report.deliveryStatus !== 'delivered') {
+          await ensureTeamReportDelivery(task, report).catch(error =>
+            log('team turn report reconciliation failed', task.id, report.id, String(error?.message || error)))
+        }
+      }
       if (task.sourcePayloadSlackTs && task.targetPayloadSlackTs &&
           Math.max(1, Number(task.payloadAuditInstructionVersion) || 1) !==
             Math.max(1, Number(task.instructionVersion) || 1)) {
@@ -4345,7 +4476,7 @@ async function reconcileTeamTasks() {
         // actionable failure without rewriting state or flooding logs every
         // reconciliation sweep.
         if (message.providerDeliveryStatus === 'uncertain') continue
-        if (!['queued', 'dispatching', 'running'].includes(task.status)) {
+        if (!isWorkerBoundTeamTask(task)) {
           message.deliveryStatus = 'failed'
           message.deliveryError ||= 'The task ended before this coordinator message could be delivered.'
           saveStateNow(state)
@@ -4364,9 +4495,12 @@ async function reconcileTeamTasks() {
         removeTeamTaskFiles(task)
         continue
       }
-      if (['queued', 'dispatching', 'running'].includes(task.status) && Date.parse(task.expiresAt || 0) <= now) {
+      if (isActiveTeamTask(task) && Date.parse(task.expiresAt || 0) <= now) {
         const target = task.targetSessionId ? state.sessions?.[task.targetSessionId] : null
-        if (target?.teamActiveTaskId === task.id) delete target.teamActiveTaskId
+        if (target?.teamActiveTaskId === task.id) {
+          delete target.teamActiveTaskId
+          noteTeamAvailability(target, 'team_task_expired', now)
+        }
         if (target) {
           discardQueuedTeamTaskPrompt(target, task.id)
           clearTeamTurn(target)
@@ -4378,12 +4512,15 @@ async function reconcileTeamTasks() {
         await ensureTeamCompletionDelivery(task).catch(error =>
           log('team expiry delivery deferred', task.id, String(error?.message || error)))
       } else if (task.status === 'queued' && teamDispatchMode(state.teams?.[task.teamId]) === 'active') await dispatchTeamTask(task)
-      else if (['dispatching', 'running'].includes(task.status)) {
+      else if (isWorkerBoundTeamTask(task)) {
         const target = state.sessions?.[task.targetSessionId]
-        if (!target || target.channel !== task.targetChannel || state.channels?.[task.targetChannel] !== target.id ||
-            target.teamActiveTaskId !== task.id || !(target.pid && pidAlive(target.pid))) {
+        const bindingLost = !target || target.channel !== task.targetChannel ||
+          state.channels?.[task.targetChannel] !== target.id || target.teamActiveTaskId !== task.id
+        const providerMissing = !(target?.pid && pidAlive(target.pid))
+        if (bindingLost || (providerMissing && task.status !== 'awaiting_release')) {
           if (target?.teamActiveTaskId === task.id) {
             delete target.teamActiveTaskId
+            noteTeamAvailability(target, 'team_task_authority_lost', now)
             discardQueuedTeamTaskPrompt(target, task.id)
           }
           failTeamTask(state, task.id, 'The assigned worker session ended or lost exact task/channel authority.')
@@ -4402,7 +4539,10 @@ async function reconcileTeamTasks() {
             log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
         } else if (task.status === 'dispatching' && Date.parse(task.dispatchClaimedAt || 0) + 5 * 60 * 1000 <= now &&
             !pollers.has(target.id) && !codexPollers.has(target.id) && !piPollers.has(target.id)) {
-          if (target.teamActiveTaskId === task.id) delete target.teamActiveTaskId
+          if (target.teamActiveTaskId === task.id) {
+            delete target.teamActiveTaskId
+            noteTeamAvailability(target, 'uncertain_dispatch_released', now)
+          }
           discardQueuedTeamTaskPrompt(target, task.id)
           failTeamTask(state, task.id, 'Delivery became uncertain before the provider acknowledged the delegated turn; SAB did not retry it to avoid duplicate work.')
           persistTeamLifecycle(task)
@@ -4411,6 +4551,7 @@ async function reconcileTeamTasks() {
         } else if (task.status === 'running' && Date.parse(task.startedAt || 0) < teamDaemonStartedAt &&
             Date.now() - teamDaemonStartedAt >= TEAM_RESTART_PROOF_GRACE_MS && !teamTurnProof.has(target.id)) {
           delete target.teamActiveTaskId
+          noteTeamAvailability(target, 'unproved_restart_task_released', now)
           stopPoller(target)
           clearTeamTurn(target)
           clearTeamInputReservation(target)
@@ -4507,7 +4648,7 @@ async function recoverInterruptedTeamContinuations() {
   }
 }
 
-async function finishTeamTaskForSession(session, result, error = null) {
+async function finishTeamTaskForSession(session, result, error = null, { warning = null } = {}) {
   const taskId = session.teamActiveTaskId
   const finalText = String(result || '').trim()
   const revokedTurn = clearTeamTurn(session)
@@ -4516,20 +4657,48 @@ async function finishTeamTaskForSession(session, result, error = null) {
     else saveState(state)
     return false
   }
-  delete session.teamActiveTaskId
   let task
   try {
     task = teamTask(state, taskId)
-    if (error || !finalText) failTeamTask(state, task.id, error || 'The worker turn ended without a stable final response.')
-    else completeTeamTask(state, task.id, { targetSessionId: session.id, result: finalText })
+    // Stop, App Server finalization, and provider-exit recovery can converge on
+    // one completed turn. Once its report is durable, a later lifecycle path
+    // must not replace it with a duplicate report or a false failure. A
+    // confirmed coordinator follow-up first returns the task to `running`, so
+    // genuine next-turn failures still take the normal failure path.
+    if (task.status === 'awaiting_release') {
+      if (revokedTurn) saveStateNow(state)
+      teamTurnProof.delete(session.id)
+      return true
+    }
+    if (error) {
+      failTeamTask(state, task.id, error)
+    } else {
+      reportTeamTaskTurn(state, task.id, {
+        targetSessionId: session.id,
+        result: finalText,
+        warning: warning || (!finalText ? 'The provider turn ended without a stable final response.' : null),
+      })
+    }
   } catch (failure) {
     log('team task completion rejected', taskId, String(failure?.message || failure))
     saveStateNow(state)
     return false
   }
+  if (isTerminalTeamTask(task)) {
+    delete session.teamActiveTaskId
+    noteTeamAvailability(session, error ? 'team_task_failed' : 'legacy_team_task_completed')
+  } else {
+    noteTeamAvailability(session, 'provider_turn_reported_awaiting_release')
+  }
   persistTeamLifecycle(task)
-  await ensureTeamCompletionDelivery(task).catch(failure =>
-    log('team completion delivery deferred', task.id, String(failure?.message || failure)))
+  if (isTerminalTeamTask(task)) {
+    await ensureTeamCompletionDelivery(task).catch(failure =>
+      log('team completion delivery deferred', task.id, String(failure?.message || failure)))
+  } else {
+    const report = task.reports?.at(-1)
+    if (report) await ensureTeamReportDelivery(task, report).catch(failure =>
+      log('team turn report delivery deferred', task.id, String(failure?.message || failure)))
+  }
   teamTurnProof.delete(session.id)
   setImmediate(() => reconcileTeamTasks().catch(failure => log('team follow-up dispatch failed', String(failure))))
   return true
@@ -4537,35 +4706,23 @@ async function finishTeamTaskForSession(session, result, error = null) {
 
 async function finishTeamTaskWithWarningForSession(session, warning) {
   const taskId = session?.teamActiveTaskId
-  clearTeamTurn(session)
-  if (!taskId) { saveStateNow(state); return false }
-  delete session.teamActiveTaskId
-  let task
-  try {
-    task = teamTask(state, taskId)
-    const latestReply = task.replies?.at(-1)?.text || ''
-    completeTeamTaskWithWarning(state, task.id, {
-      targetSessionId: session.id,
-      result: latestReply ? `Last authenticated worker update:\n${latestReply}` : '',
-      warning,
-    })
-  } catch (failure) {
-    log('team warning completion rejected', taskId, String(failure?.message || failure))
-    saveStateNow(state)
-    return false
-  }
-  persistTeamLifecycle(task)
-  await ensureTeamCompletionDelivery(task).catch(failure =>
-    log('team warning completion delivery deferred', task.id, String(failure?.message || failure)))
-  teamTurnProof.delete(session.id)
-  setImmediate(() => reconcileTeamTasks().catch(failure => log('team follow-up dispatch failed', String(failure))))
-  return true
+  if (!taskId) { clearTeamTurn(session); saveStateNow(state); return false }
+  const task = state.teamTasks?.[taskId]
+  const latestReply = task?.replies?.at(-1)?.text || ''
+  return finishTeamTaskForSession(session,
+    latestReply ? `Last authenticated worker update:\n${latestReply}` : '', null, { warning })
 }
 
 async function releaseIdleReadoptedTeamTask(session, label) {
   const task = state.teamTasks?.[session?.teamActiveTaskId]
   if (!task || task.targetSessionId !== session.id || task.targetChannel !== session.channel) return false
-  if (['dispatching', 'running'].includes(task.status)) {
+  if (task.status === 'awaiting_release') {
+    // The provider turn was already durably reported before restart. Preserve
+    // the task reservation and wait for coordinator release or follow-up.
+    saveStateNow(state)
+    return true
+  }
+  if (isWorkerBoundTeamTask(task)) {
     // Unlike a stable-idle observation made by the live poller, boot-time idle
     // has no continuous proof that the provider actually completed this turn:
     // the host may have died after the dispatch journal was written but before
@@ -4575,6 +4732,7 @@ async function releaseIdleReadoptedTeamTask(session, label) {
       `${label} was idle when SAB re-adopted the session after restart. The historical worker turn could not be proven complete and was released without replay.`)
   }
   delete session.teamActiveTaskId
+  noteTeamAvailability(session, 'team_task_failed')
   saveStateNow(state)
   return false
 }
@@ -4628,14 +4786,23 @@ async function releaseIdleReadoptedTeamTaskIfStillIdle(session, expected, label,
   return true
 }
 
-async function failTeamTaskForSession(session, reason) {
+async function failTeamTaskForSession(session, reason, { preserveReported = false } = {}) {
   const taskId = session?.teamActiveTaskId
   const revokedTurn = clearTeamTurn(session)
   if (!taskId) {
     if (revokedTurn) saveStateNow(state)
     return false
   }
+  const existingTask = state.teamTasks?.[taskId]
+  if (preserveReported && existingTask?.status === 'awaiting_release' &&
+      existingTask.targetSessionId === session.id && existingTask.targetChannel === session.channel) {
+    noteTeamAvailability(session, 'reported_task_provider_dormant')
+    saveStateNow(state)
+    teamTurnProof.delete(session.id)
+    return true
+  }
   delete session.teamActiveTaskId
+  noteTeamAvailability(session, 'team_task_failed')
   discardQueuedTeamTaskPrompt(session, taskId)
   let task
   try { task = failTeamTask(state, taskId, reason) }
@@ -4645,6 +4812,10 @@ async function failTeamTaskForSession(session, reason) {
     log('team failure delivery deferred', task.id, String(error?.message || error)))
   teamTurnProof.delete(session.id)
   return true
+}
+
+function acceptedTeamMutation(session, task, requestId) {
+  return teamMutationForRequest(state, session.channel, requestId, { taskId: task.id })
 }
 
 const teamService = {
@@ -4676,6 +4847,11 @@ const teamService = {
     requireTeamCallerContext(session)
     return publicTeamTask(teamTask(state, taskId), session.channel)
   },
+  async mutation(caller, requestId, taskId = null) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    return teamMutationForRequest(state, session.channel, requestId, { taskId })
+  },
   async send(caller, request) {
     const session = await resolveTeamCaller(caller)
     const context = requireTeamCallerContext(session)
@@ -4687,6 +4863,12 @@ const teamService = {
       allowContinuation: team.continuation?.mode === 'auto-until-blocked',
     }
     const destination = resolveTeamPeer(state, context.id, request.to)
+    const parentTask = request.parentTaskId ? teamTask(state, request.parentTaskId) : null
+    if (parentTask && (parentTask.teamId !== team.id || parentTask.sourceChannel !== session.channel ||
+        parentTask.targetChannel !== destination.channel || !isTerminalTeamTask(parentTask))) {
+      throw new TeamError('invalid_continuation_task',
+        'A continuation must target the same worker as one exact terminal task from this coordinator.', 409)
+    }
     const destinationSession = sessionByChannel(destination.channel)
     if (!destinationSession || state.channels?.[destination.channel] !== destinationSession.id ||
         destinationSession.channel !== destination.channel || nodeIdForSession(destinationSession) !== LOCAL_NODE_ID) {
@@ -4702,8 +4884,14 @@ const teamService = {
         if (error instanceof ArtifactUploadError) throw new TeamError(error.code, error.message, error.status)
         throw error
       }
-      assertTeamTaskRetry(state, prior, { teamId: context.id, target: request.to, text: request.text, files: retryFiles })
-      return { task: publicTeamTask(prior, session.channel), created: false }
+      assertTeamTaskRetry(state, prior, {
+        teamId: context.id, target: request.to, text: request.text, files: retryFiles,
+        parentTaskId: parentTask?.id || null,
+      })
+      return {
+        task: publicTeamTask(prior, session.channel), created: false,
+        mutation: acceptedTeamMutation(session, prior, request.requestId),
+      }
     }
     try {
       assertCoordinatorDispatch(session, authority)
@@ -4735,6 +4923,7 @@ const teamService = {
         target: request.to,
         text: request.text,
         files,
+        parentTaskId: parentTask?.id || null,
         requestId: request.requestId,
       })
     } catch (error) {
@@ -4746,7 +4935,26 @@ const teamService = {
     for (const removed of result.pruned || []) removeTeamTaskFiles(removed)
     await ensureTeamTaskAudit(result.task)
     await dispatchTeamTask(result.task)
-    return { task: publicTeamTask(result.task, session.channel), created: true }
+    return {
+      task: publicTeamTask(result.task, session.channel), created: true,
+      mutation: acceptedTeamMutation(session, result.task, request.requestId),
+    }
+  },
+  async continue(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    const context = requireTeamCallerContext(session)
+    if (context.role !== 'coordinator') throw new TeamError('dispatch_not_allowed', 'Only the team coordinator may continue work.', 403)
+    const previous = teamTask(state, request.taskId)
+    if (previous.sourceChannel !== session.channel || previous.teamId !== context.id || !isTerminalTeamTask(previous)) {
+      throw new TeamError('invalid_continuation_task', 'Only one of this coordinator\'s terminal tasks may be continued.', 409)
+    }
+    return teamService.send(caller, {
+      to: previous.targetAlias,
+      text: request.text,
+      paths: [],
+      requestId: request.requestId,
+      parentTaskId: previous.id,
+    })
   },
   async reply(caller, request) {
     const session = await resolveTeamCaller(caller)
@@ -4763,8 +4971,10 @@ const teamService = {
         if (error instanceof ArtifactUploadError) throw new TeamError(error.code, error.message, error.status)
         throw error
       }
-      const appended = appendTeamTaskReply(state, task.id, {
+      const append = request.pendingGates === undefined ? appendTeamTaskReply : appendTeamTaskCheckpoint
+      const appended = append(state, task.id, {
         requestId: request.requestId, fromChannel: session.channel, text: request.text, files: retryFiles,
+        ...(request.pendingGates === undefined ? {} : { pendingGates: request.pendingGates }),
       })
       const workerProof = appended.accepted ||
         (task.status === 'running' && session.teamActiveTaskId === task.id)
@@ -4780,7 +4990,7 @@ const teamService = {
         if (startCodexStatus) startCodexPoller(session)
         if (continuationTeamId) scheduleTeamContinuation(continuationTeamId)
       }
-      if (appended.accepted) {
+      if (appended.accepted || request.pendingGates !== undefined) {
         await updateTeamTaskAudit(task).catch(error =>
           log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
       }
@@ -4789,6 +4999,7 @@ const teamService = {
         reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === appended.reply.id),
         task: publicTeamTask(task, task.sourceChannel),
         created: false,
+        mutation: acceptedTeamMutation(session, task, request.requestId),
       }
     }
     if (session.teamActiveTaskId !== task.id) {
@@ -4805,8 +5016,10 @@ const teamService = {
     }
     let appended
     try {
-      appended = appendTeamTaskReply(state, task.id, {
+      const append = request.pendingGates === undefined ? appendTeamTaskReply : appendTeamTaskCheckpoint
+      appended = append(state, task.id, {
         id: replyId, requestId: request.requestId, fromChannel: session.channel, text: request.text, files,
+        ...(request.pendingGates === undefined ? {} : { pendingGates: request.pendingGates }),
       })
     } catch (error) {
       if (files.length) removeTeamFiles(replyId)
@@ -4820,6 +5033,7 @@ const teamService = {
         reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === reply.id),
         task: publicTeamTask(task, task.sourceChannel),
         created: false,
+        mutation: acceptedTeamMutation(session, task, request.requestId),
       }
     }
     const startCodexStatus = recordTeamWorkerProof(session, task)
@@ -4832,12 +5046,91 @@ const teamService = {
     saveStateNow(state)
     if (startCodexStatus) startCodexPoller(session)
     if (continuationTeamId) scheduleTeamContinuation(continuationTeamId)
-    if (appended.accepted) {
+    if (appended.accepted || request.pendingGates !== undefined) {
       await updateTeamTaskAudit(task).catch(error =>
         log('team reply acceptance audit deferred', task.id, String(error?.message || error)))
     }
     await ensureTeamReplyDelivery(task, reply)
-    return { reply: publicTeamTask(task, task.sourceChannel).replies.at(-1), task: publicTeamTask(task, task.sourceChannel), created: true }
+    return {
+      reply: publicTeamTask(task, task.sourceChannel).replies.at(-1),
+      task: publicTeamTask(task, task.sourceChannel),
+      created: true,
+      mutation: acceptedTeamMutation(session, task, request.requestId),
+    }
+  },
+  async checkpoint(caller, request) {
+    if (request.paths?.length) throw new TeamError('files_not_allowed', 'Checkpoint updates do not accept files.')
+    return teamService.reply(caller, {
+      ...request,
+      paths: [],
+      pendingGates: request.pendingGates,
+    })
+  },
+  async complete(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    const task = teamTask(state, request.taskId)
+    if (session.teamActiveTaskId !== task.id || task.targetChannel !== session.channel ||
+        task.targetSessionId !== session.id) {
+      throw new TeamError('completion_not_allowed', 'This live worker session does not own that active task.', 403)
+    }
+    const result = requestTeamTaskCompletion(state, task.id, {
+      targetSessionId: session.id,
+      fromChannel: session.channel,
+      summary: request.text,
+      requestId: request.requestId,
+    })
+    const continuationTeamId = result.created && task.status === 'awaiting_release'
+      ? stageTeamContinuation(task, {
+          kind: 'ready', lifecycleVersion: result.request.lifecycleVersion || task.lifecycleVersion,
+        })
+      : null
+    saveStateNow(state)
+    if (continuationTeamId) scheduleTeamContinuation(continuationTeamId)
+    await updateTeamTaskAudit(task).catch(error =>
+      log('team completion declaration audit deferred', task.id, String(error?.message || error)))
+    return {
+      task: publicTeamTask(task, session.channel), created: result.created,
+      mutation: acceptedTeamMutation(session, task, request.requestId),
+    }
+  },
+  async release(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    const context = requireTeamCallerContext(session)
+    if (context.role !== 'coordinator') throw new TeamError('task_control_not_allowed', 'Only the team coordinator may release work.', 403)
+    const team = teamById(state, context.id)
+    assertCoordinatorTaskControl(session, {
+      teamId: team.id, allowContinuation: team.continuation?.mode === 'auto-until-blocked',
+    })
+    const task = teamTask(state, request.taskId)
+    try {
+      const accepted = teamMutationForRequest(state, session.channel, request.requestId, { taskId: task.id })
+      if (accepted.kind !== 'release') {
+        throw new TeamError('request_conflict', 'That request ID was already used for another team operation.', 409)
+      }
+      return { task: publicTeamTask(task, session.channel), created: false, mutation: accepted }
+    } catch (error) {
+      if (error?.code !== 'mutation_not_found') throw error
+    }
+    const target = state.sessions?.[task.targetSessionId]
+    if (!target || target.channel !== task.targetChannel || state.channels?.[task.targetChannel] !== target.id ||
+        target.teamActiveTaskId !== task.id) {
+      throw new TeamError('target_authority_lost', 'The exact reserved worker session is no longer authoritative.', 409)
+    }
+    const result = releaseTeamTask(state, task.id, {
+      sourceChannel: session.channel,
+      requestId: request.requestId,
+    })
+    if (target.teamActiveTaskId === task.id) delete target.teamActiveTaskId
+    noteTeamAvailability(target, 'coordinator_released_task')
+    persistTeamLifecycle(task)
+    await ensureTeamCompletionDelivery(task).catch(error =>
+      log('team release delivery deferred', task.id, String(error?.message || error)))
+    setImmediate(() => reconcileTeamTasks().catch(error => log('team release follow-up failed', String(error))))
+    return {
+      task: publicTeamTask(task, session.channel), created: result.created,
+      mutation: acceptedTeamMutation(session, task, request.requestId),
+    }
   },
   async cancel(caller, request) {
     const session = await resolveTeamCaller(caller)
@@ -4854,7 +5147,10 @@ const teamService = {
     removeTeamFiles(task.id)
     await ensureTeamCompletionDelivery(task)
     setImmediate(() => reconcileTeamTasks().catch(error => log('team cancel follow-up failed', String(error))))
-    return { task: publicTeamTask(task, session.channel) }
+    return {
+      task: publicTeamTask(task, session.channel),
+      mutation: acceptedTeamMutation(session, task, request.requestId),
+    }
   },
   async replace(caller, request) {
     const session = await resolveTeamCaller(caller)
@@ -4870,7 +5166,10 @@ const teamService = {
     saveStateNow(state)
     const updated = await updateTeamTaskPayloadAudit(result.task)
     if (!updated) throw new TeamError('slack_audit_failed', 'The replacement is durable, but Slack could not update one or more task instruction cards; SAB will retry.', 502)
-    return { task: publicTeamTask(result.task, session.channel), created: result.created }
+    return {
+      task: publicTeamTask(result.task, session.channel), created: result.created,
+      mutation: acceptedTeamMutation(session, result.task, request.requestId),
+    }
   },
   async message(caller, request) {
     const session = await resolveTeamCaller(caller)
@@ -4885,10 +5184,15 @@ const teamService = {
       sourceChannel: session.channel, text: request.text, requestId: request.requestId,
     })
     saveStateNow(state)
-    await ensureCoordinatorTaskMessageDelivery(task, result.message)
+    try { await ensureCoordinatorTaskMessageDelivery(task, result.message) }
+    catch (error) {
+      if (error?.code !== 'worker_dormant') throw error
+      log('queued coordinator task message for dormant reserved worker', task.id, result.message.id)
+    }
     return {
       message: publicTeamTask(task, session.channel).messages.find(message => message.id === result.message.id),
       task: publicTeamTask(task, session.channel), created: result.created,
+      mutation: acceptedTeamMutation(session, task, request.requestId),
     }
   },
   async mode(caller, request) {
@@ -5587,7 +5891,7 @@ function teamStatusMarkdown(team) {
   const rows = Object.entries(team.members || {}).map(([channel, member]) => {
     const session = sessionByChannel(channel)
     const live = Boolean(session?.pid && pidAlive(session.pid))
-    const task = Object.values(state.teamTasks || {}).find(item => item.targetChannel === channel && ['queued', 'dispatching', 'running'].includes(item.status))
+    const task = Object.values(state.teamTasks || {}).find(item => item.targetChannel === channel && isActiveTeamTask(item))
     return `| ${member.alias} | ${member.role} | <#${channel}> | ${live ? '🟢 live' : '💤 dormant'} | ${member.files ? 'enabled' : 'off'} | ${task ? `\`${task.id}\` · ${task.status}` : '—'} |`
   })
   return `*Session team \`${team.name}\`* · version ${team.version} · continuation: *${team.continuation?.mode || 'manual'}* · dispatch: *${teamDispatchMode(team)}*\n` +
@@ -5624,6 +5928,7 @@ function revokeCancelledTeamTasks(ids) {
     const target = task && state.sessions?.[task.targetSessionId]
     if (target?.teamActiveTaskId === id) {
       delete target.teamActiveTaskId
+      noteTeamAvailability(target, 'team_task_cancelled')
       discardQueuedTeamTaskPrompt(target, id)
       clearTeamInputReservation(target)
       clearTeamTurn(target)
@@ -7321,7 +7626,9 @@ setInterval(async () => {
       log('sweep: pid dead', s.pid, s.id.slice(0, 8))
       const switching = transitionForSession(state, s.id)
       stopPoller(s)
-      await failTeamTaskForSession(s, 'The worker process exited before completing its delegated task.')
+      await failTeamTaskForSession(s, 'The worker process exited before completing its delegated task.', {
+        preserveReported: true,
+      })
       clearPermissionsForPid(s.pid, 'session process exited')
       s.pid = null
       if (switching?.transition.source.sid === s.id && ['preflight', 'aligning'].includes(switching.transition.phase)) {

@@ -145,11 +145,23 @@
       not mutate any other session or channel.
 - [ ] Create one session team with a coordinator and two provider-diverse
       workers. Confirm private role context, alias-only peer discovery, safe busy
-      queueing, explicit interim reply, stable final return, and status cards in
+      queueing, explicit interim reply, stable turn report, explicit release,
+      and status cards in
       both channels.
 - [ ] Confirm a dispatch claim populates `startedAt` and changes durable worker
       availability to busy in the same state write; no status read can show a
       dispatching/running task on a ready worker.
+- [ ] For a new team task, declare pending `tests,ci,review,merge` gates and
+      confirm worker completion/release is rejected. Clear the gates, declare
+      completion, and confirm the provider final creates `awaiting_release`
+      without clearing the worker binding or stopping its tmux/process. Send a
+      coordinator follow-up and confirm it invalidates readiness; declare again,
+      release once, and verify the next queued task claims exactly once.
+- [ ] Restart the daemon with one `awaiting_release` task and confirm the exact
+      session binding, report delivery, pending coordinator message, freshness,
+      and last-transition fields recover without provider-input replay. Query an
+      accepted request ID with `sab team mutation` after simulating a client
+      timeout.
 - [ ] Exercise `sab team inbox` with active/target/status/since filters and two
       opaque cursor pages. Confirm the original instruction is present and an
       unrelated channel cannot see the task.
@@ -161,10 +173,11 @@
       permission prompt must reject it. Race two replacements with dispatch and
       confirm only the exact revision visible in both audit cards is claimed.
 - [ ] Suppress a Codex worker completion hook and confirm two stable live idle
-      observations produce `completed_with_warning`, release the worker, and
-      dispatch fresh queued work exactly once. Restart with an unproven
-      historical task and confirm it fails closed without replay, while a live
-      active turn is re-adopted without manual activation.
+      observations produce a warning-bearing `awaiting_release` report without
+      releasing the worker. Explicitly declare/release it, then confirm fresh
+      queued work dispatches exactly once. Restart with an unproven legacy task
+      and confirm it fails closed without replay, while a live active turn and
+      a durable reported task are re-adopted without manual activation.
 - [ ] Restart during a Pi worker turn. Confirm its persisted start timestamp
       alone does not restore worker proof or polling, a new native Pi event does,
       and an unproved historical turn releases its stale task/poller/input fences

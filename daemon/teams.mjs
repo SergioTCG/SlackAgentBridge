@@ -6,17 +6,24 @@ export const TEAM_MESSAGE_MAX_BYTES = 24 * 1024
 export const TEAM_MAX_MEMBERS = 20
 export const TEAM_MAX_TASKS = 500
 export const TEAM_MAX_REPLIES = 32
+export const TEAM_MAX_REPORTS = 32
 export const TEAM_MAX_ACTIVE_TASKS = 64
 export const TEAM_MAX_QUEUED_PER_WORKER = 8
+export const TEAM_MAX_PENDING_GATES = 16
 export const TEAM_TASK_TTL_MS = 7 * 24 * 60 * 60 * 1000
 export const TEAM_TURN_TTL_MS = 12 * 60 * 60 * 1000
 
 const TEAM_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/
 const TEAM_ALIAS_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/
 const REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const TASK_STATES = new Set(['queued', 'dispatching', 'running', 'completed', 'completed_with_warning', 'failed', 'cancelled'])
-const ACTIVE_TASK_STATES = new Set(['queued', 'dispatching', 'running'])
+const TASK_GATE_RE = /^[a-z0-9][a-z0-9._:-]{0,63}$/
+const TASK_STATES = new Set(['queued', 'dispatching', 'running', 'awaiting_release', 'completed', 'completed_with_warning', 'failed', 'cancelled'])
+const ACTIVE_TASK_STATES = new Set(['queued', 'dispatching', 'running', 'awaiting_release'])
+const WORKER_BOUND_TASK_STATES = new Set(['dispatching', 'running', 'awaiting_release'])
+const TERMINAL_TASK_STATES = new Set(['completed', 'completed_with_warning', 'failed', 'cancelled'])
 const TASK_CONTROL_MAX = 32
+const DEFAULT_COMPLETION_POLICY = 'coordinator-release'
+const LEGACY_COMPLETION_POLICY = 'provider-final'
 
 export class TeamError extends Error {
   constructor(code, message, status = 400) {
@@ -35,6 +42,59 @@ const bumpTask = (task, now) => {
   task.lifecycleVersion = Math.max(1, Number(task.lifecycleVersion) || 1) + 1
   task.updatedAt = nowIso(now)
   return task
+}
+
+function transitionTask(task, status, reason, { now = Date.now(), requestId = null } = {}) {
+  const from = String(task.status || '') || null
+  task.status = status
+  task.lastTransition = {
+    from,
+    to: status,
+    reason: String(reason || 'unspecified').slice(0, 200),
+    at: nowIso(now),
+    ...(requestId ? { requestId: String(requestId) } : {}),
+  }
+  return bumpTask(task, now)
+}
+
+export const isActiveTeamTask = task => ACTIVE_TASK_STATES.has(task?.status)
+export const isWorkerBoundTeamTask = task => WORKER_BOUND_TASK_STATES.has(task?.status)
+export const isTerminalTeamTask = task => TERMINAL_TASK_STATES.has(task?.status)
+
+// Tasks created before two-phase completion intentionally keep their original
+// provider-final behavior. New tasks opt in explicitly; no bulk state migration
+// may reinterpret an already-running worker turn during an upgrade.
+export function teamTaskCompletionPolicy(task) {
+  return task?.completionPolicy === DEFAULT_COMPLETION_POLICY
+    ? DEFAULT_COMPLETION_POLICY
+    : LEGACY_COMPLETION_POLICY
+}
+
+function normalizePendingGates(value) {
+  if (!Array.isArray(value)) throw new TeamError('invalid_pending_gates', 'Pending gates must be an array.')
+  const gates = [...new Set(value.map(item => String(item || '').trim().toLowerCase()).filter(Boolean))]
+  if (gates.length > TEAM_MAX_PENDING_GATES || gates.some(gate => !TASK_GATE_RE.test(gate))) {
+    throw new TeamError('invalid_pending_gates',
+      `Pending gates must contain at most ${TEAM_MAX_PENDING_GATES} bounded lowercase names.`)
+  }
+  return gates
+}
+
+function invalidateCompletionRequest(task, {
+  reason,
+  requestId = null,
+  now = Date.now(),
+} = {}) {
+  if (!task.completionRequest) return false
+  task.completionRequestHistory ||= []
+  task.completionRequestHistory.push({
+    ...task.completionRequest,
+    invalidatedAt: nowIso(now),
+    invalidatedReason: String(reason || 'task_changed').slice(0, 200),
+    ...(requestId ? { invalidatedByRequestId: String(requestId) } : {}),
+  })
+  task.completionRequest = null
+  return true
 }
 
 function normalizeSlug(value, kind, pattern) {
@@ -217,7 +277,8 @@ export function coordinatorPromptContext(state, channel) {
       'Role: coordinator',
       `Workers: ${names}`,
       'You may inspect live team state with `sab team context --json`, delegate with `sab team send --to ALIAS --stdin`, and collect bounded results with `sab team wait --task TASK_ID --json` or `sab team inbox --active --limit 20 --page --json`.',
-      'Use `sab team message --task TASK_ID --stdin` to amend or answer an active task, `sab team replace` or `sab team cancel` for queued work, and `sab team mode draining` to finish active work without dispatching more.',
+      'A worker provider final is a turn report, not task release. Inspect `pendingGates` and `releaseReady`; use `sab team message --task TASK_ID --stdin` for follow-up and `sab team release --task TASK_ID` only when the worker explicitly declared completion and every gate is clear.',
+      'Use `sab team continue --task TASK_ID --stdin` to create an audited linked continuation after an already-terminal task. Use `sab team replace` or `sab team cancel` for queued work, and `sab team mode draining` to finish active work without dispatching more.',
       'Only explicitly linked workers are reachable. Do not reveal or fabricate SAB task identities.',
     ].join('\n')
   }
@@ -237,6 +298,11 @@ function taskPayloadHash({ text, files = [] }) {
   }))
 }
 
+function taskRequestHash({ text, files = [], parentTaskId = null }) {
+  const payload = taskPayloadHash({ text, files })
+  return parentTaskId ? hash(JSON.stringify({ payload, parentTaskId: String(parentTaskId) })) : payload
+}
+
 export function createTeamTask(state, {
   teamId,
   sourceChannel,
@@ -246,6 +312,7 @@ export function createTeamTask(state, {
   target,
   text,
   files = [],
+  parentTaskId = null,
   requestId,
   id = randomId('task'),
   now = Date.now(),
@@ -263,7 +330,7 @@ export function createTeamTask(state, {
   const key = String(requestId || '')
   if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
   const { tasks } = stores(state, { create: true })
-  const payloadHash = taskPayloadHash({ text: prompt, files })
+  const payloadHash = taskRequestHash({ text: prompt, files, parentTaskId })
   const existing = Object.values(tasks).find(task => task.sourceChannel === sourceChannel && task.requestId === key)
   if (existing) {
     if (existing.teamId !== team.id || existing.targetChannel !== targetChannel || existing.payloadHash !== payloadHash) {
@@ -291,10 +358,14 @@ export function createTeamTask(state, {
     sourceNodeId,
     targetChannel,
     targetAlias: member.alias,
+    ...(parentTaskId ? { parentTaskId: String(parentTaskId) } : {}),
     targetSessionId: null,
     targetProvider: null,
     targetNodeId: null,
     status: 'queued',
+    completionPolicy: DEFAULT_COMPLETION_POLICY,
+    pendingGates: [],
+    completionRequest: null,
     lifecycleVersion: 1,
     instructionVersion: 1,
     instruction: prompt,
@@ -319,6 +390,7 @@ export function createTeamTask(state, {
     targetPayloadSlackTs: null,
     createdAt: nowIso(now),
     updatedAt: nowIso(now),
+    lastTransition: { from: null, to: 'queued', reason: 'created', at: nowIso(now), requestId: key },
     expiresAt: nowIso(now + TEAM_TASK_TTL_MS),
   }
   tasks[task.id] = task
@@ -331,9 +403,9 @@ export function teamTaskForRequest(state, sourceChannel, requestId) {
   return Object.values(stores(state).tasks).find(task => task.sourceChannel === sourceChannel && task.requestId === key) || null
 }
 
-export function assertTeamTaskRetry(state, task, { teamId, target, text, files = [] } = {}) {
+export function assertTeamTaskRetry(state, task, { teamId, target, text, files = [], parentTaskId = null } = {}) {
   const { channel } = resolveTeamPeer(state, teamId, target)
-  const payloadHash = taskPayloadHash({ text: String(text || '').trim(), files })
+  const payloadHash = taskRequestHash({ text: String(text || '').trim(), files, parentTaskId })
   if (task.teamId !== teamId || task.targetChannel !== channel || task.payloadHash !== payloadHash) {
     throw new TeamError('request_conflict', 'That request ID was already used for different team work.', 409)
   }
@@ -358,17 +430,19 @@ export function claimTeamTask(state, taskId, {
   if (teamDispatchMode(teamById(state, task.teamId)) === 'draining') {
     throw new TeamError('team_draining', 'This team is draining active work and will not dispatch queued tasks.', 409)
   }
-  task.status = 'dispatching'
   task.targetSessionId = String(targetSessionId || '')
   task.targetProvider = String(targetProvider || '')
   task.targetNodeId = String(targetNodeId || 'local')
   task.dispatchClaimedAt = nowIso(now)
-  return bumpTask(task, now)
+  return transitionTask(task, 'dispatching', 'worker_claimed', { now })
 }
 
 export function claimTeamTaskForSession(state, taskId, session, options = {}) {
   if (!session || typeof session !== 'object' || !session.id) {
     throw new TeamError('invalid_worker_session', 'An authoritative worker session is required.', 500)
+  }
+  if (session.teamActiveTaskId && session.teamActiveTaskId !== taskId) {
+    throw new TeamError('worker_busy', 'This worker session is already reserved by another task.', 409)
   }
   const {
     expectedInstructionVersion = null,
@@ -391,25 +465,27 @@ export function claimTeamTaskForSession(state, taskId, session, options = {}) {
   const task = claimTeamTask(state, taskId, { ...claimOptions, targetSessionId: session.id })
   task.startedAt ||= task.dispatchClaimedAt
   session.teamActiveTaskId = task.id
+  session.teamAvailabilityChangedAt = task.dispatchClaimedAt
+  session.teamAvailabilityReason = 'claimed_team_task'
   return task
 }
 
 export function markTeamTaskRunning(state, taskId, { now = Date.now() } = {}) {
   const task = teamTask(state, taskId)
   if (!['dispatching', 'running'].includes(task.status)) throw new TeamError('task_not_dispatching', 'The task is not being dispatched.', 409)
-  task.status = 'running'
   task.startedAt ||= nowIso(now)
   task.acceptedAt ||= nowIso(now)
   // Retain the original instruction separately for bounded inbox/audit output.
   // The mutable delivery envelope can still be released after acceptance.
   task.text = ''
-  return bumpTask(task, now)
+  return transitionTask(task, 'running', 'provider_accepted', { now })
 }
 
 export function appendTeamTaskReply(state, taskId, {
   fromChannel,
   text,
   files = [],
+  pendingGates = null,
   requestId,
   now = Date.now(),
   id = randomId('reply'),
@@ -421,7 +497,13 @@ export function appendTeamTaskReply(state, taskId, {
   if (textBytes(body) > TEAM_MESSAGE_MAX_BYTES) throw new TeamError('message_too_large', `Team replies may be at most ${TEAM_MESSAGE_MAX_BYTES} bytes.`, 413)
   const key = String(requestId || '')
   if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
-  const payloadHash = taskPayloadHash({ text: body, files })
+  const normalizedGates = pendingGates === null ? null : normalizePendingGates(pendingGates)
+  const payloadHash = normalizedGates === null
+    ? taskPayloadHash({ text: body, files })
+    : hash(JSON.stringify({
+        message: taskPayloadHash({ text: body, files }),
+        pendingGates: normalizedGates,
+      }))
   const existing = task.replies.find(reply => reply.requestId === key)
   if (existing) {
     if (existing.payloadHash !== payloadHash) throw new TeamError('request_conflict', 'That reply request ID was already used for different content.', 409)
@@ -435,6 +517,9 @@ export function appendTeamTaskReply(state, taskId, {
   }
   if (!ACTIVE_TASK_STATES.has(task.status)) throw new TeamError('task_not_active', 'That task no longer accepts replies.', 409)
   if (task.replies.length >= TEAM_MAX_REPLIES) throw new TeamError('reply_limit', 'This task reached its bounded reply limit.', 409)
+  if (normalizedGates !== null) invalidateCompletionRequest(task, {
+    reason: 'worker_checkpoint_changed', requestId: key, now,
+  })
   const reply = {
     id: String(id), requestId: key, payloadHash, fromChannel, text: body,
     files: files.map(file => ({
@@ -443,14 +528,194 @@ export function appendTeamTaskReply(state, taskId, {
     textSlackTs: null,
     fileDeliveryStatus: files.length ? 'pending' : 'none',
     fileDeliveryError: null,
+    ...(normalizedGates === null ? {} : { kind: 'checkpoint', pendingGates: normalizedGates }),
     createdAt: nowIso(now),
   }
   task.replies.push(reply)
+  if (normalizedGates !== null) {
+    task.pendingGates = normalizedGates
+    task.gatesUpdatedAt = nowIso(now)
+  }
   const accepted = task.status === 'dispatching'
   if (accepted) markTeamTaskRunning(state, task.id, { now })
   else bumpTask(task, now)
   reply.lifecycleVersion = task.lifecycleVersion
   return { reply, created: true, accepted }
+}
+
+export function appendTeamTaskCheckpoint(state, taskId, options = {}) {
+  if (!Object.hasOwn(options, 'pendingGates')) {
+    throw new TeamError('pending_gates_required', 'A checkpoint must declare its complete pending-gate list.')
+  }
+  return appendTeamTaskReply(state, taskId, options)
+}
+
+export function requestTeamTaskCompletion(state, taskId, {
+  targetSessionId,
+  fromChannel,
+  summary,
+  requestId,
+  now = Date.now(),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (task.targetChannel !== fromChannel || task.targetSessionId !== targetSessionId) {
+    throw new TeamError('completion_not_allowed', 'Only the exact assigned worker session may declare this task ready.', 403)
+  }
+  if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
+    throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
+  }
+  const text = String(summary || '').trim()
+  if (!text) throw new TeamError('empty_completion', 'Task completion needs a bounded summary.')
+  if (textBytes(text) > TEAM_MESSAGE_MAX_BYTES) {
+    throw new TeamError('message_too_large', `Team messages may be at most ${TEAM_MESSAGE_MAX_BYTES} bytes.`, 413)
+  }
+  const key = String(requestId || '')
+  if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
+  const payloadHash = hash(text)
+  const existing = [task.completionRequest, ...(task.completionRequestHistory || [])]
+    .find(item => item?.requestId === key)
+  if (existing) {
+    if (existing.payloadHash !== payloadHash) {
+      throw new TeamError('completion_already_requested', 'This task already has a different completion declaration.', 409)
+    }
+    return { task, request: existing, created: false }
+  }
+  if (task.completionRequest) {
+    throw new TeamError('completion_already_requested', 'This task already has a different active completion declaration.', 409)
+  }
+  const pending = normalizePendingGates(task.pendingGates || [])
+  if (pending.length) {
+    throw new TeamError('task_gates_pending', `Task completion is blocked by pending gates: ${pending.join(', ')}.`, 409)
+  }
+  task.completionRequest = {
+    requestId: key,
+    payloadHash,
+    summary: text,
+    requestedAt: nowIso(now),
+  }
+  bumpTask(task, now)
+  task.completionRequest.lifecycleVersion = task.lifecycleVersion
+  return { task, request: task.completionRequest, created: true }
+}
+
+function boundedResult(result) {
+  const text = String(result || '').trim()
+  return textBytes(text) > TEAM_MESSAGE_MAX_BYTES
+    ? Buffer.from(text, 'utf8').subarray(0, TEAM_MESSAGE_MAX_BYTES).toString('utf8') +
+      '\n\n[Result truncated in the team journal; see the worker Slack channel for the complete response.]'
+    : text
+}
+
+// A provider turn ending is an observation, not necessarily task completion.
+// New tasks retain their worker reservation until the worker has explicitly
+// declared readiness and the coordinator releases the task. Legacy records
+// intentionally preserve the historical provider-final behavior.
+export function reportTeamTaskTurn(state, taskId, {
+  targetSessionId,
+  result,
+  warning = null,
+  now = Date.now(),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (teamTaskCompletionPolicy(task) === LEGACY_COMPLETION_POLICY) {
+    return warning
+      ? completeTeamTaskWithWarning(state, taskId, { targetSessionId, result, warning, now })
+      : completeTeamTask(state, taskId, { targetSessionId, result, now })
+  }
+  if (task.targetSessionId !== targetSessionId) {
+    throw new TeamError('task_target_changed', 'The task belongs to another native session.', 409)
+  }
+  // Stop, App Server completion, and the idle fallback can converge on the
+  // same provider turn. Once that turn is reported, only a confirmed
+  // coordinator follow-up may return the task to running for another report.
+  if (task.status === 'awaiting_release') return task
+  if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
+    throw new TeamError('task_not_running', 'Only the assigned active task may report a completed provider turn.', 409)
+  }
+  task.result = boundedResult(result)
+  task.warning = warning ? String(warning).slice(0, 2000) : null
+  task.turnCompletedAt = nowIso(now)
+  task.reports ||= []
+  while (task.reports.length >= TEAM_MAX_REPORTS) {
+    const delivered = task.reports.findIndex(item => item.deliveryStatus === 'delivered')
+    if (delivered < 0) break
+    task.reports.splice(delivered, 1)
+  }
+  let report
+  if (task.reports.length >= TEAM_MAX_REPORTS) {
+    // Slack may be unavailable for many turns. Keep bounded state and preserve
+    // the newest authoritative report without rejecting provider finalization.
+    report = task.reports.at(-1)
+    report.result = task.result
+    report.warning = task.warning
+    report.deliveryStatus = 'pending'
+    report.deliveryError = null
+    report.coalescedCount = Number(report.coalescedCount || 1) + 1
+    report.createdAt = nowIso(now)
+  } else {
+    report = {
+      id: randomId('report'),
+      result: task.result,
+      warning: task.warning,
+      deliveryStatus: 'pending',
+      deliveryError: null,
+      slackTs: null,
+      createdAt: nowIso(now),
+    }
+    task.reports.push(report)
+  }
+  transitionTask(task, 'awaiting_release', warning
+    ? 'provider_turn_idle_without_completion_hook'
+    : 'provider_turn_completed', { now })
+  report.lifecycleVersion = task.lifecycleVersion
+  return task
+}
+
+export function releaseTeamTask(state, taskId, {
+  sourceChannel,
+  requestId,
+  now = Date.now(),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (task.sourceChannel !== sourceChannel) {
+    throw new TeamError('task_control_not_allowed', 'Only the task coordinator may release this task.', 403)
+  }
+  const payloadHash = hash('release')
+  const control = taskControlRequest(task, requestId, 'release', payloadHash)
+  if (task.terminalRequest?.kind === 'release') {
+    if (task.terminalRequest.requestId === control.key && task.terminalRequest.payloadHash === payloadHash) {
+      return { task, created: false }
+    }
+    throw new TeamError('task_not_awaiting_release', 'This task was already released.', 409)
+  }
+  if (control.existing && TERMINAL_TASK_STATES.has(task.status)) return { task, created: false }
+  if (task.status !== 'awaiting_release') {
+    throw new TeamError('task_not_awaiting_release', 'Only a reported task awaiting coordinator release may complete.', 409)
+  }
+  if (!task.completionRequest) {
+    throw new TeamError('completion_not_declared', 'The worker has not declared this task ready for release.', 409)
+  }
+  const pending = normalizePendingGates(task.pendingGates || [])
+  if (pending.length) {
+    throw new TeamError('task_gates_pending', `Task release is blocked by pending gates: ${pending.join(', ')}.`, 409)
+  }
+  // Release is a terminal safety valve and must remain available even when a
+  // long task used its bounded coordinator-message/control journal.
+  if (task.controlRequests.length < TASK_CONTROL_MAX) {
+    rememberTaskControl(task, control.key, 'release', payloadHash, now)
+  }
+  task.terminalRequest = {
+    requestId: control.key, kind: 'release', payloadHash, createdAt: nowIso(now),
+  }
+  task.result = task.result || task.completionRequest.summary
+  task.text = ''
+  task.files = []
+  task.completionDeliveryStatus = 'pending'
+  task.completionDeliveryError = null
+  task.completedAt = nowIso(now)
+  task.releasedAt = nowIso(now)
+  const status = task.warning ? 'completed_with_warning' : 'completed'
+  return { task: transitionTask(task, status, 'coordinator_released', { now, requestId: control.key }), created: true }
 }
 
 export function completeTeamTask(state, taskId, {
@@ -459,19 +724,18 @@ export function completeTeamTask(state, taskId, {
   now = Date.now(),
 } = {}) {
   const task = teamTask(state, taskId)
+  if (teamTaskCompletionPolicy(task) !== LEGACY_COMPLETION_POLICY) {
+    throw new TeamError('explicit_release_required', 'This task requires a worker completion declaration and coordinator release.', 409)
+  }
   if (!['dispatching', 'running'].includes(task.status)) throw new TeamError('task_not_running', 'Only the assigned active task may complete.', 409)
   if (task.targetSessionId !== targetSessionId) throw new TeamError('task_target_changed', 'The task belongs to another native session.', 409)
-  const text = String(result || '').trim()
-  task.status = 'completed'
-  task.result = textBytes(text) > TEAM_MESSAGE_MAX_BYTES
-    ? Buffer.from(text, 'utf8').subarray(0, TEAM_MESSAGE_MAX_BYTES).toString('utf8') + '\n\n[Result truncated in the team journal; see the worker Slack channel for the complete response.]'
-    : text
+  task.result = boundedResult(result)
   task.text = ''
   task.files = []
   task.completionDeliveryStatus = 'pending'
   task.completionDeliveryError = null
   task.completedAt = nowIso(now)
-  return bumpTask(task, now)
+  return transitionTask(task, 'completed', 'legacy_provider_final', { now })
 }
 
 export function completeTeamTaskWithWarning(state, taskId, {
@@ -481,37 +745,35 @@ export function completeTeamTaskWithWarning(state, taskId, {
   now = Date.now(),
 } = {}) {
   const task = teamTask(state, taskId)
+  if (teamTaskCompletionPolicy(task) !== LEGACY_COMPLETION_POLICY) {
+    throw new TeamError('explicit_release_required', 'This task requires a worker completion declaration and coordinator release.', 409)
+  }
   if (!['dispatching', 'running'].includes(task.status)) {
     throw new TeamError('task_not_running', 'Only the assigned active task may complete.', 409)
   }
   if (task.targetSessionId !== targetSessionId) {
     throw new TeamError('task_target_changed', 'The task belongs to another native session.', 409)
   }
-  const text = String(result || '').trim()
-  task.status = 'completed_with_warning'
-  task.result = textBytes(text) > TEAM_MESSAGE_MAX_BYTES
-    ? Buffer.from(text, 'utf8').subarray(0, TEAM_MESSAGE_MAX_BYTES).toString('utf8') + '\n\n[Result truncated in the team journal; see the worker Slack channel for the complete response.]'
-    : text
+  task.result = boundedResult(result)
   task.warning = String(warning || 'The provider completed without a reliable lifecycle completion hook.').slice(0, 2000)
   task.text = ''
   task.files = []
   task.completionDeliveryStatus = 'pending'
   task.completionDeliveryError = null
   task.completedAt = nowIso(now)
-  return bumpTask(task, now)
+  return transitionTask(task, 'completed_with_warning', 'legacy_provider_idle_without_completion_hook', { now })
 }
 
 export function failTeamTask(state, taskId, error, { now = Date.now(), cancelled = false } = {}) {
   const task = teamTask(state, taskId)
   if (!ACTIVE_TASK_STATES.has(task.status)) return task
-  task.status = cancelled ? 'cancelled' : 'failed'
   task.error = String(error || (cancelled ? 'Task cancelled.' : 'Task failed.')).slice(0, 2000)
   task.text = ''
   task.files = []
   task.completionDeliveryStatus = 'pending'
   task.completionDeliveryError = null
   task.completedAt = nowIso(now)
-  return bumpTask(task, now)
+  return transitionTask(task, cancelled ? 'cancelled' : 'failed', cancelled ? 'cancelled' : 'failed', { now })
 }
 
 function taskControlRequest(task, requestId, kind, payloadHash) {
@@ -546,7 +808,17 @@ export function cancelQueuedTeamTask(state, taskId, {
   const body = String(reason || 'Cancelled by the coordinator.').slice(0, 2000)
   const payloadHash = hash(body)
   const control = taskControlRequest(task, requestId, 'cancel', payloadHash)
-  if (task.status === 'cancelled') return task
+  if (task.status === 'cancelled') {
+    if (task.terminalRequest?.requestId === control.key && task.terminalRequest.payloadHash === payloadHash) return task
+    if (control.existing) return task
+    // Preserve the historical idempotent cancellation surface while making a
+    // new bounded request identity queryable when journal capacity permits.
+    if (task.controlRequests.length < TASK_CONTROL_MAX) {
+      rememberTaskControl(task, control.key, 'cancel', payloadHash, now)
+      bumpTask(task, now)
+    }
+    return task
+  }
   if (control.existing) return task
   if (task.status !== 'queued') throw new TeamError('task_not_queued', 'Only queued work may be cancelled.', 409)
   // Cancellation is the terminal safety valve and must remain available even
@@ -555,6 +827,7 @@ export function cancelQueuedTeamTask(state, taskId, {
   if (task.controlRequests.length < TASK_CONTROL_MAX) {
     rememberTaskControl(task, control.key, 'cancel', payloadHash, now)
   }
+  task.terminalRequest = { requestId: control.key, kind: 'cancel', payloadHash, createdAt: nowIso(now) }
   return failTeamTask(state, task.id, body, { now, cancelled: true })
 }
 
@@ -603,7 +876,7 @@ export function appendCoordinatorTaskMessage(state, taskId, {
   task.messages ||= []
   const existing = task.messages.find(message => message.requestId === control.key)
   if (control.existing || existing) return { message: existing, created: false }
-  if (!['dispatching', 'running'].includes(task.status)) {
+  if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_active', 'Only an active task accepts coordinator messages.', 409)
   }
   rememberTaskControl(task, control.key, 'message', payloadHash, now)
@@ -611,10 +884,40 @@ export function appendCoordinatorTaskMessage(state, taskId, {
     id: String(id), requestId: control.key, payloadHash, text: body,
     deliveryStatus: 'pending', deliveryError: null, sourceSlackTs: null,
     targetSlackTs: null, createdAt: nowIso(now),
+    resumesTask: task.status === 'awaiting_release',
   }
+  if (invalidateCompletionRequest(task, {
+    reason: 'coordinator_follow_up', requestId: control.key, now,
+  })) message.invalidatedCompletion = true
   task.messages.push(message)
   bumpTask(task, now)
   return { message, created: true }
+}
+
+export function beginCoordinatorTaskMessageDelivery(state, taskId, messageId, { now = Date.now() } = {}) {
+  const task = teamTask(state, taskId)
+  const message = (task.messages || []).find(item => item.id === messageId)
+  if (!message) throw new TeamError('task_message_not_found', 'That coordinator task message is unavailable.', 404)
+  if (message.resumesTask && task.status === 'awaiting_release') {
+    transitionTask(task, 'running', 'coordinator_follow_up_submitting', {
+      now, requestId: message.requestId,
+    })
+  }
+  return task
+}
+
+export function deferCoordinatorTaskMessageDelivery(state, taskId, messageId, { now = Date.now() } = {}) {
+  const task = teamTask(state, taskId)
+  const message = (task.messages || []).find(item => item.id === messageId)
+  if (!message) throw new TeamError('task_message_not_found', 'That coordinator task message is unavailable.', 404)
+  if (message.resumesTask && task.status === 'running' &&
+      task.lastTransition?.reason === 'coordinator_follow_up_submitting' &&
+      task.lastTransition?.requestId === message.requestId) {
+    transitionTask(task, 'awaiting_release', 'coordinator_follow_up_not_delivered', {
+      now, requestId: message.requestId,
+    })
+  }
+  return task
 }
 
 function cancelTasks(state, predicate, reason, now) {
@@ -696,11 +999,17 @@ export function publicTeamTask(task, callerChannel) {
   return {
     id: task.id,
     teamId: task.teamId,
+    parentTaskId: task.parentTaskId || null,
     direction: callerChannel === task.sourceChannel ? 'outgoing' : 'incoming',
     sourceAlias: 'coordinator',
     targetAlias: task.targetAlias,
     status: task.status,
     lifecycleVersion: Math.max(1, Number(task.lifecycleVersion) || 1),
+    completionPolicy: teamTaskCompletionPolicy(task),
+    pendingGates: [...(task.pendingGates || [])],
+    completionRequestedAt: task.completionRequest?.requestedAt || null,
+    completionSummary: task.completionRequest?.summary || null,
+    releaseReady: task.status === 'awaiting_release' && Boolean(task.completionRequest) && !(task.pendingGates || []).length,
     instruction: task.instruction ?? task.text ?? '',
     fileDeliveryStatus: task.fileDeliveryStatus,
     fileDeliveryError: task.fileDeliveryError,
@@ -716,6 +1025,8 @@ export function publicTeamTask(task, callerChannel) {
       })),
       fileDeliveryStatus: reply.fileDeliveryStatus,
       fileDeliveryError: reply.fileDeliveryError,
+      kind: reply.kind || 'progress',
+      pendingGates: reply.pendingGates || null,
       createdAt: reply.createdAt,
     })),
     messages: (task.messages || []).map(message => ({
@@ -725,26 +1036,140 @@ export function publicTeamTask(task, callerChannel) {
       deliveryError: message.deliveryError,
       createdAt: message.createdAt,
     })),
+    reports: (task.reports || []).map(report => ({
+      id: report.id,
+      result: report.result,
+      warning: report.warning || null,
+      deliveryStatus: report.deliveryStatus,
+      deliveryError: report.deliveryError,
+      createdAt: report.createdAt,
+      lifecycleVersion: report.lifecycleVersion,
+    })),
     result: task.result,
     warning: task.warning || null,
     error: task.error,
     createdAt: task.createdAt,
     startedAt: task.startedAt || null,
     completedAt: task.completedAt || null,
+    turnCompletedAt: task.turnCompletedAt || null,
+    updatedAt: task.updatedAt || task.createdAt,
+    lastTransition: task.lastTransition || null,
+    observedAt: nowIso(Date.now()),
     expiresAt: task.expiresAt,
   }
+}
+
+export function teamMutationForRequest(state, callerChannel, requestId, { taskId = null } = {}) {
+  const key = String(requestId || '')
+  if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
+  const visible = Object.values(stores(state).tasks).filter(task =>
+    (!taskId || task.id === taskId) &&
+    (task.sourceChannel === callerChannel || task.targetChannel === callerChannel))
+  const matches = []
+  for (const task of visible) {
+    if (task.sourceChannel === callerChannel && task.requestId === key) {
+      matches.push({ kind: task.parentTaskId ? 'continue' : 'send', resourceId: task.id, task, at: task.createdAt })
+    }
+    if (task.targetChannel === callerChannel) {
+      for (const reply of task.replies || []) {
+        if (reply.requestId === key) matches.push({
+          kind: reply.kind === 'checkpoint' ? 'checkpoint' : 'reply', resourceId: reply.id, task, at: reply.createdAt,
+        })
+      }
+      const completion = [task.completionRequest, ...(task.completionRequestHistory || [])]
+        .find(item => item?.requestId === key)
+      if (completion) matches.push({
+        kind: 'complete', resourceId: task.id, task, at: completion.requestedAt,
+      })
+    }
+    if (task.sourceChannel === callerChannel) {
+      if (task.terminalRequest?.requestId === key) matches.push({
+        kind: task.terminalRequest.kind || 'cancel', resourceId: task.id, task, at: task.terminalRequest.createdAt,
+      })
+      for (const control of task.controlRequests || []) {
+        if (control.requestId !== key) continue
+        if (task.terminalRequest?.requestId === key && control.kind === task.terminalRequest.kind) continue
+        const message = (task.messages || []).find(item => item.requestId === key)
+        matches.push({ kind: control.kind, resourceId: message?.id || task.id, task, at: control.createdAt })
+      }
+    }
+  }
+  if (!matches.length) throw new TeamError('mutation_not_found', 'No accepted team mutation matches that request ID.', 404)
+  if (matches.length > 1) throw new TeamError('ambiguous_request_id', 'That request ID matches more than one visible task; include its task ID.', 409)
+  const match = matches[0]
+  return {
+    requestId: key,
+    kind: match.kind,
+    status: 'accepted',
+    resourceId: match.resourceId,
+    taskId: match.task.id,
+    taskStatus: match.task.status,
+    lifecycleVersion: Math.max(1, Number(match.task.lifecycleVersion) || 1),
+    acceptedAt: match.at || match.task.updatedAt || match.task.createdAt,
+  }
+}
+
+// Repairs only redundant binding projections. It never changes a task status,
+// invents provider liveness, or chooses between conflicting active tasks.
+export function reconcileTeamSessionBindings(state, { now = Date.now() } = {}) {
+  const repairs = []
+  const anomalies = []
+  const sessions = state?.sessions || {}
+  const tasks = state?.teamTasks || {}
+  const exactTasksBySession = new Map()
+  for (const task of Object.values(tasks)) {
+    if (!isWorkerBoundTeamTask(task)) continue
+    const session = sessions[task.targetSessionId]
+    const exact = session && session.channel === task.targetChannel && state.channels?.[task.targetChannel] === session.id
+    if (!exact) continue
+    const existing = exactTasksBySession.get(session.id) || []
+    existing.push(task)
+    exactTasksBySession.set(session.id, existing)
+  }
+  for (const session of Object.values(sessions)) {
+    if (!session?.teamActiveTaskId) continue
+    const task = tasks[session.teamActiveTaskId]
+    const exact = task && isWorkerBoundTeamTask(task) && task.targetSessionId === session.id &&
+      task.targetChannel === session.channel && state.channels?.[session.channel] === session.id
+    if (exact) continue
+    const oldTaskId = session.teamActiveTaskId
+    delete session.teamActiveTaskId
+    session.teamAvailabilityChangedAt = nowIso(now)
+    session.teamAvailabilityReason = task ? 'cleared_stale_task_binding' : 'cleared_missing_task_binding'
+    repairs.push({ sessionId: session.id, taskId: oldTaskId, reason: session.teamAvailabilityReason })
+  }
+  for (const [sessionId, exactTasks] of exactTasksBySession) {
+    const session = sessions[sessionId]
+    if (exactTasks.length > 1) {
+      anomalies.push({
+        sessionId,
+        taskIds: exactTasks.map(task => task.id),
+        activeTaskId: session.teamActiveTaskId || null,
+        reason: 'conflicting_worker_task_bindings',
+      })
+      continue
+    }
+    const task = exactTasks[0]
+    if (!session.teamActiveTaskId) {
+      session.teamActiveTaskId = task.id
+      session.teamAvailabilityChangedAt = nowIso(now)
+      session.teamAvailabilityReason = 'restored_durable_task_binding'
+      repairs.push({ sessionId: session.id, taskId: task.id, reason: session.teamAvailabilityReason })
+    }
+  }
+  return { changed: repairs.length > 0, repairs, anomalies }
 }
 
 export function pruneTeamTasks(state, { now = Date.now(), max = TEAM_MAX_TASKS } = {}) {
   const { tasks } = stores(state)
   const removable = Object.values(tasks)
-    .filter(task => !ACTIVE_TASK_STATES.has(task.status) && teamTaskDeliverySettled(task) &&
+    .filter(task => !isActiveTeamTask(task) && teamTaskDeliverySettled(task) &&
       Date.parse(task.expiresAt || 0) <= now)
     .sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)))
   const removed = []
   for (const task of removable) { delete tasks[task.id]; removed.push(task) }
   const completed = Object.values(tasks)
-    .filter(task => !ACTIVE_TASK_STATES.has(task.status) && teamTaskDeliverySettled(task))
+    .filter(task => !isActiveTeamTask(task) && teamTaskDeliverySettled(task))
     .sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)))
   while (Object.keys(tasks).length > max && completed.length) {
     const task = completed.shift()
@@ -763,7 +1188,8 @@ export function teamTaskDeliverySettled(task) {
     return text && files
   })
   const messages = (task?.messages || []).every(message => ['delivered', 'failed'].includes(message.deliveryStatus))
-  return completion && replies && messages
+  const reports = (task?.reports || []).every(report => report.deliveryStatus === 'delivered')
+  return completion && replies && messages && reports
 }
 
 export function delegatedTaskPrompt(team, task, destinationFiles = []) {
@@ -777,8 +1203,10 @@ export function delegatedTaskPrompt(team, task, destinationFiles = []) {
     'Role: worker',
     `Task: ${task.id}`,
     'Origin: coordinator',
-    'Complete this task independently. Your stable final answer will be returned automatically to the coordinator.',
-    `Use \`sab team reply --task ${task.id} --stdin\` for useful interim findings. Use \`sab team send-file --task ${task.id} -- FILE_PATH\` to return files when file relay is enabled.`,
+    'A provider turn ending reports progress; it does not release this task or its worker reservation.',
+    `Use \`sab team checkpoint --task ${task.id} --pending GATE[,GATE] --stdin\` whenever tests, CI, runtime proof, review, or merge work remains. Use \`--pending none\` only when every declared gate is clear.`,
+    `Only after all work and gates are complete, declare readiness with \`sab team complete --task ${task.id} --stdin\` before your final answer. The coordinator then releases the task.`,
+    `Use \`sab team reply --task ${task.id} --stdin\` for other useful interim findings. Use \`sab team send-file --task ${task.id} -- FILE_PATH\` to return files when file relay is enabled.`,
     'You may not delegate this task to another SAB channel.',
     '</sab-team-task>',
     '',

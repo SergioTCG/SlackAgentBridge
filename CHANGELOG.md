@@ -6,6 +6,32 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- New session-team tasks now use explicit two-phase completion: bounded worker
+  checkpoints declare pending gates, worker completion declares readiness, and
+  an exact coordinator release is required before worker availability clears.
+- `sab team checkpoint`, `complete`, `release`, `continue`, and `mutation` add
+  gate tracking, linked post-completion follow-up, and queryable request-ID
+  receipts for ambiguous client outcomes.
+- Team context and task envelopes expose observation timestamps, current
+  availability reasons, and last durable transition reasons.
+
+### Changed
+
+- A provider final or continuously observed hookless Codex idle surface is now
+  a durable worker turn report, not implicit task completion. Coordinator
+  follow-up invalidates an earlier readiness declaration, while pre-upgrade
+  tasks retain their historical provider-final behavior.
+
+### Fixed
+
+- Restart reconciliation repairs only exact redundant session/task bindings,
+  preserves reported tasks and their worker reservations across daemon or
+  provider downtime, and refuses conflicting bindings instead of guessing.
+- Every team mutation returns its journaled request receipt; generated CLI
+  request IDs and safe retry/status guidance are retained across timeouts.
+
 ## [2.1.0] — 2026-09-08
 
 ### Added

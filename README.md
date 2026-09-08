@@ -208,8 +208,13 @@ sab upload --grant TOKEN -- FILE_PATH...
 sab team context --json
 sab team send --to WORKER_ALIAS --stdin
 sab team inbox --active --limit 20 --page --json
+sab team checkpoint --task TASK_ID --pending ci,review --stdin
+sab team complete --task TASK_ID --stdin
 sab team message --task TASK_ID --stdin
+sab team release --task TASK_ID
+sab team continue --task TASK_ID --stdin
 sab team cancel --task TASK_ID
+sab team mutation --request-id REQUEST_ID --task TASK_ID
 sab team mode draining
 sab team wait --task TASK_ID --json
 sab automation create ...
@@ -394,23 +399,34 @@ and `sab team replace` control one exact queued task, while `sab team message`
 adds an audited instruction or answer to the exact worker/session currently
 owning an active task.
 
+New tasks use two-phase completion. A provider final or a continuously proved
+hookless idle surface creates an `awaiting_release` turn report and keeps the
+worker reserved. Workers publish the complete list of unfinished gates with
+`sab team checkpoint`, clear that list and declare readiness with `sab team
+complete`, and only then may the coordinator use `sab team release`. A
+coordinator follow-up invalidates the previous readiness declaration. If work
+was already released accidentally, `sab team continue` creates a new, linked,
+auditable task rather than reopening a terminal journal entry.
+
 Eligible owner turns receive private, provider-neutral role/tool context. A
 delegated worker receives an exact task header, while collaborators receive no
 lateral authority. The JSON-safe `sab team` CLI supports peers, send, bounded
-filtered/paginated inbox, wait, reply, queued-task cancel/replace, active-task
+filtered/paginated inbox, wait, reply/checkpoint, explicit complete/release,
+linked continuation, mutation receipts, queued-task cancel/replace, active-task
 messaging, drain/resume, and task-bound file transfer. Tasks are atomically
 journaled, visibly posted in both channels, queued only for a safe idle worker,
-correlated with provider-stable final output, and fenced against restart/stale
+correlated with provider-stable turn reports, and fenced against restart/stale
 leg duplication. Dormant peers are never resurrected by another agent.
 
 If an exact live Codex worker visibly returns to its idle prompt after a task
-but omits the completion hook, SAB records `completed_with_warning` and releases
-the worker instead of fabricating a failure or replaying the work. An already
-idle task found during daemon boot has no equivalent continuous proof and still
-fails closed; fresh queued tasks can then dispatch once to the re-adopted idle
-session. Availability and the `queued → dispatching` task claim are persisted
-together, so a worker cannot briefly appear ready while its task is being
-assigned.
+but omits the completion hook, SAB records a warning-bearing turn report; it
+does not fabricate a failure, invent a final, or release the worker. An already
+idle pre-upgrade task found during daemon boot has no equivalent continuous
+proof and still fails closed. An `awaiting_release` task and its exact worker
+binding survive daemon restart, including while the provider is dormant.
+Availability and the `queued → dispatching` task claim are persisted together,
+and context output includes observation time plus the last task/availability
+transition reason.
 
 See [Session teams](docs/session-teams.md) for the complete workflow, limits,
 recovery behavior, and file boundary. Initial relay is local-node only; the
