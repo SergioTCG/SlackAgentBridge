@@ -218,3 +218,41 @@ test('startup failure releases a stranded maintenance marker while preserving qu
   }), 'draining')
   assert.equal(updating.has('session'), true)
 })
+
+test('startup recovery cannot release a newer input-fence owner', () => {
+  const olderOwner = Object.freeze({ generation: 1 })
+  const newerOwner = Object.freeze({ generation: 2 })
+  const pending = new Map([['session', ['newer operation owns this']]])
+  const updating = new Set(['session'])
+  const draining = new Set()
+  const owners = new Map([['session', newerOwner]])
+
+  assert.equal(recoverSessionInputFence('session', {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    drainingSessionIds: draining,
+    fenceOwners: owners,
+    expectedOwner: olderOwner,
+  }), 'superseded')
+  assert.equal(updating.has('session'), true)
+  assert.equal(owners.get('session'), newerOwner)
+  assert.deepEqual(pending.get('session'), ['newer operation owns this'])
+})
+
+test('native replacement transfers exact input-fence ownership', () => {
+  const owner = Object.freeze({ generation: 1 })
+  const updating = new Set(['old-session'])
+  const owners = new Map([['old-session', owner]])
+
+  rebindSessionRuntimeState('old-session', 'new-session', {
+    pendingBySession: new Map(),
+    updatingSessionIds: updating,
+    restartingSessionIds: new Set(),
+    wakingSessions: new Map(),
+    fenceOwners: owners,
+  })
+
+  assert.equal(owners.has('old-session'), false)
+  assert.equal(owners.get('new-session'), owner)
+  assert.equal(updating.has('new-session'), true)
+})

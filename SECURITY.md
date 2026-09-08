@@ -181,8 +181,10 @@ accounts, and the Mac user running the daemon.
   output, diffs, plans, reasoning, and partial deltas never enter either
   endpoint. Accepted commentary and finals are serialized in App Server source
   order before loopback delivery; a delayed earlier event therefore cannot be
-  made stale by a later final. Shutdown interrupts commentary backoff and gives
-  every already accepted stable final a bounded drain before the proxy exits;
+  made stale by a later final. Shutdown interrupts commentary backoff, closes
+  WebSocket ingress, and follows the latest accepted stable-final tail to
+  quiescence before the proxy exits. A queued completion frame therefore cannot
+  appear after a stale one-time shutdown snapshot;
   final retries remain spaced during shutdown so transient pressure cannot be
   collapsed into a lossy burst;
   the correlated App Server stays alive until that drain completes so ancestry

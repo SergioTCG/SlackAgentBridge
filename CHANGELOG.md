@@ -50,8 +50,11 @@ Notable changes to this project. Format based on
   prompt, so coordinator text cannot be pasted into an operator-choice UI.
 - Codex event-proxy shutdown now skips all queued commentary immediately rather
   than spending one request timeout per item ahead of an accepted stable final.
-  Stable finals retain their retry spacing during shutdown, and a rejected or
-  exhausted final makes the proxy/runner fail instead of reporting a clean drain.
+  It closes WebSocket ingress before following the current delivery tail to
+  quiescence, so a completion frame already queued by the socket cannot be lost
+  behind a stale shutdown snapshot. Stable finals retain their retry spacing
+  during shutdown, and a rejected or exhausted final makes the proxy/runner fail
+  instead of reporting a clean drain.
   A reconnected Pi stream resumes the sole ordered maintenance-input drain, so
   accepted prompts cannot remain fenced after extension reconnect; a superseded
   Pi stream cannot drain input reserved for its replacement, and no Pi stream
@@ -60,6 +63,10 @@ Notable changes to this project. Format based on
   card revisions remain retryable when either audit card is absent, and idle
   restart adoption revalidates the exact provider process after asynchronous
   Slack cleanup before releasing task or owner-turn fences.
+- Session-start and maintenance-input fences now carry opaque runtime ownership
+  generations across native identity replacement. A delayed metadata failure or
+  cleanup timer can release only its own generation, never a newer restart's
+  queued-input fence.
 - Concurrent queued-task replacements serialize their paired Slack audit-card
   updates. The final dispatch claim is bound to that same fully audited
   instruction revision, preventing a replacement from racing into a worker

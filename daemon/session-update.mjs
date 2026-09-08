@@ -60,6 +60,7 @@ export function rebindSessionRuntimeState(fromId, toId, {
   updatingSessionIds,
   restartingSessionIds,
   wakingSessions,
+  fenceOwners,
 } = {}) {
   if (!fromId || !toId || fromId === toId) return false
 
@@ -75,6 +76,10 @@ export function rebindSessionRuntimeState(fromId, toId, {
   if (wakingSessions?.has(fromId)) {
     if (!wakingSessions.has(toId)) wakingSessions.set(toId, wakingSessions.get(fromId))
     wakingSessions.delete(fromId)
+  }
+  if (fenceOwners?.has(fromId)) {
+    if (!fenceOwners.has(toId)) fenceOwners.set(toId, fenceOwners.get(fromId))
+    fenceOwners.delete(fromId)
   }
   return true
 }
@@ -100,10 +105,14 @@ export function recoverSessionInputFence(sessionId, {
   pendingBySession,
   updatingSessionIds,
   drainingSessionIds,
+  fenceOwners,
+  expectedOwner = null,
 } = {}) {
   if (!sessionId) return 'released'
+  if (expectedOwner && fenceOwners?.get(sessionId) !== expectedOwner) return 'superseded'
   if (drainingSessionIds?.has(sessionId)) return 'draining'
   updatingSessionIds?.delete(sessionId)
+  if (!expectedOwner || fenceOwners?.get(sessionId) === expectedOwner) fenceOwners?.delete(sessionId)
   return pendingBySession?.get(sessionId)?.length ? 'retry' : 'released'
 }
 
@@ -114,6 +123,8 @@ export async function drainSessionInputQueue(sessionIdentity, {
   pendingBySession,
   updatingSessionIds,
   drainingSessionIds,
+  fenceOwners,
+  expectedOwner = null,
   deliver,
 } = {}) {
   const resolveIdentity = typeof sessionIdentity === 'function' ? sessionIdentity : () => sessionIdentity
@@ -149,8 +160,12 @@ export async function drainSessionInputQueue(sessionIdentity, {
       }
     }
     const sessionId = followReplacement()
+    if (expectedOwner && fenceOwners?.get(sessionId) !== expectedOwner) {
+      throw new Error('session input fence ownership changed during delivery')
+    }
     pendingBySession?.delete(sessionId)
     updatingSessionIds?.delete(sessionId)
+    if (!expectedOwner || fenceOwners?.get(sessionId) === expectedOwner) fenceOwners?.delete(sessionId)
     completed = true
     return true
   } finally {
@@ -183,8 +198,8 @@ export async function runBulkSessionUpdate(sessions, {
         continue
       }
       try {
-        await stopSession(session)
-        stopped.push(session)
+        const stopResult = await stopSession(session)
+        stopped.push({ session, stopResult })
       } catch (error) {
         results.push({ session, provider, status: 'failed', phase: 'stop', error: String(error?.message || error) })
       }
@@ -196,9 +211,9 @@ export async function runBulkSessionUpdate(sessions, {
     try { update = await updateProvider(provider) } catch (error) { updateError = String(error?.message || error) }
     providers.push({ provider, update, error: updateError })
 
-    for (const session of stopped) {
+    for (const { session, stopResult } of stopped) {
       try {
-        await resumeSession(session, { update, updateError })
+        await resumeSession(session, { update, updateError }, stopResult)
         results.push({ session, provider, status: 'resumed', update, updateError })
       } catch (error) {
         results.push({ session, provider, status: 'failed', phase: 'resume', error: String(error?.message || error), update, updateError })

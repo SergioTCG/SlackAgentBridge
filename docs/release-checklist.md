@@ -76,6 +76,8 @@
       correlated App Server remains alive for daemon ancestry validation.
 - [ ] A transient final-delivery rejection during shutdown observes retry
       spacing and succeeds when the loopback endpoint recovers.
+- [ ] SIGTERM immediately after an App Server completion frame closes ingress
+      first and still delivers the exact fallback final once before proxy exit.
 - [ ] Exhausting that bounded Codex shutdown drain produces a visible nonzero
       runner failure with a bounded diagnostic rather than silent success.
 - [ ] New sessions are headless; Slack interaction works with no Ghostty window.
@@ -120,6 +122,8 @@
 - [ ] A failed wake or SessionStart metadata operation preserves queued input,
       clears stale maintenance ownership, reports `/sab-update`, and a later
       owner message retries a truly dormant session without duplication.
+- [ ] A delayed failed SessionStart cannot clear a newer maintenance generation,
+      including when the same session record was rebound to a new native ID.
 - [ ] `/sab-account` works only for Claude and `/sab-run` only for Pi.
 - [ ] Claude/Codex permission relay and Pi safe-mode/project-trust decisions work.
 - [ ] Pi image input, adaptive routing, plan/approve, pause/resume, all budgets,

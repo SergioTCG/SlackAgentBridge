@@ -273,6 +273,22 @@ const restarting = new Set() // session ids intentionally restarting (suppress t
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
 const drainingSessionInput = new Set() // exact sessions serially flushing input queued across a wake/restart
 const sessionInputDrainOwners = new WeakSet() // stable session objects reserve one scheduler across native id replacement
+const sessionInputFenceOwners = new Map() // native id → opaque owner; stale async failures cannot release a newer fence
+let sessionInputFenceGeneration = 0
+
+function beginSessionInputFence(sessionId) {
+  const owner = Object.freeze({ generation: ++sessionInputFenceGeneration })
+  updatingSessions.add(sessionId)
+  sessionInputFenceOwners.set(sessionId, owner)
+  return owner
+}
+
+function ensureSessionInputFence(sessionId) {
+  if (updatingSessions.has(sessionId) && sessionInputFenceOwners.has(sessionId)) {
+    return sessionInputFenceOwners.get(sessionId)
+  }
+  return beginSessionInputFence(sessionId)
+}
 const pendingSessionStartTmux = new Map() // sid → tmux while Slack/startup metadata is still being established
 const completedSessionStartTmux = new Map() // sid → tmux only after startup metadata is safe for input
 let bulkUpdateRunning = false
@@ -1448,14 +1464,16 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
   // consumer under the replacement id.
   if (sessionInputDrainOwners.has(session)) return false
   sessionInputDrainOwners.add(session)
-  updatingSessions.add(session.id)
+  const fenceOwner = ensureSessionInputFence(session.id)
   const timer = setTimeout(async () => {
     try {
-      if (!updatingSessions.has(session.id)) return
+      if (!updatingSessions.has(session.id) || sessionInputFenceOwners.get(session.id) !== fenceOwner) return
       await drainSessionInputQueue(() => session.id, {
         pendingBySession: pendingBySid,
         updatingSessionIds: updatingSessions,
         drainingSessionIds: drainingSessionInput,
+        fenceOwners: sessionInputFenceOwners,
+        expectedOwner: fenceOwner,
         deliver: async m => {
           const currentSid = session.id
           const prompt = queuedPromptText(m)
@@ -1483,6 +1501,8 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
         pendingBySession: pendingBySid,
         updatingSessionIds: updatingSessions,
         drainingSessionIds: drainingSessionInput,
+        fenceOwners: sessionInputFenceOwners,
+        expectedOwner: fenceOwner,
       })
       await post(session.channel,
         '⚠️ The resumed provider did not accept its queued input. The queue remains fenced; retry this exact session with `/sab-update`.').catch(() => {})
@@ -1502,7 +1522,9 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
   // Install the input fence synchronously, before any Slack API await below.
   // Maintenance already owns this fence; ordinary resurrection acquires it
   // whenever an accepted prompt is waiting for the replacement input surface.
-  if (tmux && (updatingSessions.has(sid) || pendingBySid.get(sid)?.length)) updatingSessions.add(sid)
+  const fenceOwner = tmux && (updatingSessions.has(sid) || pendingBySid.get(sid)?.length)
+    ? ensureSessionInputFence(sid)
+    : null
   try {
     pendingSpawnChannels.delete(tmux)
     const ch = await ensureChannel(session)
@@ -1515,6 +1537,9 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
     // Publish completion only after every awaited metadata operation succeeds.
     // A Pi stream may attach while this handler is still running, but it must
     // not deliver preserved input until this exact startup is fully accepted.
+    if (session.id !== sid || session.tmux !== tmux || state.sessions?.[sid] !== session) {
+      throw new Error('session identity changed while startup metadata was being completed')
+    }
     if (pendingSessionStartTmux.get(sid) === tmux) pendingSessionStartTmux.delete(sid)
     completedSessionStartTmux.set(sid, tmux)
 
@@ -1529,11 +1554,16 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
   } catch (error) {
     if (pendingSessionStartTmux.get(sid) === tmux) pendingSessionStartTmux.delete(sid)
     if (completedSessionStartTmux.get(sid) === tmux) completedSessionStartTmux.delete(sid)
-    const recovery = recoverSessionInputFence(session.id, {
-      pendingBySession: pendingBySid,
-      updatingSessionIds: updatingSessions,
-      drainingSessionIds: drainingSessionInput,
-    })
+    const exactStartup = session.id === sid && session.tmux === tmux && state.sessions?.[sid] === session
+    const recovery = fenceOwner && exactStartup
+      ? recoverSessionInputFence(sid, {
+          pendingBySession: pendingBySid,
+          updatingSessionIds: updatingSessions,
+          drainingSessionIds: drainingSessionInput,
+          fenceOwners: sessionInputFenceOwners,
+          expectedOwner: fenceOwner,
+        })
+      : 'superseded'
     if (recovery === 'retry' && session.channel) {
       await post(session.channel,
         '⚠️ Session startup metadata could not be completed. Queued input was preserved; retry this exact session with `/sab-update`.').catch(() => {})
@@ -1638,6 +1668,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       updatingSessionIds: updatingSessions,
       restartingSessionIds: restarting,
       wakingSessions: resurrectInFlight,
+      fenceOwners: sessionInputFenceOwners,
     })
     artifactGrants.rebind({
       fromSessionId: priorSid,
@@ -2837,15 +2868,21 @@ async function updateProviderCli(provider) {
   return { provider, before, after, note, summary: ver, failed: /error|fail/i.test(note) }
 }
 
-function scheduleUpdateGuardCleanup(sessionOrId) {
+function scheduleUpdateGuardCleanup(sessionOrId, expectedOwner = null) {
+  const capturedOwner = expectedOwner || sessionInputFenceOwners.get(
+    typeof sessionOrId === 'string' ? sessionOrId : sessionOrId?.id,
+  ) || null
   const timer = setTimeout(() => {
     const sessionId = typeof sessionOrId === 'string' ? sessionOrId : sessionOrId?.id
     if (!sessionId) return
+    if (capturedOwner && sessionInputFenceOwners.get(sessionId) !== capturedOwner) return
     restarting.delete(sessionId)
     const recovery = recoverSessionInputFence(sessionId, {
       pendingBySession: pendingBySid,
       updatingSessionIds: updatingSessions,
       drainingSessionIds: drainingSessionInput,
+      fenceOwners: sessionInputFenceOwners,
+      expectedOwner: capturedOwner,
     })
     if (recovery !== 'released') log(`${recovery === 'draining' ? 'retained' : 'released'} update guard for undrained input`, sessionId.slice(0, 8))
   }, 60000)
@@ -2871,17 +2908,23 @@ function reserveSessionMaintenance(session, { expectedSessionId = null } = {}) {
   // Both sets are intentional: `restarting` fences stale provider hooks while
   // `updatingSessions` queues prompts and rejects overlapping owner controls.
   restarting.add(sessionId)
-  updatingSessions.add(sessionId)
-  return Object.freeze({ sessionId, channel })
+  const fenceOwner = beginSessionInputFence(sessionId)
+  return Object.freeze({ sessionId, channel, fenceOwner })
 }
 
 function releaseSessionMaintenance(reservation, currentSession = null) {
-  if (!reservation?.sessionId) return
-  restarting.delete(reservation.sessionId)
-  updatingSessions.delete(reservation.sessionId)
-  if (currentSession?.id && currentSession.id !== reservation.sessionId) {
-    restarting.delete(currentSession.id)
-    updatingSessions.delete(currentSession.id)
+  if (!reservation?.sessionId || !reservation.fenceOwner) return
+  const candidates = new Set([reservation.sessionId, currentSession?.id].filter(Boolean))
+  for (const sessionId of candidates) {
+    if (sessionInputFenceOwners.get(sessionId) !== reservation.fenceOwner) continue
+    restarting.delete(sessionId)
+    recoverSessionInputFence(sessionId, {
+      pendingBySession: pendingBySid,
+      updatingSessionIds: updatingSessions,
+      drainingSessionIds: drainingSessionInput,
+      fenceOwners: sessionInputFenceOwners,
+      expectedOwner: reservation.fenceOwner,
+    })
   }
 }
 
@@ -2909,14 +2952,17 @@ async function stopSessionForUpdate(session, message, { expectedSessionId = null
   const reservation = reserveSessionMaintenance(session, { expectedSessionId })
   try {
     await stopReservedSession(session, reservation, message)
-    return reservation.sessionId
+    return reservation
   } catch (error) {
     releaseSessionMaintenance(reservation, session)
     throw error
   }
 }
 
-async function resumeUpdatedSession(session, update, updateError = null, { expectedSessionId = session.id } = {}) {
+async function resumeUpdatedSession(session, update, updateError = null, {
+  expectedSessionId = session.id,
+  fenceOwner = null,
+} = {}) {
   const reservedChannel = session.channel
   if (session.id !== expectedSessionId ||
       authoritativeManagementSession(reservedChannel, expectedSessionId) !== session) {
@@ -2932,25 +2978,29 @@ async function resumeUpdatedSession(session, update, updateError = null, { expec
   }
   await resurrect(session)
   if (!session.tmux || !(await tmuxAlive(session.tmux))) throw new Error('replacement tmux session did not become active')
-  scheduleUpdateGuardCleanup(session) // the replacement input drain normally clears this first
+  scheduleUpdateGuardCleanup(session, fenceOwner) // the replacement input drain normally clears this first
 }
 
 // /sab-update: stop this session's agent, update the CLI if a newer build exists,
 // then resume the same conversation with identical launch flags.
 async function updateAndRestart(session, { expectedSessionId = null } = {}) {
   const updateSessionId = expectedSessionId || session.id
+  let reservation = null
   if (bulkUpdateRunning) return post(session.channel, '⏳ A bridge-wide session update is already running. This session will be included if it is idle.')
   if (updatingSessions.has(updateSessionId)) return post(session.channel, '⏳ This session is already updating.')
   const provider = providerOf(session)
   const label = providerLabel(provider)
   try {
-    await stopSessionForUpdate(session,
+    reservation = await stopSessionForUpdate(session,
       `🔄 *Restarting ${path.basename(session.cwd)}* — stopping ${label}, checking for updates, then resuming with the same flags.`,
       { expectedSessionId: updateSessionId })
     const update = await updateProviderCli(provider)
-    await resumeUpdatedSession(session, update, null, { expectedSessionId: updateSessionId })
+    await resumeUpdatedSession(session, update, null, {
+      expectedSessionId: updateSessionId,
+      fenceOwner: reservation.fenceOwner,
+    })
   } catch (error) {
-    releaseSessionMaintenance({ sessionId: updateSessionId }, session)
+    if (reservation) releaseSessionMaintenance(reservation, session)
     throw error
   }
 }
@@ -3030,11 +3080,16 @@ async function updateAllSessions(channel) {
       stopSession: session => stopSessionForUpdate(session,
         `🔄 *Scheduled maintenance* — updating ${providerLabel(providerOf(session))}, then resuming this conversation with the same flags.`),
       updateProvider: updateProviderCli,
-      resumeSession: (session, { update, updateError }) => resumeUpdatedSession(session, update, updateError),
+      resumeSession: async (session, { update, updateError }, reservation) => {
+        try {
+          await resumeUpdatedSession(session, update, updateError, { fenceOwner: reservation?.fenceOwner })
+        } catch (error) {
+          if (reservation) releaseSessionMaintenance(reservation, session)
+          throw error
+        }
+      },
     })
     for (const item of result.results.filter(entry => entry.status === 'failed')) {
-      restarting.delete(item.session.id)
-      updatingSessions.delete(item.session.id)
       await post(item.session.channel,
         `❌ *Session update failed during ${item.phase}* — ${item.error.slice(0, 800)}. The conversation is preserved; write here to retry waking it.`).catch(() => {})
     }
@@ -5132,7 +5187,7 @@ async function restartSessionWithMutation(session, {
     if (!session.tmux || !(await tmuxAlive(session.tmux))) {
       throw new Error('replacement tmux session did not become active')
     }
-    scheduleUpdateGuardCleanup(session) // the replacement input drain normally clears this first
+    scheduleUpdateGuardCleanup(session, reservation.fenceOwner) // the replacement input drain normally clears this first
   } catch (error) {
     releaseSessionMaintenance(reservation, session)
     throw error

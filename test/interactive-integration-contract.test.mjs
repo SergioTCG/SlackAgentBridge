@@ -65,7 +65,8 @@ test('session update ownership is reserved before Slack and follows a native ide
   const reserve = /function reserveSessionMaintenance\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(reserve, /const sessionId = expectedSessionId \|\| session\?\.id/)
   assert.match(reserve, /restarting\.add\(sessionId\)/)
-  assert.match(reserve, /updatingSessions\.add\(sessionId\)/)
+  assert.match(reserve, /beginSessionInputFence\(sessionId\)/)
+  assert.match(reserve, /fenceOwner/)
   assert.match(reserve, /resurrectInFlight\.has\(sessionId\)/)
 
   const stop = /async function stopSessionForUpdate\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
@@ -74,13 +75,13 @@ test('session update ownership is reserved before Slack and follows a native ide
 
   const update = /async function updateAndRestart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(update, /const updateSessionId = expectedSessionId \|\| session\.id/)
-  assert.match(update, /releaseSessionMaintenance\(\{ sessionId: updateSessionId \}, session\)/)
+  assert.match(update, /if \(reservation\) releaseSessionMaintenance\(reservation, session\)/)
   assert.match(daemon, /rebindSessionRuntimeState\(priorSid, sid, \{[\s\S]{0,500}pendingBySession: pendingBySid/)
 })
 
 test('replacement startup drains all queued input before releasing direct delivery', () => {
   const completion = /async function completeAuthoritativeSessionStart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
-  assert.match(completion, /updatingSessions\.add\(sid\)/)
+  assert.match(completion, /ensureSessionInputFence\(sid\)/)
   assert.match(completion, /scheduleSessionInputDrain\(session, provider, tmux\)/)
   const drain = /function scheduleSessionInputDrain\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
   assert.match(drain, /drainSessionInputQueue\(\(\) => session\.id/)
@@ -122,7 +123,9 @@ test('the ordered startup drain is the sole consumer of maintenance input', () =
 
 test('session-start metadata failure releases maintenance for an explicit retry', () => {
   const completion = /async function completeAuthoritativeSessionStart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
-  assert.match(completion, /recoverSessionInputFence\(session\.id/)
+  assert.match(completion, /const exactStartup = session\.id === sid/)
+  assert.match(completion, /recoverSessionInputFence\(sid/)
+  assert.match(completion, /expectedOwner: fenceOwner/)
 })
 
 test('provider maintenance blocks overlapping session mutations but leaves observation available', () => {

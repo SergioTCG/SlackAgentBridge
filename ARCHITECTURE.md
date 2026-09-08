@@ -216,8 +216,11 @@ record across native identity replacement, so competing lifecycle and Pi-stream
 callbacks cannot start consumers under the old and new ids. A Pi stream can
 schedule that drain only after the exact SessionStart has completed its Slack
 metadata work. A failed delivery restores the undelivered tail; a failed wake
-or metadata setup releases only the stale maintenance marker
-so an explicit update or later message can retry the dormant session. A stale
+or metadata setup releases only the exact opaque fence generation acquired by
+that startup. Native identity replacement carries that ownership forward, and
+a delayed failure cannot clear a newer restart's fence. This releases only the
+stale maintenance marker so an explicit update or later message can retry the
+dormant session. A stale
 reservation still cannot stop or resume an unrelated replacement. Standby,
 provisional, stale, dormant, and rebound records are never bulk-restarted.
 
@@ -467,8 +470,10 @@ hook, addressing Codex App Server releases that omit Stop without parsing the
 transcript or terminal. It never emits commands, command output, diffs, plans,
 reasoning, or deltas. Stable commentary/final deliveries retain their App
 Server source order across loopback retries, so a later final cannot overtake
-an earlier response. On proxy shutdown, commentary backoff is curtailed and
-the accepted delivery tail is drained for up to 30 seconds. Stable finals keep
+an earlier response. On proxy shutdown, commentary backoff is curtailed, both
+WebSocket ingress surfaces close to establish a final frame boundary, and the
+latest accepted delivery tail is followed until it is stable for one event-loop
+turn, for up to 30 seconds. Stable finals keep
 their real retry spacing during that drain, so transient pressure is not turned
 into an immediate exhausted burst. The runner keeps the correlated App Server
 alive until that drain finishes so the daemon can still prove the delivery's

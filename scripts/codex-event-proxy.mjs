@@ -210,17 +210,44 @@ server.on('listening', () => {
 server.on('error', error => fail(error.message))
 
 let shutdownPromise = null
+function closeWebSocket(socket, reason) {
+  if (!socket || socket.readyState === WebSocket.CLOSED) return Promise.resolve()
+  const closed = new Promise(resolve => socket.once('close', resolve))
+  if (socket.readyState === WebSocket.OPEN) socket.close(1001, reason)
+  else if (socket.readyState === WebSocket.CONNECTING) socket.terminate()
+  return closed
+}
+
+async function drainStableDeliveriesAfterIngress() {
+  // A signal can run after an upstream frame reached the socket but before ws
+  // invokes its `message` listener. Establish the close listeners first, then
+  // close both ingress surfaces. The upstream close event is ordered after all
+  // accepted message events, so no final can be appended after this boundary.
+  const upstreamClosed = closeWebSocket(activeUpstream, 'bridge stopping')
+  const clientClosed = closeWebSocket(activeClient, 'bridge stopping')
+  server.close()
+  await Promise.all([upstreamClosed, clientClosed])
+
+  // Let message callbacks append their deliveries, then follow the tail until
+  // one complete event-loop turn observes no replacement. A one-time snapshot
+  // is unsafe because inspectFrame reserves delivery synchronously.
+  await new Promise(resolve => setImmediate(resolve))
+  for (;;) {
+    const tail = deliveryTail
+    await tail
+    await new Promise(resolve => setImmediate(resolve))
+    if (tail === deliveryTail) return !stableDeliveryFailure
+  }
+}
+
 function shutdown() {
   if (shutdownPromise) return shutdownPromise
   shuttingDown = true
   resolveShutdownSignal()
   if (activeRequest?.label === 'commentary') activeRequest.controller.abort()
-  if (activeClient?.readyState === WebSocket.OPEN) activeClient.close(1001, 'bridge stopping')
-  if (activeUpstream?.readyState === WebSocket.OPEN) activeUpstream.close(1001, 'bridge stopping')
-  server.close()
   const timeout = new Promise(resolve => setTimeout(() => resolve(false), SHUTDOWN_DRAIN_MS))
   shutdownPromise = Promise.race([
-    deliveryTail.then(() => !stableDeliveryFailure),
+    drainStableDeliveriesAfterIngress(),
     timeout,
   ]).then(drained => {
     if (!drained) {

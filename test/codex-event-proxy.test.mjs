@@ -173,6 +173,58 @@ test('event proxy drains a queued fallback final when shutdown interrupts commen
   }
 })
 
+test('shutdown closes WebSocket ingress before awaiting a just-flushed fallback final', async () => {
+  const finals = []
+  const daemon = http.createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += chunk
+    if (request.url.startsWith('/codex/final')) finals.push(JSON.parse(body))
+    response.writeHead(202); response.end('accepted')
+  })
+  const daemonPort = await listen(daemon)
+  const upstream = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await once(upstream, 'listening')
+  const proxy = spawn(process.execPath, [proxyScript.pathname,
+    '--upstream', `ws://127.0.0.1:${upstream.address().port}`,
+    '--agent-pid', String(process.pid), '--tmux', 'ccs-ingress-drain',
+    '--daemon', `http://127.0.0.1:${daemonPort}/codex/commentary`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = ''
+  proxy.stdout.on('data', chunk => { stdout += chunk })
+  let client
+  try {
+    const proxyUrl = await waitFor(() => stdout.match(/ws:\/\/127\.0\.0\.1:\d+/)?.[0])
+    const serverConnection = once(upstream, 'connection')
+    client = new WebSocket(proxyUrl)
+    await once(client, 'open')
+    const [serverSocket] = await serverConnection
+    const send = frame => new Promise((resolve, reject) =>
+      serverSocket.send(JSON.stringify(frame), error => error ? reject(error) : resolve()))
+    await send({
+      method: 'item/completed', params: { threadId: 'thread-ingress', turnId: 'turn-ingress', item: {
+        id: 'final-ingress', type: 'agentMessage', phase: 'final_answer', text: 'Must survive immediate shutdown.',
+      } },
+    })
+    await send({
+      method: 'turn/completed', params: { threadId: 'thread-ingress', turn: {
+        id: 'turn-ingress', status: 'completed', items: [],
+      } },
+    })
+    // The frames are flushed by the App Server, but deliberately do not wait
+    // for the proxy's message callback before asking it to terminate.
+    proxy.kill('SIGTERM')
+    await once(proxy, 'exit')
+    assert.equal(proxy.exitCode, 0)
+    assert.deepEqual(finals.map(final => final.itemId), ['final-ingress'])
+  } finally {
+    client?.terminate()
+    if (proxy.exitCode === null && proxy.signalCode === null) proxy.kill('SIGKILL')
+    upstream.close()
+    daemon.closeAllConnections?.()
+    daemon.close()
+  }
+})
+
 test('shutdown keeps transient final retries spaced and exits only after delivery succeeds', async () => {
   const finalAttempts = []
   const daemon = http.createServer(async (request, response) => {
