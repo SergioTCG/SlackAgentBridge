@@ -1600,12 +1600,12 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       candidate?.id !== sid && candidate.tmux === requestedTmux && providerOf(candidate) === provider)
     : null
   if (!replacement) return processHook(body, ppid, tmux, flags, account, requestedProvider)
-  sessionReplacementHooks.begin(replacement)
-  try { return await processHook(body, ppid, tmux, flags, account, requestedProvider) }
-  finally { sessionReplacementHooks.finish(replacement) }
+  const replacementHook = sessionReplacementHooks.begin(replacement)
+  try { return await processHook(body, ppid, tmux, flags, account, requestedProvider, replacementHook) }
+  finally { sessionReplacementHooks.finish(replacementHook) }
 }
 
-async function processHook(body, ppid, tmux, flags, account, requestedProvider = 'claude') {
+async function processHook(body, ppid, tmux, flags, account, requestedProvider = 'claude', replacementHook = null) {
   const provider = normalizeProvider(requestedProvider)
   if (!provider) return
   const ev = body.hook_event_name
@@ -1711,7 +1711,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       tokens: artifactGrantTokensFromPrompts([
         ...(pendingBySid.get(sid) || []),
         ...(sessionInputDrainPrompts.get(session) || []),
-        ...sessionReplacementHooks.prompts(session),
+        ...sessionReplacementHooks.prompts(replacementHook),
       ]),
     })
     session.id = sid

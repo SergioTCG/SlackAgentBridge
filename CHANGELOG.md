@@ -6,6 +6,14 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.17] — 2026-09-08
+
+### Fixed
+
+- Concurrent native replacement hooks now retain separate, invocation-scoped
+  snapshots of only the prompts that overlapped each hook. A later replacement
+  can no longer inherit an earlier hook's accepted artifact-grant authority.
+
 ## [2.1.0-rc.16] — 2026-09-08
 
 ### Fixed

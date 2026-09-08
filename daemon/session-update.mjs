@@ -92,11 +92,14 @@ export function rebindSessionRuntimeState(fromId, toId, {
 export function createSessionReplacementHookTracker() {
   const live = new WeakMap()
   const hooks = new WeakMap()
+  const addPrompt = (handle, prompt) => {
+    if (!handle.prompts.includes(prompt)) handle.prompts.push(prompt)
+  }
   const capture = (owner, prompts) => {
     const active = hooks.get(owner)
     if (!active) return
-    for (const prompt of Array.isArray(prompts) ? prompts : []) {
-      if (!active.prompts.includes(prompt)) active.prompts.push(prompt)
+    for (const handle of active) {
+      for (const prompt of Array.isArray(prompts) ? prompts : []) addPrompt(handle, prompt)
     }
   }
   return {
@@ -110,20 +113,24 @@ export function createSessionReplacementHookTracker() {
     has: owner => live.has(owner),
     delete: owner => live.delete(owner),
     begin(owner) {
-      if (!owner || typeof owner !== 'object') return false
-      const active = hooks.get(owner) || { count: 0, prompts: [] }
-      active.count++
+      if (!owner || typeof owner !== 'object') return null
+      const handle = { owner, prompts: [], active: true }
+      const active = hooks.get(owner) || new Set()
+      active.add(handle)
       hooks.set(owner, active)
       capture(owner, live.get(owner))
+      return handle
+    },
+    finish(handle) {
+      if (!handle?.active) return false
+      const active = hooks.get(handle.owner)
+      active?.delete(handle)
+      if (!active?.size) hooks.delete(handle.owner)
+      handle.active = false
+      handle.prompts = []
       return true
     },
-    finish(owner) {
-      const active = hooks.get(owner)
-      if (!active) return false
-      if (--active.count <= 0) hooks.delete(owner)
-      return true
-    },
-    prompts: owner => [...(hooks.get(owner)?.prompts || [])],
+    prompts: handle => handle?.active ? [...handle.prompts] : [],
   }
 }
 

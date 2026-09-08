@@ -275,14 +275,33 @@ test('a replacement hook snapshots drain authority before asynchronous validatio
   })
 
   await started
-  replacementHooks.begin(session)
+  const hook = replacementHooks.begin(session)
   releaseDelivery()
   await drain
   assert.equal(inFlightPrompts.has(session), false)
-  assert.deepEqual(replacementHooks.prompts(session), [prompt])
-  assert.deepEqual(artifactGrantTokensFromPrompts(replacementHooks.prompts(session)), ['delayed-hook-token'])
-  replacementHooks.finish(session)
-  assert.deepEqual(replacementHooks.prompts(session), [])
+  assert.deepEqual(replacementHooks.prompts(hook), [prompt])
+  assert.deepEqual(artifactGrantTokensFromPrompts(replacementHooks.prompts(hook)), ['delayed-hook-token'])
+  replacementHooks.finish(hook)
+  assert.deepEqual(replacementHooks.prompts(hook), [])
+})
+
+test('overlapping replacement hooks retain separate prompt authority', () => {
+  const session = { id: 'old-session' }
+  const tracker = createSessionReplacementHookTracker()
+  tracker.set(session, ['first replacement prompt'])
+  const firstHook = tracker.begin(session)
+  tracker.delete(session)
+  tracker.set(session, ['second replacement prompt'])
+  const secondHook = tracker.begin(session)
+
+  assert.deepEqual(tracker.prompts(firstHook), [
+    'first replacement prompt', 'second replacement prompt',
+  ])
+  assert.deepEqual(tracker.prompts(secondHook), ['second replacement prompt'])
+  tracker.finish(firstHook)
+  assert.deepEqual(tracker.prompts(firstHook), [])
+  assert.deepEqual(tracker.prompts(secondHook), ['second replacement prompt'])
+  tracker.finish(secondHook)
 })
 
 test('pending-only dormant input retries wake without weakening active maintenance fences', () => {
