@@ -84,6 +84,49 @@ export function rebindSessionRuntimeState(fromId, toId, {
   return true
 }
 
+// Native replacement hooks authenticate through asynchronous PID/tmux checks.
+// A queue drain can finish during those checks, so keep an exact snapshot of
+// only the prompts which overlap an already-started replacement handler. The
+// tracker also implements the WeakMap surface consumed by the drain, allowing
+// a hook which starts just before the drain to capture later in-flight prompts.
+export function createSessionReplacementHookTracker() {
+  const live = new WeakMap()
+  const hooks = new WeakMap()
+  const capture = (owner, prompts) => {
+    const active = hooks.get(owner)
+    if (!active) return
+    for (const prompt of Array.isArray(prompts) ? prompts : []) {
+      if (!active.prompts.includes(prompt)) active.prompts.push(prompt)
+    }
+  }
+  return {
+    set(owner, prompts) {
+      const snapshot = Array.isArray(prompts) ? [...prompts] : []
+      live.set(owner, snapshot)
+      capture(owner, snapshot)
+      return this
+    },
+    get: owner => live.get(owner),
+    has: owner => live.has(owner),
+    delete: owner => live.delete(owner),
+    begin(owner) {
+      if (!owner || typeof owner !== 'object') return false
+      const active = hooks.get(owner) || { count: 0, prompts: [] }
+      active.count++
+      hooks.set(owner, active)
+      capture(owner, live.get(owner))
+      return true
+    },
+    finish(owner) {
+      const active = hooks.get(owner)
+      if (!active) return false
+      if (--active.count <= 0) hooks.delete(owner)
+      return true
+    },
+    prompts: owner => [...(hooks.get(owner)?.prompts || [])],
+  }
+}
+
 // A retained queue can outlive a failed resurrection. A later owner message is
 // the explicit retry signal only when no process, wake, maintenance operation,
 // or active drain already owns delivery.

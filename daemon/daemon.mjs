@@ -111,7 +111,7 @@ import { createNodeRegistry } from './node-registry.mjs'
 import { readNodeListenerConfiguration } from './node-runtime.mjs'
 import { createCoordinatorNodeTransport, listenForNodeConnections } from './node-transport.mjs'
 import {
-  bulkUpdateBlockReason, drainSessionInputQueue, planBulkSessionUpdate,
+  bulkUpdateBlockReason, createSessionReplacementHookTracker, drainSessionInputQueue, planBulkSessionUpdate,
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
   shouldRetryDormantSessionWake,
 } from './session-update.mjs'
@@ -276,7 +276,8 @@ const restarting = new Set() // session ids intentionally restarting (suppress t
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
 const drainingSessionInput = new Set() // exact sessions serially flushing input queued across a wake/restart
 const sessionInputDrainOwners = new WeakSet() // stable session objects reserve one scheduler across native id replacement
-const sessionInputDrainPrompts = new WeakMap() // stable session object → exact queue remainder temporarily owned by its drain
+const sessionReplacementHooks = createSessionReplacementHookTracker()
+const sessionInputDrainPrompts = sessionReplacementHooks // stable session object → exact queue remainder temporarily owned by its drain
 const sessionInputFenceOwners = new Map() // native id → opaque owner; stale async failures cannot release a newer fence
 let sessionInputFenceGeneration = 0
 
@@ -1587,6 +1588,25 @@ async function completeAuthoritativeSessionStart(session, provider, source) {
 
 async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'claude') {
   const provider = normalizeProvider(requestedProvider)
+  const sid = body.session_id
+  const requestedTmux = tmux
+  if (!provider || !sid) return
+  if (requestedTmux && abandonedResumeTmux.has(requestedTmux)) {
+    log('ignored hook from abandoned resume', body.hook_event_name, String(sid).slice(0, 8), requestedTmux)
+    return
+  }
+  const replacement = requestedTmux
+    ? Object.values(state.sessions || {}).find(candidate =>
+      candidate?.id !== sid && candidate.tmux === requestedTmux && providerOf(candidate) === provider)
+    : null
+  if (!replacement) return processHook(body, ppid, tmux, flags, account, requestedProvider)
+  sessionReplacementHooks.begin(replacement)
+  try { return await processHook(body, ppid, tmux, flags, account, requestedProvider) }
+  finally { sessionReplacementHooks.finish(replacement) }
+}
+
+async function processHook(body, ppid, tmux, flags, account, requestedProvider = 'claude') {
+  const provider = normalizeProvider(requestedProvider)
   if (!provider) return
   const ev = body.hook_event_name
   const sid = body.session_id
@@ -1691,6 +1711,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       tokens: artifactGrantTokensFromPrompts([
         ...(pendingBySid.get(sid) || []),
         ...(sessionInputDrainPrompts.get(session) || []),
+        ...sessionReplacementHooks.prompts(session),
       ]),
     })
     session.id = sid

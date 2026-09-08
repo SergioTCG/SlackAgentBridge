@@ -6,6 +6,16 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.16] — 2026-09-08
+
+### Fixed
+
+- A native replacement hook now snapshots the exact input-drain prompts that
+  overlap its asynchronous PID/tmux authentication. Even if the drain finishes
+  before the hook mutates the native session identity, their accepted upload
+  grants remain available to the replacement; invalid hooks discard the
+  snapshot without rebinding anything.
+
 ## [2.1.0-rc.15] — 2026-09-08
 
 ### Fixed

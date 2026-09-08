@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  bulkUpdateBlockReason, drainSessionInputQueue, planBulkSessionUpdate,
+  bulkUpdateBlockReason, createSessionReplacementHookTracker, drainSessionInputQueue, planBulkSessionUpdate,
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
   shouldRetryDormantSessionWake,
 } from '../daemon/session-update.mjs'
@@ -251,6 +251,38 @@ test('native replacement preserves grants for the exact in-flight queue remainde
   assert.throws(() => grants.claim('unrelated-token', {
     sessionId: 'new-session', channelId: 'C1', provider: 'codex',
   }), /invalid/)
+})
+
+test('a replacement hook snapshots drain authority before asynchronous validation', async () => {
+  const session = { id: 'old-session' }
+  const prompt = `queued${artifactDeliveryInstruction('delayed-hook-token')}`
+  const pending = new Map([['old-session', [prompt]]])
+  const replacementHooks = createSessionReplacementHookTracker()
+  const inFlightPrompts = replacementHooks
+  let releaseDelivery
+  let deliveryStarted
+  const started = new Promise(resolve => { deliveryStarted = resolve })
+  const drain = drainSessionInputQueue(() => session.id, {
+    pendingBySession: pending,
+    updatingSessionIds: new Set(['old-session']),
+    drainingSessionIds: new Set(),
+    inFlightPrompts,
+    inFlightOwner: session,
+    deliver: () => new Promise(resolve => {
+      releaseDelivery = resolve
+      deliveryStarted()
+    }),
+  })
+
+  await started
+  replacementHooks.begin(session)
+  releaseDelivery()
+  await drain
+  assert.equal(inFlightPrompts.has(session), false)
+  assert.deepEqual(replacementHooks.prompts(session), [prompt])
+  assert.deepEqual(artifactGrantTokensFromPrompts(replacementHooks.prompts(session)), ['delayed-hook-token'])
+  replacementHooks.finish(session)
+  assert.deepEqual(replacementHooks.prompts(session), [])
 })
 
 test('pending-only dormant input retries wake without weakening active maintenance fences', () => {
