@@ -152,7 +152,10 @@ function inspectFrame(data, isBinary) {
     const final = finalFromFrame(message)
     if (final) void deliver({
       key: `final:${finalKey(final)}`,
-      payload: final,
+      // This timestamp is captured at the App Server completion boundary, not
+      // after retry/backoff. The daemon uses it only to prevent a delayed old
+      // final from clearing a newer turn on this same host.
+      payload: { ...final, observedAt: Date.now() },
       endpoint: finalDaemonUrl,
       label: 'final',
     })

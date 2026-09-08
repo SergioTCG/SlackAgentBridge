@@ -418,7 +418,9 @@ uses `sab team reply` to put selected progress in the source mailbox. Questions
 and permissions stay on the worker's normal Slack surface. A coordinator uses
 `sab team message` to answer or amend an exact active task, with a visible copy
 in both channels; SAB refuses delivery while a question or permission surface
-is open, and an uncertain provider attempt is never replayed. Filtered,
+is open, and an uncertain provider attempt is never replayed. A disconnected
+Pi stream is a known pre-write rejection: the journal remains pending and the
+normal reconciler may deliver it once after the exact stream reconnects. Filtered,
 cursor-paginated inbox reads expose only the caller's task envelopes and retain
 the original instruction for that bounded journal lifetime. Interrupt, kill,
 session death, team removal/closure, and expiry produce visible task failure or
@@ -470,7 +472,10 @@ hook, addressing Codex App Server releases that omit Stop without parsing the
 transcript or terminal. It never emits commands, command output, diffs, plans,
 reasoning, or deltas. Stable commentary/final deliveries retain their App
 Server source order across loopback retries, so a later final cannot overtake
-an earlier response. On proxy shutdown, commentary backoff is curtailed, both
+an earlier response. The proxy stamps a final at the App Server completion
+boundary; if loopback or Slack backoff delays delivery beyond the start of a
+newer turn, that older final cannot clear the newer poller, status, reservation,
+or delegated-task lifecycle. On proxy shutdown, commentary backoff is curtailed, both
 WebSocket ingress surfaces close to establish a final frame boundary, and the
 latest accepted delivery tail is followed until it is stable for one event-loop
 turn, for up to 30 seconds. Stable finals keep
@@ -513,6 +518,12 @@ model/effort flags first.
 The SAB extension owns Pi's bridge-facing lifecycle and streams. Built-in tools
 are unrestricted by default; SAB `--safe` adds a fail-closed Slack decision per
 tool call. Pi `--approve` is separate project-resource trust.
+
+On each daemon-stream connection the extension reports whether Pi's native
+input surface is idle. That exact-session observation restores polling for a
+live re-adopted turn, or releases stale busy/task state without replay when Pi
+has already returned to its prompt. Persisted timestamps alone never prove a
+turn is still running.
 
 Ordinary owner prompts use persisted adaptive routing. A no-tools classifier
 receives only visible prompt text and fails toward managed execution.

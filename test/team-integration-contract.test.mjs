@@ -96,6 +96,11 @@ test('restart re-adoption proves active turns but fails closed for already-idle 
   const piStatus = daemon.slice(daemon.indexOf("provider === 'pi' && (ev === 'Status'"), daemon.indexOf("provider === 'pi' && ev === 'AgentStart'"))
   assert.match(piStatus, /session\.piTurnStartedAt && !piPollers\.has\(session\.id\)[\s\S]*startPiPoller\(session\)/)
   assert.match(piStatus, /session\.teamActiveTaskId[\s\S]*teamTurnProof\.add\(session\.id\)/)
+  const piReady = daemon.slice(daemon.indexOf("provider === 'pi' && ev === 'StreamReady'"), daemon.indexOf("provider === 'pi' && ev === 'InputError'"))
+  assert.match(piReady, /body\.idle[\s\S]*trackedProviderTurn: 'pi'/)
+  assert.doesNotMatch(piReady, /delete session\.piTurnStartedAt/)
+  assert.match(fs.readFileSync(new URL('../pi/sab-extension.ts', import.meta.url), 'utf8'),
+    /event: "StreamReady", idle: ctx\.isIdle\(\)/)
   for (const provider of ['Codex', 'Claude Code', 'Pi']) {
     assert.match(daemon, new RegExp(`releaseIdleReadoptedTeamTaskIfStillIdle\\(s, idleTask, '${provider}'\\)`))
   }
@@ -131,6 +136,8 @@ test('reviewed lifecycle races revalidate exact state at the last safe boundary'
   assert.doesNotMatch(messageDelivery, /injectText\(/)
 
   assert.match(messageDelivery, /!qforms\.has\(expected\.sid\) && !hasPendingPerm\(target\)/)
+  assert.match(messageDelivery, /forgetInjected\(expected\.sid, prompt\)[\s\S]*knownUndeliveredTeamMessage/)
+  assert.match(daemon, /teamMessageFailureDisposition\(\{ providerAttempted, error \}\)[\s\S]*failure\.retryable/)
 
   const audit = daemon.slice(
     daemon.indexOf('async function performTeamTaskPayloadAuditUpdate('),

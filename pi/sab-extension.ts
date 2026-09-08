@@ -210,6 +210,10 @@ async function consumeSse(pi: ExtensionAPI, managed: any, signal: AbortSignal) {
   url.searchParams.set("capabilities", PI_EXACT_SESSION_CONTROL_CAPABILITY);
   const response = await fetch(url, { signal });
   if (!response.ok || !response.body) throw new Error(`stream returned HTTP ${response.status}`);
+  const ctx = activeContext;
+  if (ctx && registeredSessionId) {
+    await post("/pi/event", { event: "StreamReady", idle: ctx.isIdle(), ...sessionState(ctx) }).catch(() => {});
+  }
   const decoder = new TextDecoder();
   let buffer = "";
   for await (const chunk of response.body as any) {

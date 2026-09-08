@@ -95,10 +95,10 @@ test('event proxy forwards every frame and reports commentary plus completed fin
     })
     assert.equal(finals[0].provider, 'codex')
     assert.match(finals[0].url, /^\/codex\/final\?ppid=\d+&tmux=ccs-test$/)
-    assert.deepEqual(finals.map(delivery => delivery.body), [{
-      threadId: 'thread-1', turnId: 'turn-1', itemId: 'final-1', text: 'Done.',
+    assert.deepEqual(finals.map(delivery => ({ ...delivery.body, observedAt: typeof delivery.body.observedAt })), [{
+      threadId: 'thread-1', turnId: 'turn-1', itemId: 'final-1', text: 'Done.', observedAt: 'number',
     }, {
-      threadId: 'thread-1', turnId: 'turn-3', itemId: 'final-3', text: 'Direct completion.',
+      threadId: 'thread-1', turnId: 'turn-3', itemId: 'final-3', text: 'Direct completion.', observedAt: 'number',
     }])
   } finally {
     client?.terminate()

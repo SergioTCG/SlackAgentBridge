@@ -6,6 +6,25 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.13] — 2026-09-08
+
+### Fixed
+
+- Coordinator messages to an active Pi task now distinguish a disconnected
+  input stream, where no provider write occurred, from an uncertain write. A
+  provably undelivered message stays pending for bounded reconciliation after
+  reconnect; a possibly delivered message remains failed and is never replayed.
+- A delayed Codex App Server final records its completion-observation time and
+  cannot stop the poller, clear the working line, or complete lifecycle state
+  belonging to a newer turn. The older final remains eligible for exact-once
+  Slack delivery without disturbing that newer turn.
+- A reconnected Pi extension reports the native input surface's idle state. SAB
+  restores polling for live work, or fail-closed releases an already-idle stale
+  re-adopted task so fresh queued work can dispatch without a manual prompt.
+- Bulk terminal open/close operations now revalidate each exact session,
+  channel, and tmux authority after asynchronous liveness checks, preventing a
+  replacement session from inheriting an operation aimed at its predecessor.
+
 ## [2.1.0-rc.12] — 2026-09-08
 
 ### Added

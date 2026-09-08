@@ -74,6 +74,9 @@
 - [ ] Closing Codex while commentary delivery is backing off still drains its
       accepted App Server fallback final before the proxy exits, while the
       correlated App Server remains alive for daemon ancestry validation.
+- [ ] Delay an accepted Codex App Server final until a newer turn starts.
+      Confirm the old final is posted exactly once without clearing the newer
+      turn's poller, working line, reservation, or team lifecycle.
 - [ ] A transient final-delivery rejection during shutdown observes retry
       spacing and succeeds when the loopback endpoint recovers.
 - [ ] SIGTERM immediately after an App Server completion frame closes ingress
@@ -166,6 +169,12 @@
       alone does not restore worker proof or polling, a new native Pi event does,
       and an unproved historical turn releases its stale task/poller/input fences
       without replay after the recovery grace period.
+- [ ] Reconnect Pi while its native input surface is already idle. Confirm the
+      stale re-adopted task is released without replay and one fresh queued task
+      dispatches without requiring an owner prompt.
+- [ ] Disconnect Pi's input stream before a coordinator task message. Confirm
+      the known-undelivered journal stays pending and delivers once after
+      reconnect; an uncertain provider write remains failed and is never retried.
 - [ ] Repeat ordinary and dispatch-healing worker replies. Confirm each exact
       task/reply/lifecycle version produces at most one coordinator wake and a
       later real lifecycle version still wakes once.
@@ -181,6 +190,9 @@
       only the exact delegated task; `/sab-cleanup` preserves dormant team
       channels and provider switching preserves idle channel-level membership.
 - [ ] No duplicate Slack channels appear.
+- [ ] Rebind a session while a bulk terminal liveness check is pending. Confirm
+      the predecessor operation fails closed and never opens or closes the
+      replacement session's viewport.
 
 ## Publish
 

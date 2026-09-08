@@ -372,6 +372,11 @@ expiry are also retained. Slack keeps the deliberately visible task, file,
 message, reply, and result records according to workspace retention. Do not
 delegate secrets merely because both sessions run on the same machine.
 
+Coordinator-to-worker messages are journaled before provider delivery. A
+provable pre-write rejection, such as a disconnected Pi input stream, may be
+retried against the same exact task/session authority. Once a provider write is
+attempted and its result is uncertain, SAB fails closed and never replays it.
+
 ## Research-preview dependencies
 
 Claude support uses the Channels research-preview API. SAB supplies exactly one

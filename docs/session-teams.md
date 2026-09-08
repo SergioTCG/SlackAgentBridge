@@ -133,6 +133,9 @@ channels and injecting it into the same authoritative worker session. Retries
 need the same request ID and content. Delivery is rejected while the worker has
 an open question or permission prompt, because that is not a safe text-input
 surface. An uncertain provider-side message is reported and never replayed.
+If Pi has no connected input stream, no provider write has occurred: the
+message remains pending and the reconciler submits it once after the exact
+authoritative stream reconnects.
 
 The coordinator may send up to 20 tasks in one current owner or automatic
 continuation budget. When that budget is exhausted, automatic mode can renew one

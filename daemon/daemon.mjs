@@ -75,6 +75,7 @@ import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './
 import { createTerminalControl } from './terminal-control.mjs'
 import { handleTerminalHttp } from './terminal-http.mjs'
 import { handleTeamHttp } from './team-http.mjs'
+import { knownUndeliveredTeamMessage, teamMessageFailureDisposition } from './team-message-delivery.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
 import {
@@ -1087,19 +1088,26 @@ async function finalizeCodexTurn(session, body) {
       try { saveStateNow(state) }
       catch (error) { releaseCodexFinal(session, turnId); throw error }
     }
-    const expected = codexFinalLifecycleFingerprint(session)
-    stopPoller(session)
-    clearStatusDeferred(session)
+    const expected = codexFinalLifecycleFingerprint(session, { observedAt: body.observed_at })
+    // App Server delivery can sit behind Slack backoff while the user starts a
+    // newer turn. Its proxy observation timestamp proves whether this final
+    // completed before the currently tracked turn began. Never let an older
+    // final stop the newer poller or clear its lifecycle authority.
+    const ownsLifecycle = codexFinalLifecycleStillCurrent(session, expected, { beforeStop: true })
+    if (ownsLifecycle) {
+      stopPoller(session)
+      clearStatusDeferred(session)
+    }
     const text = String(body.last_assistant_message || '').trim()
     try {
-      if (text && session.channel) await postProviderOutput(session.channel, text)
+      if (text && session.channel) await postProviderOutput(session.channel, text, { keepStatus: !ownsLifecycle })
     } catch (error) {
       // A known Slack failure remains retryable by the App Server proxy.
       if (turnId) releaseCodexFinal(session, turnId)
       saveStateNow(state)
       throw error
     }
-    if (codexFinalLifecycleStillCurrent(session, expected)) {
+    if (ownsLifecycle && codexFinalLifecycleStillCurrent(session, expected)) {
       await finishTeamTaskForSession(session, text)
       clearTeamInputReservation(session)
     } else {
@@ -1750,6 +1758,31 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       piControlWaiters.delete(body.request_id)
       clearTimeout(waiter.timer)
       waiter.resolve(body)
+    }
+    return
+  }
+  if (provider === 'pi' && ev === 'StreamReady') {
+    // The extension reconnects independently of the provider process after a
+    // daemon restart. Its native isIdle() result is the missing bounded proof:
+    // active work regains a poller, while an already-idle historical turn is
+    // released fail-closed so fresh queued work can dispatch without a manual
+    // owner prompt.
+    if (body.idle === false) {
+      if (session.piTurnStartedAt && !piPollers.has(session.id)) startPiPoller(session)
+      if (session.teamActiveTaskId) teamTurnProof.add(session.id)
+      return
+    }
+    if (body.idle === true && session.piTurnStartedAt &&
+        !['active', 'paused'].includes(session.managed?.status) && session.piRouting?.status !== 'routing') {
+      const idleTask = readoptedTeamTaskFingerprint(session)
+      const released = await releaseIdleReadoptedTeamTaskIfStillIdle(session, idleTask, 'Pi', {
+        trackedProviderTurn: 'pi',
+      })
+      if (released) {
+        clearStatusDeferred(session)
+        setImmediate(() => reconcileTeamTasks().catch(error =>
+          log('Pi stream re-adoption dispatch failed', String(error?.message || error))))
+      }
     }
     return
   }
@@ -4009,7 +4042,8 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt) 
   rememberInjected(expected.sid, prompt)
   if (expected.provider === 'pi') {
     if (!injectQueuedPiPrompt(expected.pid, piPromptQueueItem(prompt))) {
-      throw new Error('The exact Pi input stream did not accept the coordinator message.')
+      forgetInjected(expected.sid, prompt)
+      throw knownUndeliveredTeamMessage('The exact Pi input stream did not accept the coordinator message.')
     }
     return
   }
@@ -4091,11 +4125,13 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     saveStateNow(state)
     return true
   } catch (error) {
-    message.providerDeliveryStatus = providerAttempted ? 'uncertain' : null
-    message.deliveryStatus = 'failed'
+    const failure = teamMessageFailureDisposition({ providerAttempted, error })
+    message.providerDeliveryStatus = failure.providerDeliveryStatus
+    message.deliveryStatus = failure.deliveryStatus
     message.deliveryError = String(error?.data?.error || error?.message || error).slice(0, 1000)
     saveStateNow(state)
-    throw new TeamError('task_message_failed', `Coordinator message delivery failed: ${message.deliveryError}`, 502)
+    throw new TeamError(failure.retryable ? 'task_message_retryable' : 'task_message_failed',
+      `Coordinator message delivery failed: ${message.deliveryError}`, failure.retryable ? 503 : 502)
   }
 }
 
@@ -4524,13 +4560,20 @@ function readoptedTeamTaskFingerprint(session) {
     channel: session.channel,
     taskId: session.teamActiveTaskId,
     provider: providerOf(session),
+    codexTurnStartedAt: session.codexTurnStartedAt || null,
+    piTurnStartedAt: session.piTurnStartedAt || null,
     teamTurnStartedAt: session.teamTurn?.startedAt || null,
     inputAcceptedAt: session.teamInputReservation?.acceptedAt || null,
   })
 }
 
-function readoptedTeamTaskStillIdle(session, expected) {
-  return Boolean(session && expected && state.sessions?.[expected.sid] === session &&
+function readoptedTeamTaskStillIdle(session, expected, { trackedProviderTurn = null } = {}) {
+  if (!session || !expected) return false
+  const providerTurnMatches = trackedProviderTurn === 'pi'
+    ? expected.provider === 'pi' && expected.piTurnStartedAt &&
+      session.piTurnStartedAt === expected.piTurnStartedAt && !session.codexTurnStartedAt
+    : !session.codexTurnStartedAt && !session.piTurnStartedAt
+  return Boolean(state.sessions?.[expected.sid] === session &&
     session.id === expected.sid && session.pid === expected.pid && session.tmux === expected.tmux &&
     session.channel === expected.channel && session.teamActiveTaskId === expected.taskId &&
     providerOf(session) === expected.provider && state.channels?.[expected.channel] === expected.sid &&
@@ -4538,22 +4581,23 @@ function readoptedTeamTaskStillIdle(session, expected) {
     (session.teamInputReservation?.acceptedAt || null) === expected.inputAcceptedAt &&
     expected.pid > 1 && pidAlive(expected.pid) && !teamTurnProof.has(expected.sid) &&
     !pollers.has(expected.sid) && !codexPollers.has(expected.sid) && !piPollers.has(expected.sid) &&
-    !session.codexTurnStartedAt && !session.piTurnStartedAt)
+    providerTurnMatches)
 }
 
-async function releaseIdleReadoptedTeamTaskIfStillIdle(session, expected, label) {
-  if (!readoptedTeamTaskStillIdle(session, expected)) return false
+async function releaseIdleReadoptedTeamTaskIfStillIdle(session, expected, label, options = {}) {
+  if (!readoptedTeamTaskStillIdle(session, expected, options)) return false
   if (!(await tmuxAlive(expected.tmux)) ||
       !(await validProviderRootClaim(expected.pid, expected.tmux, expected.provider))) return false
-  if (!readoptedTeamTaskStillIdle(session, expected)) return false
+  if (!readoptedTeamTaskStillIdle(session, expected, options)) return false
   // Clear only the exact idle snapshot that survived both asynchronous process
   // checks. A delayed prompt hook will have installed a poller/turn marker and
   // fails the final predicate, so this cannot erase a newly active owner turn.
+  if (options.trackedProviderTurn === 'pi') stopPoller(session)
   const clearedTurn = clearTeamTurn(session)
   const clearedInput = clearTeamInputReservation(session)
   if (expected.taskId) return releaseIdleReadoptedTeamTask(session, label)
-  if (clearedTurn || clearedInput) saveStateNow(state)
-  return false
+  if (options.trackedProviderTurn || clearedTurn || clearedInput) saveStateNow(state)
+  return true
 }
 
 async function failTeamTaskForSession(session, reason) {

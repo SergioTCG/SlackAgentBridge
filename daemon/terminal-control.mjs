@@ -69,12 +69,14 @@ export function createTerminalControl({
     const claimedChannel = session.channel
     const claimedTmux = session.tmux
     return locked(session.tmux, async () => {
+      const authoritative = () => session.id === claimedId && session.channel === claimedChannel &&
+        session.tmux === claimedTmux && state.sessions?.[claimedId] === session &&
+        state.channels?.[claimedChannel] === claimedId
+      if (!authoritative()) throw new Error(`session ${claimedId.slice(0, 8)} is no longer authoritative`)
       if (!(await nodes.sessionAlive(session))) {
         throw new Error(`session ${claimedId.slice(0, 8)} is no longer active`)
       }
-      if (expectedSessionId && (session.id !== claimedId || session.channel !== claimedChannel ||
-          session.tmux !== claimedTmux || state.sessions?.[claimedId] !== session ||
-          state.channels?.[claimedChannel] !== claimedId)) {
+      if (!authoritative()) {
         throw new Error(`session ${claimedId.slice(0, 8)} is no longer authoritative`)
       }
       return action === 'open' ? nodes.openTerminal(session) : nodes.closeTerminal(session)
@@ -106,7 +108,7 @@ export function createTerminalControl({
 
     const results = []
     for (const session of targets) {
-      try { results.push({ session, result: await one(session, action, all ? null : expectedSessionId) }) }
+      try { results.push({ session, result: await one(session, action, all ? session.id : expectedSessionId) }) }
       catch (error) { results.push({ session, error: String(error?.message || error) }) }
     }
     const failures = results.filter(item => item.error)

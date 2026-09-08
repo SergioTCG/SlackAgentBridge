@@ -4,7 +4,7 @@ import http from 'node:http'
 import { handleCodexFinalHttp } from '../daemon/codex-final-http.mjs'
 
 const payload = {
-  threadId: 'thread-1', turnId: 'turn-1', itemId: 'final-1', text: 'Done safely.',
+  threadId: 'thread-1', turnId: 'turn-1', itemId: 'final-1', text: 'Done safely.', observedAt: 123456,
 }
 
 function fixture(overrides = {}) {
@@ -55,8 +55,15 @@ test('Codex final HTTP completes only the exact public session turn', async t =>
   assert.equal(context.calls[0][0], 'final')
   assert.equal(context.calls[0][1], context.state.sessions['thread-1'])
   assert.deepEqual(context.calls[0][2], {
-    turn_id: 'turn-1', last_assistant_message: 'Done safely.',
+    turn_id: 'turn-1', last_assistant_message: 'Done safely.', observed_at: 123456,
   })
+})
+
+test('Codex final HTTP rejects an invalid proxy observation timestamp', async t => {
+  const context = fixture()
+  const base = await startServer(t, context)
+  assert.equal((await send(base, { ...payload, observedAt: -1 })).status, 400)
+  assert.deepEqual(context.calls, [])
 })
 
 test('Codex final HTTP routes private completions without posting a public final', async t => {
