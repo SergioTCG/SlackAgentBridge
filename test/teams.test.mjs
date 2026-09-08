@@ -4,15 +4,20 @@ import {
   TeamError,
   activeTeamForChannel,
   addTeamWorker,
+  appendCoordinatorTaskMessage,
   appendTeamTaskReply,
+  assertCoordinatorTaskControl,
   assertTeamTaskRetry,
   beginCollaboratorTeamTurn,
   beginContinuationTeamTurn,
   beginOwnerTeamTurn,
+  cancelQueuedTeamTask,
   claimTeamTask,
+  claimTeamTaskForSession,
   clearTeamTurn,
   closeTeam,
   completeTeamTask,
+  completeTeamTaskWithWarning,
   consumeCoordinatorDispatch,
   coordinatorPromptContext,
   createTeam,
@@ -22,9 +27,13 @@ import {
   publicTeamTask,
   pruneTeamTasks,
   removeTeamWorker,
+  replaceQueuedTeamTask,
+  setTeamDispatchMode,
   setTeamWorkerFiles,
   taskMarker,
   tasksForChannel,
+  tasksPageForChannel,
+  teamDispatchMode,
   teamContext,
   teamTaskDeliverySettled,
   withoutDelegatedTaskPrompt,
@@ -67,6 +76,7 @@ test('worker membership uses unique aliases and one active team per channel', ()
   }), error => error.code === 'channel_already_teamed')
   const context = teamContext(state, 'C-MASTER')
   assert.equal(context.role, 'coordinator')
+  assert.equal(context.dispatchMode, 'active')
   assert.deepEqual(context.peers.map(peer => peer.alias), ['parallel-1', 'parallel-2'])
   assert.equal(context.coordinatorChannel, undefined)
   assert.equal(context.peers.some(peer => Object.hasOwn(peer, 'channel')), false)
@@ -140,6 +150,8 @@ test('task phase transitions bind an exact worker session and clear pending cont
   markTeamTaskRunning(state, task.id, { now: 4000 })
   assert.equal(task.status, 'running')
   assert.equal(task.text, '')
+  assert.equal(task.instruction, 'Do the work.')
+  assert.equal(task.acceptedAt, new Date(4000).toISOString())
   const { reply } = appendTeamTaskReply(state, task.id, { fromChannel: 'C-WORKER-1', text: 'Halfway.', requestId: 'reply-1', now: 5000 })
   assert.equal(reply.text, 'Halfway.')
   assert.equal(reply.fileDeliveryStatus, 'none')
@@ -160,6 +172,7 @@ test('task phase transitions bind an exact worker session and clear pending cont
   assert.throws(() => completeTeamTask(state, task.id, { targetSessionId: 'other', result: 'No.' }),
     error => error.code === 'task_not_running')
   assert.equal(publicTeamTask(task, 'C-MASTER').direction, 'outgoing')
+  assert.equal(publicTeamTask(task, 'C-MASTER').instruction, 'Do the work.')
   assert.equal(publicTeamTask(task, 'C-WORKER-1').direction, 'incoming')
   assert.equal(publicTeamTask(task, 'C-MASTER').sourceChannel, undefined)
   assert.equal(publicTeamTask(task, 'C-MASTER').targetChannel, undefined)
@@ -183,6 +196,7 @@ test('an authenticated task-bound worker reply proves provider acceptance withou
   assert.equal(task.status, 'running')
   assert.equal(task.startedAt, new Date(4000).toISOString())
   assert.equal(task.text, '')
+  assert.equal(task.instruction, 'Do the work.')
 
   const duplicate = appendTeamTaskReply(state, task.id, {
     fromChannel: 'C-WORKER-1', text: 'Accepted; checking the repository now.', requestId: 'reply-proof', now: 5000,
@@ -388,4 +402,187 @@ test('channel inboxes contain only tasks involving that exact channel', () => {
   assert.throws(() => tasksForChannel(state, 'C-WORKER-1', { after: 'task_inbox_2' }),
     error => error.code === 'invalid_cursor')
   assert.deepEqual(tasksForChannel(state, 'C-UNRELATED'), [])
+})
+
+test('dispatch claim atomically binds worker availability and a populated start timestamp', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid' }
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Atomic work.', requestId: 'atomic-1', id: 'task_atomic', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, {
+    targetProvider: 'codex', targetNodeId: 'local', now: 3000,
+  })
+  assert.equal(task.status, 'dispatching')
+  assert.equal(task.startedAt, new Date(3000).toISOString())
+  assert.equal(worker.teamActiveTaskId, task.id)
+  assert.equal(task.targetSessionId, worker.id)
+  assert.equal(task.lifecycleVersion, 2)
+})
+
+test('dispatch claim binds the exact fully-audited instruction revision', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid' }
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Current instruction.', requestId: 'revision-1', id: 'task_revision', now: 2000,
+  })
+  task.instructionVersion = 2
+  task.payloadAuditInstructionVersion = 2
+
+  assert.throws(() => claimTeamTaskForSession(state, task.id, worker, {
+    targetProvider: 'codex', expectedInstructionVersion: 1, expectedAuditInstructionVersion: 1,
+  }), error => error.code === 'task_revision_changed')
+  assert.equal(task.status, 'queued')
+  assert.equal(worker.teamActiveTaskId, undefined)
+
+  assert.throws(() => claimTeamTaskForSession(state, task.id, worker, {
+    targetProvider: 'codex', expectedInstructionVersion: 2, expectedAuditInstructionVersion: 1,
+  }), error => error.code === 'task_audit_stale')
+  assert.equal(task.status, 'queued')
+  assert.equal(worker.teamActiveTaskId, undefined)
+
+  claimTeamTaskForSession(state, task.id, worker, {
+    targetProvider: 'codex', expectedInstructionVersion: 2, expectedAuditInstructionVersion: 2, now: 3000,
+  })
+  assert.equal(task.status, 'dispatching')
+  assert.equal(worker.teamActiveTaskId, task.id)
+})
+
+test('an idle acknowledged worker can complete with a lifecycle warning instead of false failure', () => {
+  const { state, team } = fixture()
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Finish safely.', requestId: 'warning-1', id: 'task_warning', now: 2000,
+  })
+  claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  completeTeamTaskWithWarning(state, task.id, {
+    targetSessionId: 'worker', result: 'Last authenticated progress.',
+    warning: 'Provider completion hook was missing.', now: 5000,
+  })
+  assert.equal(task.status, 'completed_with_warning')
+  assert.equal(task.result, 'Last authenticated progress.')
+  assert.equal(task.warning, 'Provider completion hook was missing.')
+  assert.equal(publicTeamTask(task, 'C-MASTER').status, 'completed_with_warning')
+})
+
+test('coordinator can cancel or replace only queued work and message only its active task', () => {
+  const { state, team } = fixture()
+  const queued = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Old instruction.', requestId: 'control-1', id: 'task_control', now: 2000,
+  }).task
+  const replacement = replaceQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', text: 'New instruction.', requestId: 'replace-1', now: 3000,
+  })
+  assert.equal(replacement.created, true)
+  assert.equal(queued.text, 'New instruction.')
+  assert.equal(replaceQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', text: 'New instruction.', requestId: 'replace-1', now: 3500,
+  }).created, false)
+  assert.throws(() => replaceQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', text: 'Conflicting instruction.', requestId: 'replace-1', now: 3600,
+  }), error => error.code === 'request_conflict')
+
+  const cancelled = cancelQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', reason: 'No longer needed.', now: 4000,
+  })
+  assert.equal(cancelled.status, 'cancelled')
+  assert.equal(cancelQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', reason: 'No longer needed.', now: 4500,
+  }).status, 'cancelled')
+  assert.equal(cancelQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', reason: 'A different retry description.', requestId: 'cancel-again', now: 4600,
+  }).status, 'cancelled')
+
+  const active = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Active instruction.', requestId: 'control-2', id: 'task_active', now: 5000,
+  }).task
+  claimTeamTask(state, active.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 6000 })
+  markTeamTaskRunning(state, active.id, { now: 7000 })
+  const message = appendCoordinatorTaskMessage(state, active.id, {
+    sourceChannel: 'C-MASTER', text: 'Yes, proceed.', requestId: 'message-1', now: 8000,
+  })
+  assert.equal(message.created, true)
+  assert.equal(appendCoordinatorTaskMessage(state, active.id, {
+    sourceChannel: 'C-MASTER', text: 'Yes, proceed.', requestId: 'message-1', now: 8500,
+  }).created, false)
+  assert.equal(publicTeamTask(active, 'C-MASTER').messages[0].text, 'Yes, proceed.')
+  completeTeamTask(state, active.id, { targetSessionId: 'worker', result: 'Done.', now: 8750 })
+  assert.equal(appendCoordinatorTaskMessage(state, active.id, {
+    sourceChannel: 'C-MASTER', text: 'Yes, proceed.', requestId: 'message-1', now: 8800,
+  }).created, false)
+  assert.throws(() => appendCoordinatorTaskMessage(state, active.id, {
+    sourceChannel: 'C-WORKER-1', text: 'Spoof.', requestId: 'message-2', now: 9000,
+  }), error => error.code === 'task_control_not_allowed')
+})
+
+test('queued cancellation remains available after the bounded control journal fills', () => {
+  const { state, team } = fixture()
+  const task = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Eventually cancel.', requestId: 'cancel-full', id: 'task_cancel_full', now: 2000,
+  }).task
+  task.controlRequests = Array.from({ length: 32 }, (_, index) => ({
+    requestId: `prior-${index}`, kind: 'replace', payloadHash: `hash-${index}`,
+  }))
+  assert.equal(cancelQueuedTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'cancel-final', now: 3000,
+  }).status, 'cancelled')
+  assert.equal(task.controlRequests.length, 32)
+})
+
+test('coordinator task control requires a current owner or matching continuation turn without spending dispatch budget', () => {
+  const session = {}
+  beginOwnerTeamTurn(session, { messageTs: '1.2' }, { now: 1000, budget: 2 })
+  assert.equal(assertCoordinatorTaskControl(session, { now: 1100 }).actor, 'owner')
+  assert.equal(session.teamTurn.remaining, 2)
+  beginContinuationTeamTurn(session, { teamId: 'team_hexagonal', eventId: 'event_1' }, { now: 2000, budget: 2 })
+  assert.equal(assertCoordinatorTaskControl(session, {
+    now: 2100, teamId: 'team_hexagonal', allowContinuation: true,
+  }).actor, 'continuation')
+  assert.throws(() => assertCoordinatorTaskControl(session, {
+    now: 2100, teamId: 'other', allowContinuation: true,
+  }), error => error.code === 'owner_turn_required')
+})
+
+test('team drain mode blocks new dispatch without cancelling active or queued records', () => {
+  const { state, team } = fixture()
+  const queued = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Wait in queue.', requestId: 'drain-1', id: 'task_drain', now: 2000,
+  }).task
+  const result = setTeamDispatchMode(team, 'draining', { now: 3000 })
+  assert.equal(result.mode, 'draining')
+  assert.equal(teamDispatchMode(team), 'draining')
+  assert.equal(queued.status, 'queued')
+  assert.throws(() => claimTeamTask(state, queued.id, {
+    targetSessionId: 'worker', targetProvider: 'codex', now: 3500,
+  }), error => error.code === 'team_draining')
+  setTeamDispatchMode(team, 'active', { now: 4000 })
+  assert.equal(teamDispatchMode(team), 'active')
+})
+
+test('filtered inbox pages retain instruction and expose an opaque older-page cursor', () => {
+  const { state, team } = fixture()
+  for (let index = 0; index < 4; index++) {
+    const task = createTeamTask(state, {
+      teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+      target: index % 2 ? 'parallel-2' : 'parallel-1', text: `Instruction ${index}`,
+      requestId: `page-${index}`, id: `task_page_${index}`, now: 1000 + index,
+    }).task
+    if (index === 0) cancelQueuedTeamTask(state, task.id, { sourceChannel: 'C-MASTER', now: 2000 })
+  }
+  const first = tasksPageForChannel(state, 'C-MASTER', { limit: 2, active: true })
+  assert.deepEqual(first.tasks.map(task => task.id), ['task_page_3', 'task_page_2'])
+  assert.ok(first.nextCursor)
+  const second = tasksPageForChannel(state, 'C-MASTER', { limit: 2, active: true, cursor: first.nextCursor })
+  assert.deepEqual(second.tasks.map(task => task.id), ['task_page_1'])
+  assert.equal(publicTeamTask(first.tasks[0], 'C-MASTER').instruction, 'Instruction 3')
+  assert.deepEqual(tasksPageForChannel(state, 'C-MASTER', {
+    target: 'parallel-2', status: ['queued'], since: new Date(1001).toISOString(),
+  }).tasks.map(task => task.id), ['task_page_3', 'task_page_1'])
 })

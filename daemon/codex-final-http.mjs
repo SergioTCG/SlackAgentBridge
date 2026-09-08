@@ -30,7 +30,11 @@ async function readFinal(req) {
     },
   })
   if (!final) throw Object.assign(new Error('invalid final'), { status: 400 })
-  return final
+  if (Object.hasOwn(parsed, 'observedAt') &&
+      (!Number.isSafeInteger(parsed.observedAt) || parsed.observedAt <= 0)) {
+    throw Object.assign(new Error('invalid final observation timestamp'), { status: 400 })
+  }
+  return { ...final, observedAt: parsed.observedAt || null }
 }
 
 export async function handleCodexFinalHttp(req, res, url, {
@@ -84,6 +88,7 @@ export async function handleCodexFinalHttp(req, res, url, {
     const delivered = await finalizeCodexTurn(session, {
       turn_id: final.turnId,
       last_assistant_message: final.text,
+      observed_at: final.observedAt,
     })
     res.writeHead(delivered ? 202 : 200)
     res.end(delivered ? 'accepted' : 'duplicate')

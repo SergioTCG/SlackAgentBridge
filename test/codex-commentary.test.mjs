@@ -171,16 +171,27 @@ test('Codex finals are accepted only for the exact live authority and distinguis
 
 test('a late Codex final cannot clear lifecycle state belonging to a newer turn', () => {
   const session = {
+    codexTurnStartedAt: 100,
     teamActiveTaskId: 'task-1',
     teamInputReservation: { acceptedAt: '2026-09-07T12:00:00.000Z' },
     teamTurn: { startedAt: 100 },
   }
-  const expected = codexFinalLifecycleFingerprint(session)
-  assert.equal(codexFinalLifecycleStillCurrent(session, expected), true)
+  const expected = codexFinalLifecycleFingerprint(session, { observedAt: 100 })
+  assert.equal(expected.turnStartedAt, 100)
+  assert.equal(codexFinalLifecycleStillCurrent({ ...session, codexTurnStartedAt: undefined }, expected), true)
   assert.equal(codexFinalLifecycleStillCurrent({ ...session, codexTurnStartedAt: 101 }, expected), false)
-  assert.equal(codexFinalLifecycleStillCurrent({ ...session, teamActiveTaskId: 'task-2' }, expected), false)
+  assert.equal(codexFinalLifecycleStillCurrent({ ...session, codexTurnStartedAt: undefined, teamActiveTaskId: 'task-2' }, expected), false)
   assert.equal(codexFinalLifecycleStillCurrent({
-    ...session, teamInputReservation: { acceptedAt: '2026-09-07T12:01:00.000Z' },
+    ...session, codexTurnStartedAt: undefined,
+    teamInputReservation: { acceptedAt: '2026-09-07T12:01:00.000Z' },
   }, expected), false)
-  assert.equal(codexFinalLifecycleStillCurrent({ ...session, teamTurn: { startedAt: 200 } }, expected), false)
+  assert.equal(codexFinalLifecycleStillCurrent({
+    ...session, codexTurnStartedAt: undefined, teamTurn: { startedAt: 200 },
+  }, expected), false)
+})
+
+test('a proxy-observed old final cannot claim a turn which began after completion', () => {
+  const newer = { codexTurnStartedAt: 200 }
+  const expected = codexFinalLifecycleFingerprint(newer, { observedAt: 150 })
+  assert.equal(codexFinalLifecycleStillCurrent(newer, expected, { beforeStop: true }), false)
 })

@@ -58,9 +58,9 @@ test('coordinator binds handlers and starts the sole socket exactly once', async
   const fixture = socketFixture()
   const coordinator = createSocketModeCoordinator({
     socket: fixture.socket,
-    handlers: { message: async () => {}, slash_commands: async () => {}, interactive: async () => {} },
+    handlers: { message: async () => {}, app_home_opened: async () => {}, slash_commands: async () => {}, interactive: async () => {} },
   })
   await Promise.all([coordinator.start(), coordinator.start()])
-  assert.deepEqual([...fixture.handlers.keys()], ['message', 'slash_commands', 'interactive'])
+  assert.deepEqual([...fixture.handlers.keys()], ['message', 'app_home_opened', 'slash_commands', 'interactive'])
   assert.equal(fixture.starts(), 1)
 })

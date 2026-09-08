@@ -51,7 +51,10 @@ function decoded(segment) {
 
 export async function handleTeamHttp(req, res, url, service) {
   const taskMatch = /^\/team\/tasks\/([^/]+)$/.exec(url.pathname)
-  const known = ['/team/context', '/team/peers', '/team/inbox', '/team/send', '/team/reply'].includes(url.pathname) || taskMatch
+  const known = [
+    '/team/context', '/team/peers', '/team/inbox', '/team/send', '/team/reply',
+    '/team/cancel', '/team/replace', '/team/message', '/team/mode',
+  ].includes(url.pathname) || taskMatch
   if (!known) return false
   try {
     const mutation = req.method === 'POST'
@@ -66,9 +69,21 @@ export async function handleTeamHttp(req, res, url, service) {
       return true
     }
     if (url.pathname === '/team/inbox' && req.method === 'GET') {
-      sendJson(res, 200, { ok: true, tasks: await service.inbox(caller, {
-        limit: url.searchParams.get('limit'), after: url.searchParams.get('after'),
-      }) })
+      const options = {
+        limit: url.searchParams.get('limit'),
+        after: url.searchParams.get('after'),
+        cursor: url.searchParams.get('cursor'),
+        active: url.searchParams.get('active') === 'true',
+        target: url.searchParams.get('target'),
+        status: url.searchParams.get('status')?.split(',').filter(Boolean) || null,
+        since: url.searchParams.get('since'),
+      }
+      if (options.after && (options.cursor || options.active || options.target || options.status || options.since)) {
+        throw new TeamError('invalid_filter_combo',
+          'The legacy after cursor cannot be combined with inbox filters or cursor pagination.')
+      }
+      const page = await service.inbox(caller, options)
+      sendJson(res, 200, { ok: true, tasks: page.tasks, nextCursor: page.nextCursor || null })
       return true
     }
     if (taskMatch && req.method === 'GET') {
@@ -81,6 +96,22 @@ export async function handleTeamHttp(req, res, url, service) {
     }
     if (url.pathname === '/team/reply' && req.method === 'POST') {
       sendJson(res, 200, { ok: true, ...(await service.reply(caller, await readJson(req))) })
+      return true
+    }
+    if (url.pathname === '/team/cancel' && req.method === 'POST') {
+      sendJson(res, 200, { ok: true, ...(await service.cancel(caller, await readJson(req))) })
+      return true
+    }
+    if (url.pathname === '/team/replace' && req.method === 'POST') {
+      sendJson(res, 200, { ok: true, ...(await service.replace(caller, await readJson(req))) })
+      return true
+    }
+    if (url.pathname === '/team/message' && req.method === 'POST') {
+      sendJson(res, 200, { ok: true, ...(await service.message(caller, await readJson(req))) })
+      return true
+    }
+    if (url.pathname === '/team/mode' && req.method === 'POST') {
+      sendJson(res, 200, { ok: true, ...(await service.mode(caller, await readJson(req))) })
       return true
     }
     sendJson(res, 405, { ok: false, code: 'method_not_allowed', error: 'method not allowed' })

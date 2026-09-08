@@ -33,6 +33,79 @@ case "$INSTALL_PROVIDER" in
   *) printf 'Unsupported provider: %s (use claude, codex, pi, both, or all)\n' "$INSTALL_PROVIDER" >&2; exit 2 ;;
 esac
 
+# Compatibility contract: do not create a second LaunchAgent during the rename.
+LABEL="si.sergej.claudeslackproxy"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+plist_working_directory() {
+  awk '
+    /<key>WorkingDirectory<\/key>/ {
+      line = $0
+      sub(/^.*<key>WorkingDirectory<\/key>[[:space:]]*/, "", line)
+      if (line ~ /<string>[^<]*<\/string>/) {
+        sub(/^.*<string>/, "", line); sub(/<\/string>.*$/, "", line)
+        print line; exit
+      }
+      wanted = 1; next
+    }
+    wanted && /<string>[^<]*<\/string>/ {
+      line = $0; sub(/^.*<string>/, "", line); sub(/<\/string>.*$/, "", line)
+      print line; exit
+    }
+  ' "$1" 2>/dev/null
+}
+
+canonical_directory() {
+  (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+}
+
+verify_staged_install_target() {
+  [ "$RELOAD_DAEMON" = 0 ] || return 0
+  local target=$1
+  # This read-only preflight intentionally runs before an out-of-tree bootstrap
+  # can clone or pull. A no-reload activation still rewrites provider hooks and
+  # the public `sab` link, so only the loaded service checkout may be selected.
+  if command -v launchctl >/dev/null 2>&1 &&
+      launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    LOADED_BRIDGE="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '
+      /^[[:space:]]*working directory = / {
+        sub(/^[[:space:]]*working directory = /, ""); print; exit
+      }
+    ')"
+    if [ -z "$LOADED_BRIDGE" ]; then
+      LOADED_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '
+        /^[[:space:]]*pid = [0-9]+/ { print $3; exit }
+      ')"
+      if [ -n "$LOADED_PID" ] && command -v lsof >/dev/null 2>&1; then
+        LOADED_BRIDGE="$(lsof -a -p "$LOADED_PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+      fi
+    fi
+    if [ -z "$LOADED_BRIDGE" ]; then
+      printf '%s\n' "Refusing staged activation: the loaded service $LABEL exists, but its working directory cannot be verified."
+      printf '%s\n' "Repair or replace the LaunchAgent during an approved maintenance step; no files were changed."
+      exit 1
+    fi
+    if [ "$(canonical_directory "$LOADED_BRIDGE")" != "$(canonical_directory "$target")" ]; then
+      printf '%s\n' "Refusing staged activation from $target: the loaded service uses $LOADED_BRIDGE."
+      printf '%s\n' "Run this installer from the live installation during its approved staging step; no files were changed."
+      exit 1
+    fi
+  fi
+  if [ -f "$PLIST" ]; then
+    LIVE_BRIDGE="$(plist_working_directory "$PLIST")"
+    if [ -z "$LIVE_BRIDGE" ]; then
+      printf '%s\n' "Refusing staged activation: unable to determine the live installation from $PLIST."
+      printf '%s\n' "Repair or replace the LaunchAgent during an approved maintenance step; no files were changed."
+      exit 1
+    fi
+    if [ "$(canonical_directory "$LIVE_BRIDGE")" != "$(canonical_directory "$target")" ]; then
+      printf '%s\n' "Refusing staged activation from $target: the live installation is $LIVE_BRIDGE."
+      printf '%s\n' "Run this installer from the live installation during its approved staging step; no files were changed."
+      exit 1
+    fi
+  fi
+}
+
 BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd)"
 [ -n "$BRIDGE" ] || BRIDGE="$(pwd)"
 
@@ -46,6 +119,7 @@ if [ ! -f "$BRIDGE/daemon/daemon.mjs" ]; then
   elif [ -d "$NEUTRAL_DEST/.git" ]; then DEST="$NEUTRAL_DEST"
   else DEST="$NEUTRAL_DEST"
   fi
+  verify_staged_install_target "$DEST"
   printf 'Installing Slack Agent Bridge in %s…\n' "$DEST"
   if git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
     old_origin="$(git -C "$DEST" remote get-url origin 2>/dev/null || true)"
@@ -60,11 +134,10 @@ if [ ! -f "$BRIDGE/daemon/daemon.mjs" ]; then
   exec bash "$DEST/install.sh" --provider "$INSTALL_PROVIDER"
 fi
 
+verify_staged_install_target "$BRIDGE"
+
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
 BIN_DIR="${CCS_BIN_DIR:-/opt/homebrew/bin}"
-# Compatibility contract: do not create a second LaunchAgent during the rename.
-LABEL="si.sergej.claudeslackproxy"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_HOOKS="$CODEX_DIR/hooks.json"
@@ -164,19 +237,32 @@ else
 fi
 
 # ---- 4. provider hooks (merge, never clobber) -------------------------------
+# A staged activation may historically have registered a hook from an isolated
+# SAB worktree. Canonicalize known SAB checkout identities to this installer’s
+# path while preserving every unrelated hook group. Each provider file is
+# replaced once so an interruption cannot leave only some lifecycle events
+# updated.
 if wants_claude; then
   mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
   [ -f "$CLAUDE_SETTINGS" ] || printf '{}\n' > "$CLAUDE_SETTINGS"
   HOOK="$BRIDGE/hooks/hook.sh"
-  for ev in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop; do
-    tmp="$(mktemp)"
-    jq --arg ev "$ev" --arg cmd "$HOOK" '
-      .hooks = (.hooks // {}) |
-      .hooks[$ev] = ((.hooks[$ev] // []) as $arr |
-        if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
-        else $arr + [{matcher: ".*", hooks: [{type: "command", command: $cmd}]}] end)
-    ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
-  done
+  SAB_HOOK_RE='/(?:\.claudeslackproxy|\.slack-agent-bridge|ClaudeSlackProxy[^/]*|SlackAgentBridge[^/]*|slack-agent-bridge[^/]*)/hooks/hook\.sh$'
+  tmp="$(mktemp "$(dirname "$CLAUDE_SETTINGS")/.sab-claude-hooks.XXXXXX")"
+  jq --arg cmd "$HOOK" --arg sab_re "$SAB_HOOK_RE" '
+    .hooks = (.hooks // {}) |
+    reduce ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "Stop"][] as $ev (.;
+      .hooks[$ev] = (
+        [(.hooks[$ev] // [])[] |
+          .hooks = [(.hooks // [])[] |
+            select((.command // "") != $cmd and ((((.command // "") | test($sab_re)) | not)))] |
+          select((.hooks | length) > 0)
+        ] as $groups |
+        $groups + [{matcher: ".*", hooks: [{type: "command", command: $cmd}]}]
+      )
+    )
+  ' "$CLAUDE_SETTINGS" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CLAUDE_SETTINGS"
   say "  registered Claude hooks in $CLAUDE_SETTINGS"
 fi
 
@@ -184,22 +270,25 @@ if wants_codex; then
   mkdir -p "$CODEX_DIR"
   [ -f "$CODEX_HOOKS" ] || printf '{}\n' > "$CODEX_HOOKS"
   HOOK="$BRIDGE/hooks/codex-hook.sh"
-  for ev in SessionStart SessionEnd UserPromptSubmit Stop; do
-    tmp="$(mktemp)"
-    jq --arg ev "$ev" --arg cmd "$HOOK" '
-      .hooks = (.hooks // {}) |
-      .hooks[$ev] = ((.hooks[$ev] // []) as $arr |
-        if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
-        else $arr + [{hooks: [{type: "command", command: $cmd, timeout: 3}]}] end)
-    ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
-  done
-  tmp="$(mktemp)"
-  jq --arg cmd "$HOOK" '
+  SAB_HOOK_RE='/(?:\.claudeslackproxy|\.slack-agent-bridge|ClaudeSlackProxy[^/]*|SlackAgentBridge[^/]*|slack-agent-bridge[^/]*)/hooks/codex-hook\.sh$'
+  tmp="$(mktemp "$CODEX_DIR/.sab-codex-hooks.XXXXXX")"
+  jq --arg cmd "$HOOK" --arg sab_re "$SAB_HOOK_RE" '
     .hooks = (.hooks // {}) |
-    .hooks.PermissionRequest = ((.hooks.PermissionRequest // []) as $arr |
-      if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
-      else $arr + [{matcher: ".*", hooks: [{type: "command", command: $cmd, timeout: 590, statusMessage: "Waiting for Slack approval"}]}] end)
-  ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
+    reduce ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest"][] as $ev (.;
+      .hooks[$ev] = (
+        [(.hooks[$ev] // [])[] |
+          .hooks = [(.hooks // [])[] |
+            select((.command // "") != $cmd and ((((.command // "") | test($sab_re)) | not)))] |
+          select((.hooks | length) > 0)
+        ] as $groups |
+        if $ev == "PermissionRequest" then
+          $groups + [{matcher: ".*", hooks: [{type: "command", command: $cmd, timeout: 590, statusMessage: "Waiting for Slack approval"}]}]
+        else $groups + [{hooks: [{type: "command", command: $cmd, timeout: 3}]}] end
+      )
+    )
+  ' "$CODEX_HOOKS" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CODEX_HOOKS"
   say "  registered Codex hooks in $CODEX_HOOKS"
 fi
 

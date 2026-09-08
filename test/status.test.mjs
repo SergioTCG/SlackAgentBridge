@@ -149,12 +149,266 @@ test('status edits coalesce while a workspace-wide Slack budget is occupied', as
   assert.equal(slack.calls.at(-1)[1].text, 'working 4s')
 })
 
+test('clear cancels a queued edit and preempts unrelated cosmetic status traffic', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  const first = { id: 'S1', channel: 'C1' }
+  const second = { id: 'S2', channel: 'C2' }
+  const ending = { id: 'S3', channel: 'C3' }
+
+  await status.set(first, 'one')
+  await status.set(second, 'two')
+  await status.set(ending, 'ending')
+
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const originalUpdate = slack.web.chat.update
+  slack.web.chat.update = async args => {
+    if (args.channel === 'C1') { startedResolve(); await gate }
+    return originalUpdate(args)
+  }
+
+  const occupied = status.set(first, 'one newer')
+  await started
+  const unrelated = status.set(second, 'two newer')
+  const stale = status.set(ending, 'must never be sent')
+  const cleared = status.clear(ending)
+  release()
+  await Promise.all([occupied, unrelated, stale, cleared])
+
+  const afterOccupied = slack.calls.slice(4)
+  assert.equal(afterOccupied[0][0], 'delete')
+  assert.equal(afterOccupied[0][1].channel, 'C3')
+  assert.equal(afterOccupied.some(call => call[0] === 'update' && call[1].text === 'must never be sent'), false)
+  assert.equal(afterOccupied.some(call => call[0] === 'update' && call[1].text === 'two newer'), true)
+})
+
+test('clear cannot deadlock an in-flight status bump', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  const session = { id: 'S1', channel: 'C1' }
+  await status.set(session, 'working')
+
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const originalPost = slack.web.chat.postMessage
+  slack.web.chat.postMessage = async args => {
+    if (args.text === 'working') { startedResolve(); await gate }
+    return originalPost(args)
+  }
+
+  const bumped = status.bump(session)
+  await started
+  const cleared = status.clear(session)
+  release()
+
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('status clear deadlocked')), 1000))
+  await Promise.race([Promise.all([bumped, cleared]), timeout])
+  assert.equal(status.snapshot().normal, 0)
+  assert.equal(status.snapshot().priority, 0)
+  assert.equal(slack.calls.filter(call => call[0] === 'delete').length, 2)
+})
+
+test('clear invalidates a bump waiting inside the channel delivery queue', async () => {
+  const slack = fakeSlack()
+  let release
+  let queuedResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const queued = new Promise(resolve => { queuedResolve = resolve })
+  let statusPosts = 0
+  const status = createStatusMessages(slack.web, {
+    postMessage: async (channel, text, { valid } = {}) => {
+      statusPosts++
+      if (statusPosts === 2) {
+        queuedResolve()
+        await gate
+        if (valid && !valid()) return null
+      }
+      return slack.web.chat.postMessage({ channel, text })
+    },
+  })
+  const session = { id: 'S1', channel: 'C1' }
+  await status.set(session, 'working')
+
+  const bumped = status.bump(session, { afterTs: '11.000000' })
+  await queued
+  const cleared = status.clear(session)
+  release()
+  await Promise.all([bumped, cleared])
+
+  assert.equal(slack.calls.filter(call => call[0] === 'post').length, 1)
+  assert.deepEqual(slack.calls.filter(call => call[0] === 'delete').map(call => call[1].ts), ['10.000001'])
+})
+
+test('clear promotes bump cleanup ahead of unrelated cosmetic queue pressure', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  const ending = { id: 'S1', channel: 'C1' }
+  const occupied = { id: 'S2', channel: 'C2' }
+  const unrelated = { id: 'S3', channel: 'C3' }
+  await status.set(ending, 'ending')
+  await status.set(occupied, 'occupied')
+  await status.set(unrelated, 'unrelated')
+
+  let releasePost
+  let postStartedResolve
+  const postGate = new Promise(resolve => { releasePost = resolve })
+  const postStarted = new Promise(resolve => { postStartedResolve = resolve })
+  let replacement = true
+  const originalPost = slack.web.chat.postMessage
+  slack.web.chat.postMessage = async args => {
+    if (args.channel === 'C1' && replacement) {
+      replacement = false
+      postStartedResolve()
+      await postGate
+    }
+    return originalPost(args)
+  }
+
+  let releaseOccupied
+  let occupiedStartedResolve
+  const occupiedGate = new Promise(resolve => { releaseOccupied = resolve })
+  const occupiedStarted = new Promise(resolve => { occupiedStartedResolve = resolve })
+  const originalUpdate = slack.web.chat.update
+  slack.web.chat.update = async args => {
+    if (args.channel === 'C2' && args.text === 'occupied newer') {
+      occupiedStartedResolve()
+      await occupiedGate
+    }
+    return originalUpdate(args)
+  }
+
+  const bumped = status.bump(ending, { afterTs: '99.000000' })
+  await postStarted
+  const blocker = status.set(occupied, 'occupied newer')
+  const queuedCosmetic = status.set(unrelated, 'unrelated newer')
+  releasePost()
+  await occupiedStarted
+  const cleared = status.clear(ending)
+  releaseOccupied()
+  await Promise.all([bumped, blocker, queuedCosmetic, cleared])
+
+  const afterBlocker = slack.calls.slice(slack.calls.findIndex(call =>
+    call[0] === 'update' && call[1].text === 'occupied newer') + 1)
+  const cleanupIndex = afterBlocker.findIndex(call => call[0] === 'delete' && call[1].channel === 'C1')
+  const cosmeticIndex = afterBlocker.findIndex(call => call[0] === 'update' && call[1].text === 'unrelated newer')
+  assert.ok(cleanupIndex >= 0)
+  assert.ok(cosmeticIndex >= 0)
+  assert.ok(cleanupIndex < cosmeticIndex, 'completed-turn cleanup must preempt unrelated cosmetic traffic')
+})
+
+test('status scheduler exposes bounded operational queue depth', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web)
+  assert.deepEqual(status.snapshot(), { active: false, normal: 0, priority: 0, sessions: 0 })
+  await status.set({ id: 'S1', channel: 'C1' }, 'working')
+  assert.deepEqual(status.snapshot(), { active: false, normal: 0, priority: 0, sessions: 1 })
+})
+
+test('clearing a session without a posted status does not consume the workspace API interval', async () => {
+  const slack = fakeSlack()
+  const status = createStatusMessages(slack.web, { minIntervalMs: 100 })
+
+  await status.clear({ id: 'EMPTY', channel: 'C0' })
+  const posted = status.set({ id: 'LIVE', channel: 'C1' }, 'working')
+  const outcome = await Promise.race([
+    posted.then(() => 'posted'),
+    new Promise(resolve => setTimeout(() => resolve('delayed'), 20)),
+  ])
+
+  assert.equal(outcome, 'posted')
+  await posted
+  assert.deepEqual(slack.calls.map(call => call[0]), ['post'])
+})
+
+test('deferred clear deletes from the channel captured before provider handoff', async () => {
+  const slack = fakeSlack()
+  let release
+  let startedResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const originalUpdate = slack.web.chat.update
+  slack.web.chat.update = async args => {
+    startedResolve()
+    await gate
+    return originalUpdate(args)
+  }
+  const status = createStatusMessages(slack.web)
+  const session = { id: 'S1', channel: 'C-source' }
+  await status.set(session, 'working')
+
+  const update = status.set(session, 'working still')
+  await started
+  const clearing = status.clear(session)
+  session.channel = null
+  release()
+  await Promise.all([update, clearing])
+
+  const deletion = slack.calls.find(call => call[0] === 'delete')
+  assert.equal(deletion?.[1]?.channel, 'C-source')
+  assert.equal(deletion?.[1]?.ts, '10.000001')
+})
+
+test('deferred bump cleanup keeps the channel captured before provider handoff', async () => {
+  const slack = fakeSlack()
+  let release
+  let replacementResolve
+  const gate = new Promise(resolve => { release = resolve })
+  const replacementPosted = new Promise(resolve => { replacementResolve = resolve })
+  let posts = 0
+  const status = createStatusMessages(slack.web, {
+    postMessage: async (channel, text) => {
+      posts++
+      const result = await slack.web.chat.postMessage({ channel, text })
+      if (posts === 2) {
+        replacementResolve()
+        await gate
+      }
+      return result
+    },
+  })
+  const session = { id: 'S1', channel: 'C-source' }
+  await status.set(session, 'working')
+
+  const bumping = status.bump(session, { afterTs: '99.000000' })
+  await replacementPosted
+  const clearing = status.clear(session)
+  session.channel = null
+  release()
+  await Promise.all([bumping, clearing])
+
+  const deletions = slack.calls.filter(call => call[0] === 'delete')
+  assert.equal(deletions.length, 2)
+  assert.ok(deletions.every(call => call[1].channel === 'C-source'))
+  assert.deepEqual(deletions.map(call => call[1].ts).sort(), ['10.000001', '11.000001'])
+})
+
+test('bridge health exposes status-queue pressure without provider or Slack secrets', () => {
+  const block = /if \(name === 'health'\) \{([\s\S]*?)\n  \}\n  if \(name === 'kill'\)/.exec(daemon)?.[1] || ''
+  assert.match(block, /liveStatuses\.snapshot\(\)/)
+  assert.match(block, /Status queue/)
+  assert.doesNotMatch(block, /SLACK_(?:BOT|APP)_TOKEN/)
+})
+
 test('daemon re-anchors status after posts, topic changes, and channel messages', () => {
   assert.match(daemon, /async function postSlackMessage[\s\S]*bumpStatusForChannel\(channel, result\?\.ts\)/)
   assert.match(daemon, /const changed = await syncTopic[\s\S]*if \(changed\) await bumpStatus/)
   assert.match(daemon, /event\.subtype === 'channel_topic'[\s\S]*bumpStatusForChannel\(event\.channel, event\.ts \|\| null\)/)
   assert.match(daemon, /if \(!event\.thread_ts\) await bumpStatusForChannel\(event\.channel, event\.ts \|\| null\)/)
   assert.match(daemon, /liveStatuses\.adopt\(s\.id, ts\)/)
+})
+
+test('provider output is delivered without waiting behind cosmetic status mutations', () => {
+  assert.match(daemon, /async function postMd\(channel, md, \{ waitForBump = true, reanchor = true \} = \{\}\)/)
+  assert.match(daemon, /function postProviderOutput\(channel, md, \{ keepStatus = false \} = \{\}\)/)
+  assert.match(daemon, /return postMd\(channel, md, \{ waitForBump: false, reanchor: keepStatus \}\)/)
+  assert.match(daemon, /finalizeCodexTurn[\s\S]*postProviderOutput\(session\.channel, text\)/)
+  const commentary = /if \(url\.pathname === '\/codex\/commentary'[\s\S]*?\n    return\n  \}/.exec(daemon)?.[0] || ''
+  assert.match(commentary, /postProviderOutput\(session\.channel, commentary\.text, \{ keepStatus: true \}\)/)
 })
 
 test('Codex restart recovery preserves or reconstructs the active turn duration', () => {

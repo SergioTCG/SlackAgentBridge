@@ -35,10 +35,14 @@ async function rawGet(base, pathname, requestHeaders) {
 
 test('team HTTP exposes context, peers, inbox, and exact task status', async () => {
   const seen = []
+  const inboxSeen = []
   const service = {
     context: async meta => { seen.push(meta); return { role: 'coordinator' } },
     peers: async () => [{ alias: 'parallel-1' }],
-    inbox: async (_meta, options) => [{ id: `limit-${options.limit}-after-${options.after}` }],
+    inbox: async (_meta, options) => {
+      inboxSeen.push(options)
+      return { tasks: [{ id: `limit-${options.limit}-after-${options.after}` }], nextCursor: 'next-page' }
+    },
     task: async (_meta, id) => ({ id, status: 'running' }),
     send: async () => assert.fail('unexpected send'),
     reply: async () => assert.fail('unexpected reply'),
@@ -49,20 +53,40 @@ test('team HTTP exposes context, peers, inbox, and exact task status', async () 
     assert.deepEqual(await response.json(), { ok: true, context: { role: 'coordinator' } })
     response = await fetch(`${base}/team/peers${caller}`, { headers })
     assert.deepEqual((await response.json()).peers, [{ alias: 'parallel-1' }])
+    response = await fetch(`${base}/team/inbox${caller}&limit=5&active=true&target=parallel-1&status=queued,running&since=2026-01-01T00%3A00%3A00.000Z&cursor=page-one`, { headers })
+    assert.deepEqual(await response.json(), { ok: true, tasks: [{ id: 'limit-5-after-null' }], nextCursor: 'next-page' })
+    assert.deepEqual(inboxSeen[0], {
+      limit: '5', after: null, cursor: 'page-one', active: true,
+      target: 'parallel-1', status: ['queued', 'running'], since: '2026-01-01T00:00:00.000Z',
+    })
     response = await fetch(`${base}/team/inbox${caller}&limit=5&after=task_old`, { headers })
     assert.deepEqual((await response.json()).tasks, [{ id: 'limit-5-after-task_old' }])
     response = await fetch(`${base}/team/tasks/task_123${caller}`, { headers })
     assert.deepEqual((await response.json()).task, { id: 'task_123', status: 'running' })
   })
   assert.deepEqual(seen[0], { ppid: '123', tmux: 'sab-test', provider: 'codex' })
+  assert.equal(inboxSeen[1].after, 'task_old')
 })
 
-test('team HTTP accepts JSON-safe send and reply requests', async () => {
+test('team HTTP rejects ambiguous legacy and filtered inbox cursors', async () => {
+  const service = { inbox: async () => assert.fail('ambiguous inbox request reached service') }
+  await withServer(service, async base => {
+    const response = await fetch(`${base}/team/inbox${caller}&after=task_old&active=true`, { headers })
+    assert.equal(response.status, 400)
+    assert.equal((await response.json()).code, 'invalid_filter_combo')
+  })
+})
+
+test('team HTTP accepts JSON-safe send, reply, control, and mode requests', async () => {
   const calls = []
   const service = {
     context: async () => null, peers: async () => [], inbox: async () => [], task: async () => null,
     send: async (meta, body) => { calls.push(['send', meta, body]); return { task: { id: 'task_one' }, created: true } },
     reply: async (meta, body) => { calls.push(['reply', meta, body]); return { reply: { id: 'reply_one' } } },
+    cancel: async (meta, body) => { calls.push(['cancel', meta, body]); return { task: { id: 'task_one', status: 'cancelled' } } },
+    replace: async (meta, body) => { calls.push(['replace', meta, body]); return { task: { id: 'task_one', instruction: body.text } } },
+    message: async (meta, body) => { calls.push(['message', meta, body]); return { message: { id: 'message_one' } } },
+    mode: async (meta, body) => { calls.push(['mode', meta, body]); return { mode: body.mode } },
   }
   await withServer(service, async base => {
     const options = payload => ({ method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(payload) })
@@ -72,9 +96,18 @@ test('team HTTP accepts JSON-safe send and reply requests', async () => {
     response = await fetch(`${base}/team/reply${caller}`, options({ taskId: 'task_one', text: 'Progress.', requestId: 'r2' }))
     assert.equal(response.status, 200)
     assert.equal((await response.json()).reply.id, 'reply_one')
+    response = await fetch(`${base}/team/cancel${caller}`, options({ taskId: 'task_one', reason: 'Done elsewhere.', requestId: 'r3' }))
+    assert.equal((await response.json()).task.status, 'cancelled')
+    response = await fetch(`${base}/team/replace${caller}`, options({ taskId: 'task_one', text: 'New work.', requestId: 'r4' }))
+    assert.equal((await response.json()).task.instruction, 'New work.')
+    response = await fetch(`${base}/team/message${caller}`, options({ taskId: 'task_one', text: 'Proceed.', requestId: 'r5' }))
+    assert.equal((await response.json()).message.id, 'message_one')
+    response = await fetch(`${base}/team/mode${caller}`, options({ mode: 'draining' }))
+    assert.equal((await response.json()).mode, 'draining')
   })
   assert.equal(calls[0][0], 'send')
   assert.equal(calls[1][0], 'reply')
+  assert.deepEqual(calls.slice(2).map(call => call[0]), ['cancel', 'replace', 'message', 'mode'])
 })
 
 test('team HTTP rejects browser origins, non-loopback Host, wrong media type, and oversized bodies', async () => {

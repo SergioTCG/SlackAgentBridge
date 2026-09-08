@@ -64,10 +64,20 @@ export function createTerminalControl({
     try { return await current } finally { if (locks.get(tmux) === current) locks.delete(tmux) }
   }
 
-  async function one(session, action) {
+  async function one(session, action, expectedSessionId = null) {
+    const claimedId = expectedSessionId || session.id
+    const claimedChannel = session.channel
+    const claimedTmux = session.tmux
     return locked(session.tmux, async () => {
+      const authoritative = () => session.id === claimedId && session.channel === claimedChannel &&
+        session.tmux === claimedTmux && state.sessions?.[claimedId] === session &&
+        state.channels?.[claimedChannel] === claimedId
+      if (!authoritative()) throw new Error(`session ${claimedId.slice(0, 8)} is no longer authoritative`)
       if (!(await nodes.sessionAlive(session))) {
-        throw new Error(`session ${session.id.slice(0, 8)} is no longer active`)
+        throw new Error(`session ${claimedId.slice(0, 8)} is no longer active`)
+      }
+      if (!authoritative()) {
+        throw new Error(`session ${claimedId.slice(0, 8)} is no longer authoritative`)
       }
       return action === 'open' ? nodes.openTerminal(session) : nodes.closeTerminal(session)
     })
@@ -77,15 +87,18 @@ export function createTerminalControl({
     return terminalRows(await sessions(), { executionNodes: nodes })
   }
 
-  async function act(action, { selector = '', all = false, channel = null } = {}) {
+  async function act(action, { selector = '', all = false, channel = null, expectedSessionId = null } = {}) {
     if (action !== 'open' && action !== 'close') throw new Error('unknown terminal action')
     const active = await sessions()
     let targets
     if (all) targets = active
     else if (channel) {
       const sessionId = state.channels?.[channel]
-      const session = active.find(candidate => candidate.id === sessionId && candidate.channel === channel)
-      if (!session) throw new Error('this channel has no active session')
+      const session = active.find(candidate => candidate.id === sessionId && candidate.channel === channel &&
+        (!expectedSessionId || candidate.id === expectedSessionId))
+      if (!session) throw new Error(expectedSessionId
+        ? `session ${expectedSessionId.slice(0, 8)} is no longer authoritative`
+        : 'this channel has no active session')
       targets = [session]
     } else {
       const resolved = resolveTerminalSession(active, selector)
@@ -95,7 +108,7 @@ export function createTerminalControl({
 
     const results = []
     for (const session of targets) {
-      try { results.push({ session, result: await one(session, action) }) }
+      try { results.push({ session, result: await one(session, action, all ? session.id : expectedSessionId) }) }
       catch (error) { results.push({ session, error: String(error?.message || error) }) }
     }
     const failures = results.filter(item => item.error)

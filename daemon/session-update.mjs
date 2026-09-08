@@ -51,6 +51,189 @@ export function groupUpdateSessions(sessions) {
   return groups
 }
 
+// Native providers can replace their conversation identity in-place (for
+// example Claude `/clear`). Runtime maintenance state is keyed by that native
+// identity, so carry every not-yet-delivered prompt and lifecycle fence to the
+// replacement before the old key is discarded.
+export function rebindSessionRuntimeState(fromId, toId, {
+  pendingBySession,
+  updatingSessionIds,
+  restartingSessionIds,
+  wakingSessions,
+  fenceOwners,
+} = {}) {
+  if (!fromId || !toId || fromId === toId) return false
+
+  if (pendingBySession?.has(fromId)) {
+    const prior = pendingBySession.get(fromId) || []
+    const replacement = pendingBySession.get(toId) || []
+    if (prior.length || replacement.length) pendingBySession.set(toId, [...prior, ...replacement])
+    pendingBySession.delete(fromId)
+  }
+  for (const ids of [updatingSessionIds, restartingSessionIds]) {
+    if (ids?.delete(fromId)) ids.add(toId)
+  }
+  if (wakingSessions?.has(fromId)) {
+    if (!wakingSessions.has(toId)) wakingSessions.set(toId, wakingSessions.get(fromId))
+    wakingSessions.delete(fromId)
+  }
+  if (fenceOwners?.has(fromId)) {
+    if (!fenceOwners.has(toId)) fenceOwners.set(toId, fenceOwners.get(fromId))
+    fenceOwners.delete(fromId)
+  }
+  return true
+}
+
+// Native replacement hooks authenticate through asynchronous PID/tmux checks.
+// A queue drain can finish during those checks, so keep an exact snapshot of
+// only the prompts which overlap an already-started replacement handler. The
+// tracker also implements the WeakMap surface consumed by the drain, allowing
+// a hook which starts just before the drain to capture later in-flight prompts.
+export function createSessionReplacementHookTracker() {
+  const live = new WeakMap()
+  const hooks = new WeakMap()
+  const addPrompt = (handle, prompt) => {
+    if (!handle.prompts.includes(prompt)) handle.prompts.push(prompt)
+  }
+  const capture = (owner, prompts) => {
+    const active = hooks.get(owner)
+    if (!active) return
+    for (const handle of active) {
+      for (const prompt of Array.isArray(prompts) ? prompts : []) addPrompt(handle, prompt)
+    }
+  }
+  return {
+    set(owner, prompts) {
+      const snapshot = Array.isArray(prompts) ? [...prompts] : []
+      live.set(owner, snapshot)
+      capture(owner, snapshot)
+      return this
+    },
+    get: owner => live.get(owner),
+    has: owner => live.has(owner),
+    delete: owner => live.delete(owner),
+    begin(owner) {
+      if (!owner || typeof owner !== 'object') return null
+      const handle = { owner, prompts: [], active: true }
+      const active = hooks.get(owner) || new Set()
+      active.add(handle)
+      hooks.set(owner, active)
+      capture(owner, live.get(owner))
+      return handle
+    },
+    finish(handle) {
+      if (!handle?.active) return false
+      const active = hooks.get(handle.owner)
+      active?.delete(handle)
+      if (!active?.size) hooks.delete(handle.owner)
+      handle.active = false
+      handle.prompts = []
+      return true
+    },
+    prompts: handle => handle?.active ? [...handle.prompts] : [],
+  }
+}
+
+// A retained queue can outlive a failed resurrection. A later owner message is
+// the explicit retry signal only when no process, wake, maintenance operation,
+// or active drain already owns delivery.
+export function shouldRetryDormantSessionWake({
+  pending = false,
+  providerAlive = false,
+  waking = false,
+  updating = false,
+  draining = false,
+} = {}) {
+  return Boolean(pending && !providerAlive && !waking && !updating && !draining)
+}
+
+// Startup metadata is allowed to fail without trapping the session behind a
+// stale maintenance marker. An active drain retains exclusive ownership; a
+// surviving queue remains the direct-input fence but becomes explicitly
+// retryable through /sab-update.
+export function recoverSessionInputFence(sessionId, {
+  pendingBySession,
+  updatingSessionIds,
+  drainingSessionIds,
+  fenceOwners,
+  expectedOwner = null,
+} = {}) {
+  if (!sessionId) return 'released'
+  if (expectedOwner && fenceOwners?.get(sessionId) !== expectedOwner) return 'superseded'
+  if (drainingSessionIds?.has(sessionId)) return 'draining'
+  updatingSessionIds?.delete(sessionId)
+  if (!expectedOwner || fenceOwners?.get(sessionId) === expectedOwner) fenceOwners?.delete(sessionId)
+  return pendingBySession?.get(sessionId)?.length ? 'retry' : 'released'
+}
+
+// Drain until the queue is observably empty. New input can arrive while an
+// earlier paste is awaiting the provider; it remains fenced and is picked up
+// by the next loop iteration instead of overtaking the queued prompt.
+export async function drainSessionInputQueue(sessionIdentity, {
+  pendingBySession,
+  updatingSessionIds,
+  drainingSessionIds,
+  fenceOwners,
+  expectedOwner = null,
+  inFlightPrompts,
+  inFlightOwner = null,
+  deliver,
+} = {}) {
+  const resolveIdentity = typeof sessionIdentity === 'function' ? sessionIdentity : () => sessionIdentity
+  let activeId = resolveIdentity()
+  if (!activeId || typeof deliver !== 'function') throw new TypeError('session input drain requires an identity and deliver function')
+  if (drainingSessionIds?.has(activeId)) return false
+  drainingSessionIds?.add(activeId)
+  const followReplacement = () => {
+    const nextId = resolveIdentity()
+    if (!nextId || nextId === activeId) return activeId
+    drainingSessionIds?.delete(activeId)
+    if (drainingSessionIds?.has(nextId)) throw new Error('replacement session already has an input drain')
+    activeId = nextId
+    drainingSessionIds?.add(activeId)
+    return activeId
+  }
+  let completed = false
+  try {
+    while (true) {
+      const sessionId = followReplacement()
+      const batch = [...(pendingBySession?.get(sessionId) || [])]
+      if (!batch.length) break
+      pendingBySession.set(sessionId, [])
+      for (let index = 0; index < batch.length; index++) {
+        if (inFlightPrompts && inFlightOwner) inFlightPrompts.set(inFlightOwner, batch.slice(index))
+        try {
+          await deliver(batch[index])
+          if (inFlightPrompts && inFlightOwner) {
+            if (index + 1 < batch.length) inFlightPrompts.set(inFlightOwner, batch.slice(index + 1))
+            else inFlightPrompts.delete(inFlightOwner)
+          }
+        } catch (error) {
+          const replacementId = followReplacement()
+          const arrived = pendingBySession.get(replacementId) || []
+          pendingBySession.set(replacementId, [...batch.slice(index), ...arrived])
+          throw error
+        }
+      }
+    }
+    const sessionId = followReplacement()
+    if (expectedOwner && fenceOwners?.get(sessionId) !== expectedOwner) {
+      throw new Error('session input fence ownership changed during delivery')
+    }
+    pendingBySession?.delete(sessionId)
+    updatingSessionIds?.delete(sessionId)
+    if (!expectedOwner || fenceOwners?.get(sessionId) === expectedOwner) fenceOwners?.delete(sessionId)
+    completed = true
+    return true
+  } finally {
+    drainingSessionIds?.delete(activeId)
+    if (inFlightPrompts && inFlightOwner) inFlightPrompts.delete(inFlightOwner)
+    // A failed delivery deliberately retains the maintenance fence and queue.
+    // Callers may retry, but direct provider input must not overtake it.
+    if (!completed && pendingBySession && !pendingBySession.has(activeId)) pendingBySession.set(activeId, [])
+  }
+}
+
 // Stop every eligible session for one provider before swapping its CLI, then
 // resume every session even when the update check itself fails. Callers provide
 // all effects so this orchestration can be regression-tested without Slack,
@@ -73,8 +256,8 @@ export async function runBulkSessionUpdate(sessions, {
         continue
       }
       try {
-        await stopSession(session)
-        stopped.push(session)
+        const stopResult = await stopSession(session)
+        stopped.push({ session, stopResult })
       } catch (error) {
         results.push({ session, provider, status: 'failed', phase: 'stop', error: String(error?.message || error) })
       }
@@ -86,9 +269,9 @@ export async function runBulkSessionUpdate(sessions, {
     try { update = await updateProvider(provider) } catch (error) { updateError = String(error?.message || error) }
     providers.push({ provider, update, error: updateError })
 
-    for (const session of stopped) {
+    for (const { session, stopResult } of stopped) {
       try {
-        await resumeSession(session, { update, updateError })
+        await resumeSession(session, { update, updateError }, stopResult)
         results.push({ session, provider, status: 'resumed', update, updateError })
       } catch (error) {
         results.push({ session, provider, status: 'failed', phase: 'resume', error: String(error?.message || error), update, updateError })

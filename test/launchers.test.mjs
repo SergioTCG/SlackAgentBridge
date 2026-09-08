@@ -141,6 +141,96 @@ test('Codex runner observes semantic commentary through a loopback App Server pr
   assert.match(source, /using the direct TUI/)
 })
 
+test('Codex runner lets the event proxy drain before stopping its App Server', () => {
+  const source = fs.readFileSync(runner, 'utf8')
+  const cleanup = /cleanup_sidecars\(\) \{([\s\S]*?)\n  \}/.exec(source)?.[1] || ''
+  const stopProxy = cleanup.indexOf('kill "$proxy_pid"')
+  const waitProxy = cleanup.indexOf('wait "$proxy_pid"')
+  const stopApp = cleanup.indexOf('kill "$app_pid"')
+  const waitApp = cleanup.indexOf('wait "$app_pid"')
+  assert.ok(stopProxy >= 0 && waitProxy > stopProxy, 'proxy must be stopped and reaped')
+  assert.ok(stopApp > waitProxy, 'App Server must remain alive until the proxy drain completes')
+  assert.ok(waitApp > stopApp, 'App Server must be reaped after it is stopped')
+})
+
+test('Codex App Server remains live throughout the proxy shutdown drain', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-drain-order-'))
+  try {
+    const appPid = path.join(temp, 'app.pid')
+    const observed = path.join(temp, 'proxy-observed')
+    fs.writeFileSync(path.join(temp, 'codex'), `#!/bin/bash
+if [ "$1" = app-server ]; then
+  printf '%s\n' "$$" > "$CODEX_APP_PID_FILE"
+  printf '%s\n' 'listening on: ws://127.0.0.1:45678'
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
+exit 0
+`, { mode: 0o755 })
+    fs.writeFileSync(path.join(temp, 'node'), `#!/bin/bash
+printf '%s\n' 'listening on: ws://127.0.0.1:45679'
+observe_app() {
+  sleep 0.2
+  pid="$(cat "$CODEX_APP_PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then printf '%s\n' alive > "$CODEX_PROXY_OBSERVED"
+  else printf '%s\n' dead > "$CODEX_PROXY_OBSERVED"; fi
+  exit 0
+}
+trap observe_app TERM INT
+while :; do sleep 1; done
+`, { mode: 0o755 })
+
+    const run = spawnSync(sab, ['__run', 'codex'], {
+      encoding: 'utf8', timeout: 10000,
+      env: {
+        ...process.env,
+        PATH: `${temp}:${process.env.PATH}`,
+        TMPDIR: temp,
+        TMUX: 'test-client',
+        CCS_TMUX: 'sab-drain-order',
+        CODEX_APP_PID_FILE: appPid,
+        CODEX_PROXY_OBSERVED: observed,
+      },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    assert.equal(fs.readFileSync(observed, 'utf8').trim(), 'alive')
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('Codex runner surfaces and propagates an exhausted proxy shutdown drain', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-drain-failure-'))
+  try {
+    fs.writeFileSync(path.join(temp, 'codex'), `#!/bin/bash
+if [ "$1" = app-server ]; then
+  printf '%s\n' 'listening on: ws://127.0.0.1:45678'
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
+exit 0
+`, { mode: 0o755 })
+    fs.writeFileSync(path.join(temp, 'node'), `#!/bin/bash
+printf '%s\n' 'listening on: ws://127.0.0.1:45679'
+trap 'printf "%s\\n" "sab Codex event proxy: shutdown drain timed out; stable final was not delivered" >&2; exit 1' TERM INT
+while :; do sleep 1; done
+`, { mode: 0o755 })
+
+    const run = spawnSync(sab, ['__run', 'codex'], {
+      encoding: 'utf8', timeout: 10000,
+      env: {
+        ...process.env, PATH: `${temp}:${process.env.PATH}`, TMPDIR: temp,
+        TMUX: 'test-client', CCS_TMUX: 'sab-drain-failure',
+      },
+    })
+    assert.notEqual(run.status, 0)
+    assert.match(run.stderr, /shutdown drain timed out; stable final was not delivered/)
+    assert.match(run.stderr, /Codex response delivery did not drain/)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('Codex runner inserts the transparent event proxy without changing user flags', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-codex-proxy-'))
   try {

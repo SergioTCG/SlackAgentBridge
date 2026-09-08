@@ -31,29 +31,87 @@ daemonUrl.searchParams.set('tmux', tmux)
 const finalDaemonUrl = new URL(daemonUrl)
 finalDaemonUrl.pathname = '/codex/final'
 const deliveries = new Map()
+let deliveryTail = Promise.resolve()
+let shuttingDown = false
+let activeRequest = null
+let stableDeliveryFailure = null
+let resolveShutdownSignal
+const shutdownSignal = new Promise(resolve => { resolveShutdownSignal = resolve })
 const retryDelays = [0, 250, 1000, 3000, 7000, 15000]
+const SHUTDOWN_DRAIN_MS = 30000
 const pendingFinalAnswers = new Map()
 const MAX_PENDING_FINALS = 128
 
-async function deliver({ key, payload, endpoint, label }) {
+async function waitForRetry(delay, label) {
+  if (shuttingDown && label === 'commentary') return false
+  if (!delay) return true
+  if (label === 'final') {
+    // Stable finals retain their real backoff even after SIGTERM. Collapsing
+    // retries into a burst makes transient daemon/Slack pressure permanent.
+    await new Promise(resolve => setTimeout(resolve, delay))
+    return true
+  }
+  await Promise.race([
+    new Promise(resolve => setTimeout(resolve, delay)),
+    shutdownSignal,
+  ])
+  // Commentary is useful progress, but must not strand a stable fallback final
+  // behind backoff when the TUI is exiting.
+  return !shuttingDown
+}
+
+async function postDelivery(endpoint, payload, label) {
+  const controller = new AbortController()
+  const request = { controller, label }
+  activeRequest = request
+  const timeout = setTimeout(() => controller.abort(), shuttingDown ? 3000 : 15000)
+  try {
+    return await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-ccs-provider': 'codex' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+    if (activeRequest === request) activeRequest = null
+  }
+}
+
+function deliver({ key, payload, endpoint, label }) {
   if (deliveries.has(key)) return deliveries.get(key)
-  const pending = (async () => {
+  // App Server frames arrive in semantic order, but independent fetches can
+  // complete out of order under Slack backoff or daemon latency. That can put a
+  // later final ahead of an earlier final—or a final ahead of its commentary—
+  // and make the daemon reject the delayed event as stale. Reserve the key
+  // synchronously, then serialize stable commentary/final deliveries in the
+  // exact order in which inspectFrame accepted them.
+  const pending = deliveryTail.then(async () => {
+    let lastFailure = null
     for (const delay of retryDelays) {
-      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
+      if (!(await waitForRetry(delay, label))) return
       try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-ccs-provider': 'codex' },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(15000),
-        })
+        const response = await postDelivery(endpoint, payload, label)
         if (response.ok) return
-        if (![409, 429, 503].includes(response.status)) return
-      } catch {}
+        lastFailure = new Error(`HTTP ${response.status}`)
+        if (![409, 429, 503].includes(response.status)) break
+      } catch (error) {
+        lastFailure = error
+      }
+      if (shuttingDown && label === 'commentary') return
     }
-    process.stderr.write(`sab Codex event proxy: ${label} delivery timed out (${payload.itemId.slice(0, 12)})\n`)
-  })().finally(() => deliveries.delete(key))
+    const failure = new Error(`${label} delivery failed (${payload.itemId.slice(0, 12)}): ${String(lastFailure?.message || 'retry budget exhausted')}`)
+    process.stderr.write(`sab Codex event proxy: ${failure.message}\n`)
+    if (label === 'final') throw failure
+  })
   deliveries.set(key, pending)
+  deliveryTail = pending.catch(error => {
+    if (label === 'final' && !stableDeliveryFailure) stableDeliveryFailure = error
+  })
+  void pending.then(
+    () => { if (deliveries.get(key) === pending) deliveries.delete(key) },
+    () => { if (deliveries.get(key) === pending) deliveries.delete(key) },
+  )
   return pending
 }
 
@@ -86,15 +144,18 @@ function inspectFrame(data, isBinary) {
     const message = JSON.parse(data.toString('utf8'))
     const commentary = commentaryFromAppServerMessage(message)
     if (commentary) void deliver({
-      key: `commentary:${commentary.itemId}`,
+      key: `commentary:${commentary.threadId}\u0000${commentary.turnId}\u0000${commentary.itemId}`,
       payload: commentary,
       endpoint: daemonUrl,
       label: 'commentary',
     })
     const final = finalFromFrame(message)
     if (final) void deliver({
-      key: `final:${final.turnId}`,
-      payload: final,
+      key: `final:${finalKey(final)}`,
+      // This timestamp is captured at the App Server completion boundary, not
+      // after retry/backoff. The daemon uses it only to prevent a delayed old
+      // final from clearing a newer turn on this same host.
+      payload: { ...final, observedAt: Date.now() },
       endpoint: finalDaemonUrl,
       label: 'final',
     })
@@ -151,11 +212,53 @@ server.on('listening', () => {
 })
 server.on('error', error => fail(error.message))
 
+let shutdownPromise = null
+function closeWebSocket(socket, reason) {
+  if (!socket || socket.readyState === WebSocket.CLOSED) return Promise.resolve()
+  const closed = new Promise(resolve => socket.once('close', resolve))
+  if (socket.readyState === WebSocket.OPEN) socket.close(1001, reason)
+  else if (socket.readyState === WebSocket.CONNECTING) socket.terminate()
+  return closed
+}
+
+async function drainStableDeliveriesAfterIngress() {
+  // A signal can run after an upstream frame reached the socket but before ws
+  // invokes its `message` listener. Establish the close listeners first, then
+  // close both ingress surfaces. The upstream close event is ordered after all
+  // accepted message events, so no final can be appended after this boundary.
+  const upstreamClosed = closeWebSocket(activeUpstream, 'bridge stopping')
+  const clientClosed = closeWebSocket(activeClient, 'bridge stopping')
+  server.close()
+  await Promise.all([upstreamClosed, clientClosed])
+
+  // Let message callbacks append their deliveries, then follow the tail until
+  // one complete event-loop turn observes no replacement. A one-time snapshot
+  // is unsafe because inspectFrame reserves delivery synchronously.
+  await new Promise(resolve => setImmediate(resolve))
+  for (;;) {
+    const tail = deliveryTail
+    await tail
+    await new Promise(resolve => setImmediate(resolve))
+    if (tail === deliveryTail) return !stableDeliveryFailure
+  }
+}
+
 function shutdown() {
-  if (activeClient?.readyState === WebSocket.OPEN) activeClient.close(1001, 'bridge stopping')
-  if (activeUpstream?.readyState === WebSocket.OPEN) activeUpstream.close(1001, 'bridge stopping')
-  server.close(() => process.exit(0))
-  setTimeout(() => process.exit(0), 1000).unref()
+  if (shutdownPromise) return shutdownPromise
+  shuttingDown = true
+  resolveShutdownSignal()
+  if (activeRequest?.label === 'commentary') activeRequest.controller.abort()
+  const timeout = new Promise(resolve => setTimeout(() => resolve(false), SHUTDOWN_DRAIN_MS))
+  shutdownPromise = Promise.race([
+    drainStableDeliveriesAfterIngress(),
+    timeout,
+  ]).then(drained => {
+    if (!drained) {
+      process.stderr.write('sab Codex event proxy: shutdown drain timed out; a stable delivery may require daemon recovery\n')
+    }
+    process.exit(drained ? 0 : 1)
+  })
+  return shutdownPromise
 }
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)

@@ -30,6 +30,12 @@ test('Slack manifest has provider-neutral metadata', () => {
   assert.equal(manifest.features.bot_user.display_name, 'Clavdivs')
 })
 
+test('the manifest enables owner-safe App Home delivery', () => {
+  assert.equal(manifest.features.app_home.home_tab_enabled, true)
+  assert.equal(manifest.features.app_home.messages_tab_enabled, false)
+  assert.ok(manifest.settings.event_subscriptions.bot_events.includes('app_home_opened'))
+})
+
 test('the manifest exposes only the unified SAB namespace', () => {
   const expected = ['new', 'model', 'effort', 'flags', 'update', 'stop', 'switch', 'kill', 'status', 'usage',
     'run', 'account', 'terminal', 'team', 'health', 'cleanup', 'claim', 'help']
@@ -46,7 +52,9 @@ test('managed-run and terminal controls are available through SAB', () => {
   assert.match(terminal.usage_hint, /open-all/)
   assert.match(terminal.usage_hint, /close-all/)
   const update = commands.find(item => item.command === '/sab-update')
-  assert.equal(update.usage_hint, '[all]')
+  assert.equal(update.usage_hint, '[current | all]')
   const team = commands.find(item => item.command === '/sab-team')
   assert.match(team.usage_hint, /permissions/)
+  assert.match(team.usage_hint, /drain/)
+  assert.match(team.usage_hint, /resume/)
 })

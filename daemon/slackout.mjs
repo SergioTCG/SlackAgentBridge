@@ -6,13 +6,18 @@ const chains = new Map()
 const lastAt = new Map()
 
 // Serialize all posts per channel with a ≥1.1s gap (Slack: ~1 msg/sec/channel).
-export function enqueue(channel, fn) {
+export function enqueue(channel, fn, { valid = null } = {}) {
   const prev = chains.get(channel) || Promise.resolve()
   const next = prev
     .catch(() => {})
     .then(async () => {
+      if (valid && !valid()) return undefined
       const wait = 1100 - (Date.now() - (lastAt.get(channel) || 0))
       if (wait > 0) await sleep(wait)
+      // Cosmetic callers can be invalidated while waiting behind earlier
+      // channel traffic. Recheck at the actual Slack boundary so they do not
+      // consume a rate-limit slot or hold a final response behind stale work.
+      if (valid && !valid()) return undefined
       try {
         return await fn()
       } finally {

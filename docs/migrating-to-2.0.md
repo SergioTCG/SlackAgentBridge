@@ -35,8 +35,17 @@ Do not create a second Slack app or load a second LaunchAgent.
 
 Apply [`slack/app-manifest.json`](../slack/app-manifest.json) to the **existing**
 Slack app and reinstall that app once. The current manifest registers the 18 `/sab-*` commands
-and removes the 1.x provider-prefixed commands. No new OAuth scope or token is
-required.
+and removes the 1.x provider-prefixed commands. It also enables the owner-only
+Home tab and subscribes the existing Socket Mode connection to
+`app_home_opened`. No new OAuth scope, callback URL, token, app, or daemon is
+required. A v2 installation upgraded from an earlier manifest must reapply the
+canonical manifest and reinstall the same app once before App Home appears.
+
+No-argument management commands now render interactive controls. Existing
+parameterized forms remain available; use `/sab-update current` for the old
+direct current-session update behavior, while `/sab-update` opens the chooser.
+The `/sab-new` panel still requires an explicit provider selection before any
+session can be launched.
 
 The v2 daemon has an unadvertised parser shim for old slash-command payloads so
 a short manifest/daemon ordering gap fails less abruptly. This is not a public

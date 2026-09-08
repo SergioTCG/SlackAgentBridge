@@ -15,7 +15,7 @@ configured, and enrolled nodes cannot receive provider work yet. See
 ## System shape
 
 ```text
-Slack Socket Mode
+Slack Socket Mode (messages, commands, interactions, App Home)
        │
        ▼
 daemon/daemon.mjs ─────────────── ~/.config/ccs/state.json
@@ -55,7 +55,10 @@ them.
   executing the provider CLI.
 - `daemon/daemon.mjs` owns Slack ingress/egress, hooks, state adoption,
   session/channel correlation, resurrection, settings, permission decisions,
-  switching, and managed Pi coordination.
+  switching, App Home publishing, and managed Pi coordination.
+- `daemon/management-ui.mjs` and `daemon/app-home.mjs` build bounded, pure
+  Block Kit surfaces. The daemon remains responsible for authorization,
+  provider catalogs, command dispatch, and every side effect.
 - `daemon/slack-runtime.mjs` constructs the sole direct Slack API and Socket Mode
   clients for the compatible all-in-one deployment. `daemon/coordinator.mjs`
   owns prompt acknowledgement and serialized startup of that sole ingress;
@@ -68,9 +71,11 @@ them.
   lifecycle and stable transcript/status integration.
 - `scripts/codex-event-proxy.mjs` transparently forwards the loopback App Server
   WebSocket to the Codex TUI while extracting completed semantic commentary
-  and a completed-turn final fallback. Codex hooks remain authoritative for
-  native identity and permissions; Stop and the exact App Server turn share one
-  durable final-delivery claim.
+  and a completed-turn final fallback. Accepted commentary and finals are
+  serialized in App Server source order before entering the daemon, preventing
+  a delayed earlier delivery from being overtaken and rejected as stale. Codex
+  hooks remain authoritative for native identity and permissions; Stop and the
+  exact App Server turn share one durable final-delivery claim.
 - `pi/sab-extension.ts` provides Pi lifecycle, inbound text, model/thinking
   settings, image support, usage, project trust, safe-mode permissions, and
   managed-run coordination. It is loaded explicitly and never installed into a
@@ -122,8 +127,10 @@ and bounded workers by immutable channel ID with presentation aliases and
 per-worker file permission. `state.teamTasks[taskId]` is the bounded,
 immediately persisted delivery journal: request/payload digest, exact source and
 target channel/session/provider/node identities, dispatch phase, Slack audit
-timestamps, replies, stable result/error, and expiry. Plaintext task input is
-removed after provider acceptance. Team membership survives provider switching
+timestamps, the bounded original instruction, replies, coordinator messages,
+stable result/error/warning, lifecycle versions, and expiry. The mutable delivery
+envelope is removed after provider acceptance, while the instruction remains for
+bounded inbox observability. Team membership survives provider switching
 because every send/reply revalidates the channel's current active leg.
 
 A missing `session.nodeId` and missing `state.channelNodes[channelId]` resolve to
@@ -194,9 +201,28 @@ provider transitions, private maintenance turns, managed Pi activity,
 automation ownership, delegated team work, and concurrent wake/restart work. Eligible sessions are
 grouped by provider: all selected sessions in a group stop, that provider's CLI
 updates once, and every stopped session resumes even when the update check
-fails. Incoming prompts during this bounded relaunch are held in the existing
-per-session queue. Standby, provisional, stale, dormant, and rebound records are
-never bulk-restarted.
+fails. Each exact native session is reserved synchronously before the first
+Slack notice or other await; duplicate updates are rejected and incoming prompts
+during this bounded relaunch are held in the existing per-session queue. A
+verified in-place native identity replacement carries that queue and both
+maintenance fences to the new identity. Any one-use artifact grants already
+embedded in queued prompts follow only that exact provider/channel replacement.
+Replacement startup keeps direct input closed while Slack metadata is refreshed.
+One ordered drain is the sole queue consumer: provider launch arguments and
+Claude/Pi stream attachment cannot remove or reorder prompts. It remains active
+until every queued prompt, including prompts arriving during the drain, reaches
+the exact replacement input surface. Drain ownership follows the stable session
+record across native identity replacement, so competing lifecycle and Pi-stream
+callbacks cannot start consumers under the old and new ids. A Pi stream can
+schedule that drain only after the exact SessionStart has completed its Slack
+metadata work. A failed delivery restores the undelivered tail; a failed wake
+or metadata setup releases only the exact opaque fence generation acquired by
+that startup. Native identity replacement carries that ownership forward, and
+a delayed failure cannot clear a newer restart's fence. This releases only the
+stale maintenance marker so an explicit update or later message can retry the
+dormant session. A stale
+reservation still cannot stop or resume an unrelated replacement. Standby,
+provisional, stale, dormant, and rebound records are never bulk-restarted.
 
 The only exception is a provider-local trust surface that cannot be decided
 remotely. The bridge opens the provisional target's terminal automatically and
@@ -213,12 +239,51 @@ The canonical manifest exposes one namespace:
 /sab-team /sab-health /sab-cleanup /sab-claim /sab-help
 ```
 
-`/sab-new` requires the provider. In a session channel, the authoritative
+`/sab-new` requires an explicit provider: its no-argument panel does not choose
+one until the owner clicks a provider. In a session channel, the authoritative
 session selects provider-specific behavior for every other provider operation.
 From the control channel, `/sab-status` and `/sab-usage` may take a provider
 filter. `/sab-update all` is bridge-wide and may be run from the control channel
 or a session channel. `/sab-run` rejects non-Pi sessions and `/sab-account`
 rejects non-Claude sessions before mutation.
+
+No-argument management commands use Block Kit as a presentation layer over the
+same dispatcher. `/sab-status` renders a session or bridge dashboard; model and
+effort selectors come from the authoritative provider adapter. Every action
+carries the exact session identity that rendered it and revalidates the owner,
+immutable channel mapping, current native leg, provider catalog, transition,
+delegated-work state, and the ordinary command's safety gates before mutation.
+The rendered identity remains immutable across asynchronous lookups even when a
+native `/clear` rebrands the in-memory session object. Team actions also carry
+the exact team ID so controls from a closed team cannot mutate its replacement.
+Stale controls fail visibly. Broad update and team-close actions require Slack
+confirmation. Mutable Pi controls are fenced again inside the native extension,
+before model or effort mutation. The extension advertises that capability on
+its authenticated local stream; a daemon-only rollout refuses mutable controls
+for a preserved legacy Pi process until that exact session is updated. An exact
+session reserved for provider maintenance rejects overlapping
+lifecycle/settings changes until it resumes. Claude picker entries carry exact
+provider model IDs so standard and 1M-context siblings cannot collapse through
+the textual alias preference.
+Account, flag, and restart-based Codex setting changes acquire that reservation
+before their first Slack call; owner input then queues ahead of question-form
+routing for the replacement process. Status reanchors and their provisional
+cleanup retain the immutable channel captured when the bump began. Slack Option
+values preserve valid identities up to 150 characters and omit longer values
+instead of truncating them.
+Explicit text forms remain available; `/sab-update current`
+directly updates the current session while no-argument `/sab-update` opens its
+chooser.
+
+App Home is another view over that dispatcher. The canonical manifest enables
+the Home tab and sends `app_home_opened` through the existing Socket Mode
+connection. The owner receives fresh bridge/session state; other users receive
+no session metadata or actions. Home navigation has no durable state, model and
+effort options are refreshed from the provider adapters, and the new-session
+modal rechecks the chosen top-level project plus every provider flag. Lifecycle
+results remain in the normal control/session channels. This needs one manifest
+reinstall on the existing app, but no additional OAuth scope, token, callback
+URL, process, or app.
 
 The parser accepts old provider-prefixed slash commands only as an unadvertised
 upgrade shim while the owner replaces a 1.x manifest. No old command appears in
@@ -240,9 +305,12 @@ derives the source from process ancestry and requires exact PID, tmux, provider,
 native session, active channel mapping, and local node. Agent-visible peers and
 tasks contain aliases and authorized envelopes rather than raw destination
 IDs. A short-lived bounded `session.teamTurn` gives only a current
-owner-initiated coordinator turn dispatch authority; collaborator and local
-terminal turns clear it. A delegated worker task is narrower still: only its
-exact assigned live session may reply.
+owner-initiated coordinator turn dispatch and task-control authority;
+collaborator and local terminal turns clear it. A delegated worker task is
+narrower still: only its exact assigned live session may reply. The coordinator
+may cancel/replace its exact queued tasks and send an audited message to the
+exact authoritative session owning an active task; every operation is bounded,
+idempotent, and journaled before Slack or provider effects.
 
 Teams may opt into `auto-until-blocked` continuation. Every authenticated
 worker reply—including ordinary progress and idempotent retries that heal a
@@ -253,6 +321,14 @@ context before dispatching. Existing teams remain `manual` by default;
 automatic continuation is serialized per team, survives daemon restart through
 the state journal, and pauses with an actionable owner notification when the
 coordinator is missing, busy, or a safety/product decision is required.
+On restart, a journaled active wake is accepted as delivered only when the exact
+coordinator PID/tmux and provider turn are re-adopted. Otherwise it is settled
+as interrupted, its matching bridge-owned authority is released, and the
+uncertain prompt is never replayed. A persisted provider start timestamp is
+historical context, not live-turn proof; recovery requires the provider poller
+to have been restored from provider-specific post-restart evidence.
+An independent durable `draining` mode lets active workers finish while blocking
+queued claims and continuation wakes until dispatch is explicitly resumed.
 
 The same coordinator provider turn may remain active across many worker refill
 cycles. Its dispatch budget is never made unlimited: after the current budget is
@@ -265,8 +341,10 @@ worker event remain denied.
 
 Because the inbox is authoritative, all events pending when a continuation is
 claimed are durably coalesced into one wake rather than replayed as separate
-model turns. Covered event keys remain in the bounded record for retry
-idempotency. A resumed Codex coordinator may exceptionally omit both prompt and
+model turns. A task/reply lifecycle transition and its continuation event enter
+the same atomic state write before any Slack delivery or provider wake. Covered
+event keys bind task, reply, and task-lifecycle version and remain in the bounded
+record after settlement for retry idempotency. A resumed Codex coordinator may exceptionally omit both prompt and
 completion hooks. SAB may release only its bridge-owned turn/input fences after
 the exact authoritative PID/tmux has shown the native idle input surface twice,
 unchanged, after a grace period. This path never parses a transcript or terminal
@@ -284,6 +362,22 @@ requires no delegated task and the exact channel/session mapping, a fresh
 queued task can claim that worker once without replaying a failed pre-reboot
 task or mutating a replacement session.
 
+A delegated Codex task uses a stricter variant of the same live proof. If the
+exact continuously observed process returns to idle twice after the grace
+period, the injected turn is over even when acknowledgement and completion
+hooks are absent. SAB records `completed_with_warning`, never fabricates a
+stable final, and releases the worker without replay. An idle task discovered
+during boot has no continuous delivery proof and therefore fails closed instead;
+a genuinely live turn is re-adopted and may continue. This distinction preserves
+historical no-replay guarantees while allowing fresh queued work to reach an
+already idle re-adopted session without manual activation.
+
+Pi restart adoption never treats its persisted turn-start timestamp as current
+liveness. SAB restores Pi polling and delegated-task proof only after a new
+native extension status/start event from the exact re-adopted process. If that
+proof does not arrive within the recovery grace period, the historical task and
+all of its stale poller/input fences are released without replay.
+
 The process claim also requires the provider to be the root provider process
 under the SAB tmux pane. Nested utilities such as `codex review` inherit the
 parent environment but are rejected before SessionStart registration and before
@@ -298,8 +392,12 @@ Task delivery is journal-first:
    payload and idempotent status cards in both Slack channels.
 3. Wait while the target is dormant, busy, switching, asking a question,
    awaiting permission, under maintenance, or owned by managed Pi work.
-4. Reserve the worker input surface, atomically change `queued → dispatching`,
-   and bind the exact target native session before provider injection. A restart
+4. Serialize both visible instruction-card updates for each replacement and
+   bind the final claim to that exact fully audited instruction revision. Then
+   reserve the worker input surface, atomically change `queued → dispatching`,
+   populate `startedAt`, and bind `session.teamActiveTaskId` plus the exact target
+   native session before provider injection. Availability derives from the same
+   durable record, so no dispatching worker can be reported ready. A restart
    never retries an uncertain dispatch claim.
 5. Accept `running` when the provider acknowledges the injected immutable task
    marker, or when the exact process-bound worker successfully journals a reply
@@ -307,7 +405,8 @@ Task delivery is journal-first:
    its prompt hook; it is not final-result proof. Claude's completed transcript
    path, Codex's Stop hook or matching successful App Server turn, or Pi's
    extension final event may complete only the same task/session binding.
-6. Persist completion and a delivery claim before updating both audit cards and
+6. Persist `completed`, `completed_with_warning`, failure, or cancellation and a
+   delivery claim before updating both audit cards and
    idempotently posting the stable result in the coordinator channel. A missing
    or uneditable audit card is reported with the result but cannot suppress it;
    reconciliation retries incomplete result delivery before releasing bounded
@@ -316,7 +415,14 @@ Task delivery is journal-first:
 
 Interim provider commentary remains in the worker channel; a worker explicitly
 uses `sab team reply` to put selected progress in the source mailbox. Questions
-and permissions stay on the worker's normal Slack surface. Interrupt, kill,
+and permissions stay on the worker's normal Slack surface. A coordinator uses
+`sab team message` to answer or amend an exact active task, with a visible copy
+in both channels; SAB refuses delivery while a question or permission surface
+is open, and an uncertain provider attempt is never replayed. A disconnected
+Pi stream is a known pre-write rejection: the journal remains pending and the
+normal reconciler may deliver it once after the exact stream reconnects. Filtered,
+cursor-paginated inbox reads expose only the caller's task envelopes and retain
+the original instruction for that bounded journal lifetime. Interrupt, kill,
 session death, team removal/closure, and expiry produce visible task failure or
 cancellation. Bulk updates skip active worker tasks and cleanup preserves
 dormant team channels.
@@ -364,7 +470,22 @@ marked `commentary`, and holds one `final_answer` until its matching successful
 `turn/completed`. That final uses the same durable turn claim as a late Stop
 hook, addressing Codex App Server releases that omit Stop without parsing the
 transcript or terminal. It never emits commands, command output, diffs, plans,
-reasoning, or deltas. Before applying the exact-process fence, the daemon
+reasoning, or deltas. Stable commentary/final deliveries retain their App
+Server source order across loopback retries, so a later final cannot overtake
+an earlier response. The proxy stamps a final at the App Server completion
+boundary; if loopback or Slack backoff delays delivery beyond the start of a
+newer turn, that older final cannot clear the newer poller, status, reservation,
+or delegated-task lifecycle. On proxy shutdown, commentary backoff is curtailed, both
+WebSocket ingress surfaces close to establish a final frame boundary, and the
+latest accepted delivery tail is followed until it is stable for one event-loop
+turn, for up to 30 seconds. Stable finals keep
+their real retry spacing during that drain, so transient pressure is not turned
+into an immediate exhausted burst. The runner keeps the correlated App Server
+alive until that drain finishes so the daemon can still prove the delivery's
+process ancestry. Drain
+exhaustion is printed with the proxy diagnostic and makes the runner fail
+rather than silently treating a possibly missing final as success. Before
+applying the exact-process fence, the daemon
 canonicalizes npm's persistent App Server launcher to its direct matching
 native child—the identity emitted by lifecycle hooks—and then revalidates that
 child against the exact tmux. If either sidecar cannot start, the runner falls
@@ -398,6 +519,12 @@ The SAB extension owns Pi's bridge-facing lifecycle and streams. Built-in tools
 are unrestricted by default; SAB `--safe` adds a fail-closed Slack decision per
 tool call. Pi `--approve` is separate project-resource trust.
 
+On each daemon-stream connection the extension reports whether Pi's native
+input surface is idle. That exact-session observation restores polling for a
+live re-adopted turn, or releases stale busy/task state without replay when Pi
+has already returned to its prompt. Persisted timestamps alone never prove a
+turn is still running.
+
 Ordinary owner prompts use persisted adaptive routing. A no-tools classifier
 receives only visible prompt text and fails toward managed execution.
 Collaborator prompts remain native. `/sab-run` can force a bounded
@@ -412,9 +539,13 @@ Hooks start provider-specific live pollers. The daemon stores restart metadata
 needed to recover an in-progress turn, finds the frozen Slack status message on
 boot, re-adopts it, and continues the original elapsed duration. New channel
 content re-anchors the status as the latest item without resetting it. All
-status mutations pass through one workspace-wide, rate-safe queue; superseded
-timer edits are coalesced before Slack I/O so they cannot starve final or
-ordinary messages.
+status mutations pass through one workspace-wide, rate-safe queue. Superseded
+timer edits are cancelled before Slack I/O, and end-of-turn cleanup has priority
+over cosmetic updates from other sessions; a clear with no posted status never
+consumes an API slot. Provider commentary and finals use the ordinary
+per-channel output path without waiting for status mutation, so a Slack
+`chat.update` backoff cannot hold the stable response behind its timer. Queue
+pressure is visible through `/sab-health`.
 
 Final text comes only from provider-stable sources. Claude reads completed
 transcript records, Codex uses either the Stop hook's final field or the exact
@@ -423,9 +554,11 @@ uses its extension event. The two Codex sources atomically claim the same native
 turn before Slack delivery. Codex turns that omit `UserPromptSubmit` are tracked from the
 successful bridge injection, and a rendered `Working (...)` footer allows
 restart re-adoption when the timestamp was lost. Two unchanged idle-surface
-observations can release an owner turn; for a delegated task they fail only
-that exact journal entry and never fabricate or replay a final. Deduplication
-fences hook retries and restart races.
+observations can release an owner turn. For an exact delegated turn observed
+continuously by the live poller, they complete that task with an explicit
+warning and never fabricate or replay a final. An already-idle delegated task
+discovered only during boot still fails closed. Deduplication fences hook
+retries and restart races.
 
 ## Provider switching
 
@@ -486,7 +619,8 @@ Team endpoints are:
 
 - `GET /team/context`, `/team/peers`, and `/team/inbox`
 - `GET /team/tasks/:taskId`
-- `POST /team/send` and `/team/reply`
+- `POST /team/send`, `/team/reply`, `/team/message`, `/team/replace`,
+  `/team/cancel`, and `/team/mode`
 
 Every endpoint rejects browser origins and non-loopback Host values. Team
 mutations additionally require exact provider-process/tmux ancestry; no bearer
@@ -506,7 +640,12 @@ correlated process/tmux, and optionally archives only that immutable channel.
 `si.sergej.claudeslackproxy` LaunchAgent label. It installs only the `sab`
 symlink and removes old launcher symlinks. Existing `CCS_*`,
 `~/.config/ccs`, old checkout paths, control channels, state records, and local
-port remain compatible.
+port remain compatible. A no-reload staged activation checks both the loaded
+LaunchAgent job and its installed plist working directory, then refuses a
+different or unverifiable checkout before any mutation. For a piped installer,
+that check precedes even clone or pull. This remains effective when the plist
+was moved or deleted while launchd retained the job, so development worktrees
+cannot replace live Git state, hooks, or the public executable.
 
 Self-update and release rollout must occur from a clean release commit during a
 maintenance window. The prior tag and config backup remain available until

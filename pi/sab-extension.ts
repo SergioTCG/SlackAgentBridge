@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import type { ExtensionAPI, ExtensionContext, ProjectTrustContext } from "@earendil-works/pi-coding-agent";
+import { PI_EXACT_SESSION_CONTROL_CAPABILITY } from "../daemon/providers.mjs";
 import { createManagedRunner } from "./managed-run.ts";
 
 const ENDPOINT = process.env.CCS_ENDPOINT || "http://127.0.0.1:8877";
@@ -17,6 +18,7 @@ type BridgeMessage = {
   action?: string;
   value?: unknown;
   requestId?: string;
+  expectedSessionId?: string;
 };
 
 let activeContext: ExtensionContext | undefined;
@@ -111,6 +113,19 @@ async function controlResult(ctx: ExtensionContext, message: BridgeMessage, resu
 
 async function handleControl(pi: ExtensionAPI, managed: any, ctx: ExtensionContext, message: BridgeMessage) {
   try {
+    const mutableSetting = ["model", "effort"].includes(message.action || "");
+    if (mutableSetting && !message.expectedSessionId) {
+      return controlResult(ctx, message, {
+        ok: false,
+        error: "A daemon restart is required before mutable Pi controls can be used with this staged extension.",
+      });
+    }
+    if (mutableSetting && ctx.sessionManager.getSessionId() !== message.expectedSessionId) {
+      return controlResult(ctx, message, {
+        ok: false,
+        error: "This setting control belongs to a native Pi session which is no longer active.",
+      });
+    }
     if (message.action === "abort") {
       const managedState = await managed.pauseForAbort(ctx);
       if (!managedState) ctx.abort();
@@ -191,8 +206,14 @@ async function handleBridgeMessage(pi: ExtensionAPI, managed: any, message: Brid
 }
 
 async function consumeSse(pi: ExtensionAPI, managed: any, signal: AbortSignal) {
-  const response = await fetch(eventUrl("/pi/stream"), { signal });
+  const url = eventUrl("/pi/stream");
+  url.searchParams.set("capabilities", PI_EXACT_SESSION_CONTROL_CAPABILITY);
+  const response = await fetch(url, { signal });
   if (!response.ok || !response.body) throw new Error(`stream returned HTTP ${response.status}`);
+  const ctx = activeContext;
+  if (ctx && registeredSessionId) {
+    await post("/pi/event", { event: "StreamReady", idle: ctx.isIdle(), ...sessionState(ctx) }).catch(() => {});
+  }
   const decoder = new TextDecoder();
   let buffer = "";
   for await (const chunk of response.body as any) {

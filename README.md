@@ -63,6 +63,9 @@ loopback event proxy mirrors completed semantic commentary and uses a completed
 App Server turn as an exact final-answer fallback when Codex omits its Stop
 hook. It excludes commands, output, diffs, plans, reasoning, and deltas; Stop
 and App Server completion share a durable turn-level deduplication claim.
+The Codex runner keeps the correlated App Server alive through the proxy's
+bounded shutdown drain so a closing TUI cannot invalidate the final's ancestry
+proof before delivery.
 If Codex rejects a submitted turn because its selected model is at capacity,
 SAB replaces the working timer with that actionable failure instead of leaving
 the channel apparently busy. The detector requires the exact current TUI
@@ -138,6 +141,11 @@ After upgrading to the session-team release, apply and reinstall the same
 canonical manifest once more so Slack registers `/sab-team`. Existing tokens
 and OAuth scopes remain valid.
 
+The interactive-management release also enables the app's Home tab and routes
+`app_home_opened` through the same Socket Mode daemon. Apply the canonical
+manifest to the **existing app** and reinstall it once. No new OAuth scope,
+token, callback URL, app, or daemon is required.
+
 Fresh installs use `~/.slack-agent-bridge`. Existing
 `~/.claudeslackproxy` checkouts, `~/.config/ccs` state, session channels, and the
 historical `si.sergej.claudeslackproxy` LaunchAgent are retained. The installer
@@ -145,7 +153,19 @@ removes old launcher symlinks and installs only `sab` on `PATH`.
 
 The staged `install-codex.sh` and `install-pi.sh` helpers can add provider
 support without restarting the live daemon. Activation still belongs in a
-controlled maintenance window.
+controlled maintenance window. If a newly staged Pi extension meets an older
+daemon, model and effort changes fail closed with a restart-required message;
+they do not mutate an unverified native session. A staged activation must be
+run from the checkout already named by the live LaunchAgent; invoking it from
+an isolated development worktree fails before changing hooks, configuration,
+Git state, or the public `sab` link.
+
+Existing 2.0 installations should read [Migrating to
+2.1](docs/migrating-to-2.1.md). Version 2.1 adds interactive management, App
+Home, durable team scheduling, and the lifecycle/delivery hardening needed for
+long-running coordinator and worker sessions. It does not bulk-migrate session
+state or change the historical LaunchAgent, local port, configuration path, or
+Slack token set.
 
 ## Local CLI
 
@@ -187,6 +207,10 @@ sab account add work
 sab upload --grant TOKEN -- FILE_PATH...
 sab team context --json
 sab team send --to WORKER_ALIAS --stdin
+sab team inbox --active --limit 20 --page --json
+sab team message --task TASK_ID --stdin
+sab team cancel --task TASK_ID
+sab team mode draining
 sab team wait --task TASK_ID --json
 sab automation create ...
 sab automation status EXTERNAL_KEY
@@ -211,20 +235,20 @@ A session channel always acts on its authoritative provider.
 
 | Command | Effect |
 |---|---|
-| `/sab-new <claude\|codex\|pi> [folder] [flags]` | Start a headless session |
-| `/sab-model [model]` | Show or change this session's model |
-| `/sab-effort [level]` | Show or change reasoning/thinking effort |
+| `/sab-new <claude\|codex\|pi> [folder] [flags]` | Choose a provider/project interactively, or start a headless session directly |
+| `/sab-model [model]` | Choose or change this session's model |
+| `/sab-effort [level]` | Choose or change reasoning/thinking effort |
 | `/sab-flags [flags]` | Show or replace allowlisted launch flags |
-| `/sab-update [all]` | Update this session, or safely sweep all idle active sessions |
+| `/sab-update [current\|all]` | Choose an update interactively, or update this/all eligible sessions directly |
 | `/sab-stop` | Interrupt the current turn without ending the session |
 | `/sab-switch <claude\|codex\|pi> [new]` | Hand this channel to another native provider leg |
 | `/sab-kill [here\|session-id]` | End one exact provider process and keep its channel resumable |
-| `/sab-status [claude\|codex\|pi]` | Show this session, or filter the control-channel list |
+| `/sab-status [claude\|codex\|pi]` | Show this session plus controls, or filter the control-channel list |
 | `/sab-usage [provider] [days [n]\|models\|limits]` | Show provider usage |
 | `/sab-run …` | Control Pi adaptive routing and managed runs |
 | `/sab-account [name\|default]` | Show or change a Claude subscription |
 | `/sab-terminal [list\|open\|close\|open-all\|close-all]` | Manage optional viewports |
-| `/sab-team [create\|add\|status\|auto\|manual\|permissions\|remove\|close]` | Link SAB sessions for auditable delegation and optional continuation |
+| `/sab-team [create\|add\|status\|auto\|manual\|drain\|resume\|permissions\|remove\|close]` | Link SAB sessions for auditable delegation, bounded continuation, and queue control |
 | `/sab-health` | Show daemon health |
 | `/sab-cleanup` | Archive dormant session channels |
 | `/sab-claim` | Claim an unowned bridge |
@@ -237,6 +261,46 @@ terminal is never required. A Claude wake is successful only after its exact
 `SessionStart` claim; a provider that exits after briefly creating tmux is
 retried once and then reported visibly while the queued message remains safe.
 
+Management commands are interactive when invoked without arguments. `/sab-model`
+and `/sab-effort` show provider-valid selectors; `/sab-terminal`, `/sab-update`,
+`/sab-switch`, `/sab-new`, and `/sab-team` show bounded buttons or pickers.
+`/sab-status` adds a consolidated dashboard for the current session, while the
+control-channel dashboard exposes bridge-wide session, terminal, update,
+health, and usage controls. Parameterized forms such as `/sab-terminal open`,
+`/sab-model gpt-5.6-sol`, and `/sab-update all` remain available. Use
+`/sab-update current` for a non-interactive current-session update.
+
+Every click is rechecked against the immutable channel ID, exact authoritative
+session/provider, current provider catalog, transition state, and the existing
+team/update safety gates. A stale control therefore fails visibly instead of
+acting on a replacement leg. Session identity is held unchanged across slow
+lookups, Claude's standard and 1M-context model entries carry distinct exact
+provider IDs, and team buttons are tied to the exact team that rendered them.
+Broad update and team-close actions require Slack
+confirmation. These panels are only a presentation layer over the normal
+`/sab-*` dispatcher.
+
+Pi model and effort controls additionally require the running extension to
+advertise exact-session fencing. A Pi process preserved across a daemon upgrade
+may still contain the older extension; SAB refuses the mutation and asks for
+`/sab-update current` instead of assuming that process understands the new
+control protocol.
+
+### App Home
+
+Open *Slack Agent Bridge* under Slack's Apps section for a persistent owner
+dashboard. It lists authoritative session channels and provides exact session,
+terminal, model, effort, switch, update, team, usage, health, and new-session
+controls. The new-session modal requires an explicit provider and a current
+top-level project folder; launch flags pass through the existing provider
+allowlist.
+
+App Home rebuilds from authoritative state whenever it is opened or refreshed.
+Results remain visible in the bridge control channel or affected session
+channel rather than becoming private, unaudited Home-only state. Non-owners see
+a restricted view containing no session IDs, channel IDs, folders, settings, or
+actions.
+
 `/sab-update all` is the quiet-period maintenance sweep. It considers only the
 authoritative live session bound to each channel, skips any session with an
 active turn, question, permission, provider switch, managed Pi run, automation
@@ -245,6 +309,14 @@ every skip or failure.
 Each represented provider CLI is updated once; every eligible native session is
 then resumed with its existing cwd, identity, account, model, effort, and launch
 flags. Messages arriving during the relaunch are queued for that same session.
+If the provider replaces its native identity during maintenance, the queue and
+restart fences follow only that verified in-place rebind. Direct input reopens
+only after the shared ordered drain submits all queued prompts, including later
+arrivals. Launch arguments and reconnecting provider streams never consume that
+queue independently. A failed wake or startup-metadata call preserves the
+queue, reports the exact recovery action, and allows a later owner message to
+retry a genuinely dormant session. One-use artifact grants embedded in those
+prompts follow only the verified same-provider/channel native replacement.
 An idle Codex resume may not emit `SessionStart`; after a bounded hook grace
 period, every update, settings change, and ordinary Slack wake recovers it only
 by finding the Codex process beneath the exact replacement tmux and validating
@@ -299,6 +371,7 @@ giving an agent Slack credentials or arbitrary channel access:
 /sab-team permissions codex-barrique-parallel-1 files on
 /sab-team status
 /sab-team auto   # opt into bounded continuation; use /sab-team manual to disable
+/sab-team drain  # finish active tasks but dispatch nothing queued; resume later
 ```
 
 The owner chooses workers with Slack's private-channel picker. Team identity is
@@ -313,13 +386,31 @@ budget; it does not grant unlimited dispatch. If a resumed Codex coordinator omi
 SAB uses bounded exact-process idle confirmation to release only the stale turn
 fence; prolonged legitimate waits are reported once in the coordinator channel.
 
+Drain mode is separate from continuation mode. `/sab-team drain` lets active
+workers finish while preventing every queued claim and automatic coordinator
+wake; `/sab-team resume` makes queued work eligible again. It does not cancel
+or stop a provider. From an authenticated coordinator turn, `sab team cancel`
+and `sab team replace` control one exact queued task, while `sab team message`
+adds an audited instruction or answer to the exact worker/session currently
+owning an active task.
+
 Eligible owner turns receive private, provider-neutral role/tool context. A
 delegated worker receives an exact task header, while collaborators receive no
 lateral authority. The JSON-safe `sab team` CLI supports peers, send, bounded
-mailbox/inbox, wait, reply, and task-bound file transfer. Tasks are atomically
+filtered/paginated inbox, wait, reply, queued-task cancel/replace, active-task
+messaging, drain/resume, and task-bound file transfer. Tasks are atomically
 journaled, visibly posted in both channels, queued only for a safe idle worker,
 correlated with provider-stable final output, and fenced against restart/stale
 leg duplication. Dormant peers are never resurrected by another agent.
+
+If an exact live Codex worker visibly returns to its idle prompt after a task
+but omits the completion hook, SAB records `completed_with_warning` and releases
+the worker instead of fabricating a failure or replaying the work. An already
+idle task found during daemon boot has no equivalent continuous proof and still
+fails closed; fresh queued tasks can then dispatch once to the re-adopted idle
+session. Availability and the `queued → dispatching` task claim are persisted
+together, so a worker cannot briefly appear ready while its task is being
+assigned.
 
 See [Session teams](docs/session-teams.md) for the complete workflow, limits,
 recovery behavior, and file boundary. Initial relay is local-node only; the
@@ -403,8 +494,9 @@ with the same Socket Mode token.
 - Optional dockless Ghostty viewports: `CCS_GHOSTTY_HIDDEN=1`
 - Local API: loopback port `8877`; never proxy or expose it
 
-Required validation is defined in [`AGENTS.md`](AGENTS.md). Releases also use
-the complete [release checklist](docs/release-checklist.md). Live Slack,
+Required validation is defined in [`AGENTS.md`](AGENTS.md). Releases use the
+[stability policy](docs/stability-policy.md) and complete
+[release checklist](docs/release-checklist.md). Live Slack,
 Ghostty, Claude, Codex, and Pi tests belong in a controlled maintenance window
 or on a separate Slack app and token set.
 

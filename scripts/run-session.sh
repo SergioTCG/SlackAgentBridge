@@ -108,15 +108,32 @@ run_codex() {
   proxy_pid=""
 
   cleanup_sidecars() {
-    status=$?
+    status=${1:-$?}
+    proxy_status=0
     trap - EXIT HUP INT TERM
     if [ -n "$proxy_pid" ] && kill -0 "$proxy_pid" 2>/dev/null; then kill "$proxy_pid" 2>/dev/null || true; fi
+    # The proxy owns the stable commentary/final delivery queue. Let its bounded
+    # shutdown drain finish while the correlated App Server process is still
+    # alive, otherwise the daemon's exact-process ancestry check rejects the
+    # final response which the proxy is trying to flush.
+    if [ -n "$proxy_pid" ]; then
+      if wait "$proxy_pid" 2>/dev/null; then proxy_status=0; else proxy_status=$?; fi
+    fi
     if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then kill "$app_pid" 2>/dev/null || true; fi
-    if [ -n "$proxy_pid" ]; then wait "$proxy_pid" 2>/dev/null || true; fi
     if [ -n "$app_pid" ]; then wait "$app_pid" 2>/dev/null || true; fi
+    if [ "$proxy_status" -ne 0 ]; then
+      if [ -s "$proxy_log" ]; then tail -n 20 "$proxy_log" >&2; fi
+      printf '%s\n' 'sab: Codex response delivery did not drain; the final may require daemon recovery or a retry.' >&2
+      if [ "$status" -eq 0 ]; then status=1; fi
+    fi
     rm -f "$app_log" "$proxy_log"
     rmdir "$runtime_dir" 2>/dev/null || true
     return "$status"
+  }
+  exit_with_cleanup() {
+    original_status=$?
+    if cleanup_sidecars "$original_status"; then final_status=0; else final_status=$?; fi
+    exit "$final_status"
   }
   wait_for_url() {
     log_file=$1; owner_pid=$2
@@ -130,7 +147,7 @@ run_codex() {
   }
   fallback_to_direct() {
     printf '%s\n' 'sab: Codex commentary transport unavailable; using the direct TUI.' >&2
-    cleanup_sidecars || true
+    cleanup_sidecars 0 || true
     direct_codex "$@"
   }
 
@@ -139,7 +156,7 @@ run_codex() {
   node "$BRIDGE/scripts/codex-event-proxy.mjs" \
     --upstream "$app_url" --agent-pid "$app_pid" --tmux "$CCS_TMUX" >"$proxy_log" 2>&1 & proxy_pid=$!
   proxy_url="$(wait_for_url "$proxy_log" "$proxy_pid")" || fallback_to_direct "$@"
-  trap cleanup_sidecars EXIT
+  trap exit_with_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM

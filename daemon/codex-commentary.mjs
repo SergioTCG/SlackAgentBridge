@@ -116,19 +116,26 @@ export function releaseCodexFinal(session, turnId) {
   }
 }
 
-export function codexFinalLifecycleFingerprint(session) {
+export function codexFinalLifecycleFingerprint(session, { observedAt = null } = {}) {
   return {
     taskId: session?.teamActiveTaskId || null,
     inputAt: session?.teamInputReservation?.acceptedAt || null,
     teamTurnAt: session?.teamTurn?.startedAt || null,
+    turnStartedAt: session?.codexTurnStartedAt || null,
+    observedAt: Number.isSafeInteger(observedAt) && observedAt > 0 ? observedAt : null,
   }
 }
 
-export function codexFinalLifecycleStillCurrent(session, expected) {
-  return Boolean(session && expected) && !session.codexTurnStartedAt &&
-    (session.teamActiveTaskId || null) === expected.taskId &&
+export function codexFinalLifecycleStillCurrent(session, expected, { beforeStop = false } = {}) {
+  if (!session || !expected) return false
+  const lifecycleMatches = (session.teamActiveTaskId || null) === expected.taskId &&
     (session.teamInputReservation?.acceptedAt || null) === expected.inputAt &&
     (session.teamTurn?.startedAt || null) === expected.teamTurnAt
+  if (!lifecycleMatches) return false
+  if (!beforeStop) return !session.codexTurnStartedAt
+  const trackedStart = session.codexTurnStartedAt || null
+  if (trackedStart !== expected.turnStartedAt) return false
+  return !(expected.observedAt && trackedStart && trackedStart > expected.observedAt)
 }
 
 export function codexCommentaryDisposition({

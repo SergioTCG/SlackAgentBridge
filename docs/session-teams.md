@@ -22,6 +22,8 @@ coordinator:
 /sab-team add
 /sab-team status
 /sab-team permissions
+/sab-team drain
+/sab-team resume
 ```
 
 `/sab-team add` opens Slack's private-channel picker. SAB accepts only a channel
@@ -49,6 +51,12 @@ and are announced in affected channels. Removal or closure cancels exact queued
 or active team tasks but does not stop the underlying provider sessions.
 `/sab-cleanup` preserves dormant team channels until membership is removed or
 the team is closed.
+
+`/sab-team drain` is a durable queue gate: active workers may finish, while
+queued tasks and automatic coordinator continuations remain parked. It does not
+stop a provider or discard work. `/sab-team resume` re-enables dispatch. This is
+independent of `/sab-team auto` and `/sab-team manual`, which control whether
+authenticated worker events may wake the coordinator.
 
 Applying this feature requires updating and reinstalling the existing canonical
 Slack manifest so `/sab-team` is registered. It needs no new OAuth scope, no new
@@ -92,8 +100,15 @@ sab team peers --json
 sab team send --to WORKER_ALIAS --stdin
 sab team send --to WORKER_ALIAS --stdin --request-id STABLE_ID
 sab team inbox --after TASK_ID --limit 100 --json
+sab team inbox --active --target WORKER_ALIAS --status queued,running --limit 20 --page --json
+sab team inbox --since 2026-09-07T08:00:00Z --cursor OPAQUE_CURSOR --limit 20 --page --json
 sab team wait --task TASK_ID --timeout 3600 --json
 sab team reply --task TASK_ID --stdin
+sab team message --task TASK_ID --stdin --request-id STABLE_ID
+sab team replace --task TASK_ID --stdin --request-id STABLE_ID
+sab team cancel --task TASK_ID --reason 'Merged elsewhere.' --request-id STABLE_ID
+sab team mode draining
+sab team mode active
 sab team send-file --to WORKER_ALIAS --message 'Inspect these.' -- report.pdf
 sab team send-file --task TASK_ID --message 'Interim artifact.' -- result.json
 ```
@@ -104,14 +119,33 @@ mailboxes, active queues, task lifetime, replies, file count, and aggregate
 bytes are bounded. Agent-visible JSON contains aliases and authorized
 collaboration envelopes, not raw Slack destination IDs.
 
+The modern inbox cursor walks older results and is returned only with `--page`;
+each result includes the original bounded instruction, lifecycle version,
+replies, coordinator messages, and known timestamps. `--active`, `--target`,
+`--status`, and `--since` may be combined. The historical `--after TASK_ID`
+form still returns newer tasks for compatibility, but cannot be mixed with the
+new filters or cursor.
+
+Task control is coordinator-only and turn-scoped. `replace` and `cancel` apply
+only while the exact task is still queued. `message` applies only to the exact
+active task and journals the operation before posting it visibly in both
+channels and injecting it into the same authoritative worker session. Retries
+need the same request ID and content. Delivery is rejected while the worker has
+an open question or permission prompt, because that is not a safe text-input
+surface. An uncertain provider-side message is reported and never replayed.
+If Pi has no connected input stream, no provider write has occurred: the
+message remains pending and the reconciler submits it once after the exact
+authoritative stream reconnects.
+
 The coordinator may send up to 20 tasks in one current owner or automatic
 continuation budget. When that budget is exhausted, automatic mode can renew one
 bounded budget only by atomically claiming pending authenticated worker events
 for the same team. It cannot renew from a collaborator, another team, stale
 local input, or no event. A team holds at most 64 active tasks and one worker at
 most eight queued/running tasks. Each task accepts at most 32 interim replies and
-expires after seven days. Overflow, expiry, revocation, and identity disagreement
-fail visibly.
+32 idempotent control operations; terminal cancellation remains available if the
+control journal is full. Tasks expire after seven days. Overflow, expiry,
+revocation, and identity disagreement fail visibly.
 
 ## Delivery and recovery
 
@@ -122,7 +156,11 @@ resurrected by another agent. The owner may wake that session normally, after
 which the task waits for a safe idle input surface.
 
 Before injection, SAB reserves the input surface and atomically claims the exact
-worker native session. It remains `dispatching` until the provider acknowledges
+worker native session and the exact instruction revision already visible on
+both Slack audit cards. Concurrent replacements serialize those card updates;
+a changed or partly audited revision cannot be claimed. That same persisted mutation binds
+`session.teamActiveTaskId` and populates `startedAt`, so status cannot report the
+worker ready while its task is `dispatching`. It remains `dispatching` until the provider acknowledges
 the immutable task marker or that exact process journals a task-bound `sab team
 reply`. The latter proves that work was accepted when a prompt hook is missing,
 restores Codex status tracking, and survives restart; it never substitutes for
@@ -136,7 +174,9 @@ In automatic mode, every authenticated worker reply—including ordinary progres
 and idempotent retries that heal a dispatch—is a wake candidate. Multiple events
 accumulated while the coordinator is busy are represented by one durable wake;
 the coordinator always rereads the complete authenticated inbox, so old event
-payloads are neither replayed nor trusted. If the same provider turn remains
+payloads are neither replayed nor trusted. Events are keyed and durably
+deduplicated by task, reply, and task-lifecycle version, so a hook retry cannot
+produce another wake while a real later state transition still can. If the same provider turn remains
 active long enough to spend its current dispatch budget, the queued event may
 instead be claimed to establish the next bounded continuation budget; SAB
 persists that claim before creating another task. A resumed Codex TUI that omits lifecycle hooks is reconciled only after
@@ -145,12 +185,36 @@ clears the stale coordinator fence and proceeds without scraping a final answer
 or assigning a worker result. A genuine busy wait is reported once after one
 minute and continues to retry safely.
 
+If the daemon stops after claiming a continuation but before settling it, boot
+recovery accepts that wake only when the exact coordinator process and provider
+turn are still live. An unprovable provider attempt is marked interrupted and
+is never replayed; SAB posts an owner-actionable notice and leaves later durable
+events available rather than keeping the team permanently wedged behind an
+`active` journal entry. Persisted provider start timestamps alone are not live
+proof: a provider-specific post-restart event must restore the in-memory turn
+poller before the interrupted wake can be adopted.
+
 The same fallback covers an ordinary owner turn in a resumed Codex worker. Once
 the exact authoritative worker process has shown the unchanged idle input
 surface twice, SAB clears only that worker's stale owner-turn/input fences,
 persists the change, and wakes queued-task reconciliation. A delegated task,
 changed PID/tmux/session, queued input, or failed historical task resets the
 proof, so a fresh task is claimed at most once and old work is never replayed.
+
+For a delegated Codex task observed continuously by the live poller, the same
+stable idle proof means the injected turn ended even if Codex omitted both
+acknowledgement and completion hooks. SAB records `completed_with_warning`,
+returns the last authenticated worker update if one exists, and releases the
+worker without replay. Boot-time idle is deliberately different: after a daemon
+or host restart SAB cannot prove whether a journaled dispatch reached the old
+provider, so that historical task fails closed. A still-active provider turn is
+re-adopted instead, and an idle re-adopted worker can claim fresh queued work
+without manual activation.
+
+For Pi, a persisted turn-start timestamp is not post-restart liveness proof.
+SAB waits for a new native extension status/start event before restoring its
+poller or delegated-task authority; otherwise recovery releases the stale task,
+poller, and input fences without replay.
 
 Claude transcript completion, the Codex Stop hook or exact successful App Server
 turn, or the Pi extension supplies the stable final result. SAB persists
@@ -161,7 +225,7 @@ releases it without attributing a later final. Deleted or otherwise uneditable
 status cards are reported alongside the result but never prevent result
 delivery. Terminal tasks from the pre-claim journal format are recognized as
 already delivered during upgrade rather than posted a second time. Pending
-completion, reply, or file delivery prevents journal pruning; SAB persists a
+completion, reply, coordinator-message, or file delivery prevents journal pruning; SAB persists a
 pruned journal before deleting its private file copies.
 
 Interim commentary stays in the worker channel unless the worker deliberately

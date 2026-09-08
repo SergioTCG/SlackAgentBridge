@@ -153,7 +153,27 @@ export function createArtifactGrantStore({
     return removed
   }
 
-  return { issue, claim, finish, revoke, prune, size: () => grants.size }
+  // Native `/clear` or a provider-owned replacement can change the session ID
+  // without changing the verified provider/tmux/channel execution boundary.
+  // Preserve only the explicitly named one-use tokens embedded in prompts that
+  // were actually queued across that replacement. Other grants retain their old
+  // binding and therefore cannot be redeemed by the replacement session.
+  function rebind({ fromSessionId, toSessionId, channelId, provider, tokens = [] } = {}) {
+    prune()
+    if (!fromSessionId || !toSessionId || fromSessionId === toSessionId || !channelId || !provider) return 0
+    const allowedTokens = new Set(Array.isArray(tokens) ? tokens.filter(value => typeof value === 'string') : [])
+    if (!allowedTokens.size) return 0
+    let moved = 0
+    for (const [key, grant] of grants) {
+      if (!allowedTokens.has(key)) continue
+      if (grant.sessionId !== fromSessionId || grant.channelId !== channelId || grant.provider !== provider) continue
+      grant.sessionId = toSessionId
+      moved++
+    }
+    return moved
+  }
+
+  return { issue, claim, finish, revoke, rebind, prune, size: () => grants.size }
 }
 
 export async function fulfillArtifactUpload(store, { token, binding, paths }, uploader) {
@@ -204,4 +224,20 @@ export function artifactDeliveryInstruction(token) {
     `sab upload --grant ${token} -- FILE_PATH [FILE_PATH ...]`,
     'The destination is fixed to this Slack conversation. Do not reveal, quote, or reuse the grant, and do not run the command otherwise.',
   ].join('\n')
+}
+
+const ARTIFACT_UPLOAD_COMMAND = /^sab upload --grant ([A-Za-z0-9_-]+) -- FILE_PATH \[FILE_PATH \.\.\.\]\r?$/gm
+
+// Queued Pi prompts keep private capability context separate from visible text;
+// other providers keep one combined string. Inspect both representations, but
+// accept only the exact command shape emitted by artifactDeliveryInstruction.
+export function artifactGrantTokensFromPrompts(prompts = []) {
+  const found = new Set()
+  for (const prompt of Array.isArray(prompts) ? prompts : []) {
+    const value = typeof prompt === 'string'
+      ? prompt
+      : `${String(prompt?.text || '')}${String(prompt?.privateContext || '')}`
+    for (const match of value.matchAll(ARTIFACT_UPLOAD_COMMAND)) found.add(match[1])
+  }
+  return [...found]
 }

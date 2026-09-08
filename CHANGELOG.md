@@ -6,8 +6,251 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-09-08
+
 ### Added
 
+- Owner-only interactive Slack management and App Home controls now sit over
+  the existing `/sab-*` dispatcher. Parameterized commands remain compatible,
+  while stale panels and provider/session mismatches fail closed.
+- Session teams now support bounded automatic coordinator continuation,
+  atomic worker dispatch, durable drain mode, exact queued-task cancellation
+  and replacement, coordinator messages to active tasks, filtered cursor-based
+  inboxes, and task-bound file delivery.
+- The compatibility-preserving multi-node foundation adds authenticated node
+  enrollment, pinned Ed25519 identities, connection epochs, scoped operators,
+  and strict protocol validation. Remote provider routing remains deliberately
+  disabled until its authenticated delivery path is complete.
+
+### Changed
+
+- Provider sessions remain tmux-owned and headless across daemon restarts,
+  preserving the latest confirmed model and effort. Terminal windows remain
+  optional viewports and do not control provider lifetime.
+- Codex semantic commentary, completed finals, working status, and lifecycle
+  recovery now use separate ordered, rate-safe paths so cosmetic status traffic
+  cannot starve actual responses.
+
+### Fixed
+
+- Missing provider completion hooks, host restarts, replacement native session
+  IDs, queued maintenance input, Slack rate limits, and delayed Codex finals now
+  reconcile without replaying uncertain work, duplicating prompts, dropping
+  accepted finals, or leaving workers permanently busy.
+- Team lifecycle transitions atomically bind task, worker, channel, native
+  session, PID/tmux authority, and lifecycle version. Successful hookless
+  Codex workers become `completed_with_warning`; historical unproved work still
+  fails closed and fresh queued work starts exactly once.
+- Claude structured questions retain their prompt, recommendation,
+  descriptions, and previews in Slack, and detached starts use the explicitly
+  approved channel and workspace-trust paths.
+
+### Security
+
+- Artifact grants and team operations remain exact-session capabilities.
+  Concurrent native replacement hooks now retain separate prompt-scoped grant
+  authority, coordinator task messages journal before delivery, and stale,
+  rebound, cross-node, cross-provider, or collaborator claims are rejected
+  before mutation.
+
+## [2.1.0-rc.17] — 2026-09-08
+
+### Fixed
+
+- Concurrent native replacement hooks now retain separate, invocation-scoped
+  snapshots of only the prompts that overlapped each hook. A later replacement
+  can no longer inherit an earlier hook's accepted artifact-grant authority.
+
+## [2.1.0-rc.16] — 2026-09-08
+
+### Fixed
+
+- A native replacement hook now snapshots the exact input-drain prompts that
+  overlap its asynchronous PID/tmux authentication. Even if the drain finishes
+  before the hook mutates the native session identity, their accepted upload
+  grants remain available to the replacement; invalid hooks discard the
+  snapshot without rebinding anything.
+
+## [2.1.0-rc.15] — 2026-09-08
+
+### Fixed
+
+- Native in-place session replacement now includes the exact prompt remainder
+  temporarily owned by an active input drain when selecting artifact grants to
+  rebind. A delivery failure after replacement can therefore restore and retry
+  that accepted prompt without losing its one-use upload capability, while
+  unrelated grants remain bound to the superseded session.
+
+## [2.1.0-rc.14] — 2026-09-08
+
+### Fixed
+
+- Native in-place session replacement now rebinds only artifact grants whose
+  exact upload commands remain in the migrated pending-prompt queue. Other
+  unexpired grants retain the superseded session binding and cannot become
+  usable by a replacement merely because its channel, provider, and tmux match.
+- `sab team message` and queued-task replacement now retain their generated
+  request identity and print an exact safe-retry command after an uncertain
+  client outcome, preserving journal idempotency without requiring callers to
+  pre-generate UUIDs.
+- A coordinator message interrupted while its provider write was in flight is
+  persisted as `uncertain` on the first post-restart reconciliation. Later
+  passes fail closed without repeatedly rewriting state or replaying the text.
+
+## [2.1.0-rc.13] — 2026-09-08
+
+### Fixed
+
+- Coordinator messages to an active Pi task now distinguish a disconnected
+  input stream, where no provider write occurred, from an uncertain write. A
+  provably undelivered message stays pending for bounded reconciliation after
+  reconnect; a possibly delivered message remains failed and is never replayed.
+- A delayed Codex App Server final records its completion-observation time and
+  cannot stop the poller, clear the working line, or complete lifecycle state
+  belonging to a newer turn. The older final remains eligible for exact-once
+  Slack delivery without disturbing that newer turn.
+- A reconnected Pi extension reports the native input surface's idle state. SAB
+  restores polling for live work, or fail-closed releases an already-idle stale
+  re-adopted task so fresh queued work can dispatch without a manual prompt.
+- Bulk terminal open/close operations now revalidate each exact session,
+  channel, and tmux authority after asynchronous liveness checks, preventing a
+  replacement session from inheriting an operation aimed at its predecessor.
+
+## [2.1.0-rc.12] — 2026-09-08
+
+### Added
+
+- Session teams can now enter durable `draining` mode: active work may finish,
+  but queued work cannot dispatch until the owner or coordinator resumes the
+  team. Coordinators can idempotently cancel or replace an exact queued task and
+  can send a journaled, visibly audited message to the exact live worker that
+  owns an active task.
+- `sab team inbox` now retains the original bounded task instruction and adds
+  `--active`, `--target`, `--status`, `--since`, opaque cursor pagination, and a
+  page-shaped JSON result. The legacy `--after` form remains compatible.
+
+### Fixed
+
+- A live Codex worker that demonstrably returns to the idle input surface after
+  an injected task no longer records successful work as failed merely because
+  the completion hook was omitted. SAB records `completed_with_warning`, never
+  replays the turn, releases worker availability, and dispatches the next queued
+  task once. Boot-time idle without continuous delivery proof still fails
+  closed, preserving the no-replay boundary for historical pre-restart work.
+- Worker availability and task lifecycle now move together in one persisted
+  dispatch claim. A `dispatching` task has `startedAt` immediately, and durable
+  active-task state prevents a transient ready report or duplicate claim even
+  if session-local state is stale.
+- Automatic coordinator notifications are durably deduplicated by task, reply,
+  and lifecycle version, and pending events are coalesced before a continuation
+  wake. Ordinary worker replies and idempotent dispatch-healing retries still
+  enqueue exactly one wake.
+- Restart adoption now distinguishes live provider-turn proof from an already
+  idle historical task, preserves active tasks without manual session
+  activation, and releases unprovable work without replay before fresh queued
+  work can dispatch. A persisted Pi start timestamp is no longer treated as
+  post-restart liveness: native Pi activity must return before SAB restores its
+  poller or delegated-task authority, and an unproved turn releases all stale
+  poller/input state when the recovery grace period expires.
+- Coordinator task messages bind the exact task, channel, native session, PID,
+  and input surface; the journal is persisted before Slack/provider effects and
+  an uncertain provider attempt is never retried. The final provider attempt is
+  single-transport and revalidates that immutable binding after submission.
+  Delivery also refuses an input surface displaying a question or permission
+  prompt, so coordinator text cannot be pasted into an operator-choice UI.
+- Codex event-proxy shutdown now skips all queued commentary immediately rather
+  than spending one request timeout per item ahead of an accepted stable final.
+  It closes WebSocket ingress before following the current delivery tail to
+  quiescence, so a completion frame already queued by the socket cannot be lost
+  behind a stale shutdown snapshot. Stable finals retain their retry spacing
+  during shutdown, and a rejected or exhausted final makes the proxy/runner fail
+  instead of reporting a clean drain.
+  A reconnected Pi stream resumes the sole ordered maintenance-input drain, so
+  accepted prompts cannot remain fenced after extension reconnect; a superseded
+  Pi stream cannot drain input reserved for its replacement, and no Pi stream
+  can drain until the exact SessionStart metadata work has completed.
+- Drain activation is rechecked at the continuation claim boundary, instruction
+  card revisions remain retryable when either audit card is absent, and idle
+  restart adoption revalidates the exact provider process after asynchronous
+  Slack cleanup before releasing task or owner-turn fences.
+- Session-start and maintenance-input fences now carry opaque runtime ownership
+  generations across native identity replacement. A delayed metadata failure or
+  cleanup timer can release only its own generation, never a newer restart's
+  queued-input fence.
+- Concurrent queued-task replacements serialize their paired Slack audit-card
+  updates. The final dispatch claim is bound to that same fully audited
+  instruction revision, preventing a replacement from racing into a worker
+  under mixed or stale visible instructions.
+- Claude model selections made through Slack are now persisted just like effort
+  selections before the confirmation/topic update, so daemon restarts and
+  later session updates cannot fall back to the session's original model.
+- Replacement input-drain ownership now follows the stable session record
+  across native identity changes, preventing racing lifecycle/Pi-stream
+  callbacks from creating two queue consumers under the old and new ids.
+- An automatic coordinator wake left `active` by a daemon crash no longer wedges
+  later events forever. SAB adopts it only when the exact provider turn remains
+  live; otherwise it records an actionable interrupted outcome and never
+  replays the uncertain coordinator prompt. Persisted Codex/Pi start timestamps
+  are not sufficient proof: restart adoption requires a provider poller restored
+  from live post-restart evidence.
+
+## [2.1.0-rc.11] — 2026-09-07
+
+### Fixed
+
+- Provider maintenance now has one ordered input consumer across launch,
+  lifecycle adoption, and provider stream attachment. Codex no longer removes
+  the first prompt into its resume command, and Claude/Pi reconnects cannot
+  overtake an earlier queued prompt. Failed delivery restores the exact item
+  and its deduplication claim for an explicit retry.
+- A failed dormant wake or SessionStart metadata call no longer leaves queued
+  owner input behind a permanent maintenance fence. The queue remains intact,
+  a later owner message retries a genuinely dormant session, and Slack reports
+  the exact-session `/sab-update` recovery path.
+- Artifact grants carried by queued prompts now follow only a verified
+  same-provider, same-channel native session replacement. Unrelated grants and
+  provider handoffs remain isolated or revoked.
+- Piped no-reload installation verifies the loaded LaunchAgent target before
+  clone, pull, hook, configuration, or executable changes. A mismatched live
+  checkout therefore fails without touching Git.
+- Codex runner shutdown now propagates an exhausted commentary/final drain as
+  a visible nonzero failure and includes the bounded proxy diagnostic instead
+  of silently presenting the TUI exit as successful.
+
+## [2.1.0-rc.10] — 2026-09-07
+
+### Fixed
+
+- Provider maintenance now carries its queued owner input and restart fences
+  across a verified native session-ID replacement such as Claude `/clear`.
+  Replacement startup keeps direct input closed until the entire live queue,
+  including prompts arriving during the drain, reaches the provider in order.
+- Codex runner shutdown now keeps the correlated App Server process alive until
+  the event proxy finishes its bounded commentary/final drain. The daemon can
+  therefore still prove the final response's exact process ancestry while it
+  is being delivered.
+- No-reload installation now verifies the currently loaded historical
+  LaunchAgent as well as its on-disk plist. A deleted or moved plist can no
+  longer let a disposable worktree redirect live hooks and the public `sab`
+  executable.
+- The event-proxy shutdown regression no longer misses an already-observed
+  child exit on faster Node runtimes.
+
+## [2.1.0-rc.9] — 2026-09-07
+
+### Added
+
+- Added owner-only interactive Slack management without introducing another
+  command namespace. No-argument `/sab-model`, `/sab-effort`, `/sab-terminal`,
+  `/sab-update`, `/sab-switch`, `/sab-new`, and `/sab-team` render provider-aware
+  selectors or buttons, while `/sab-status` adds exact session/control
+  dashboards. Parameterized commands remain available, and `/sab-update
+  current` provides an explicit direct current-session update.
+- Added an owner-only App Home dashboard over the same validated dispatcher. It
+  lists authoritative session channels, provides exact provider/session
+  controls, and opens an allowlisted new-session modal. Non-owners receive no
+  session metadata or actions. The Home tab uses the existing Socket Mode
+  connection and requires no additional OAuth scope.
 - Added opt-in, durable `auto-until-blocked` team continuation. Completed or
   blocked executor replies enqueue deduplicated events; an idle authoritative
   coordinator receives a bounded continuation turn and resumes after daemon
@@ -36,6 +279,71 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex proxy shutdown now interrupts expendable commentary backoff and drains
+  already accepted stable finals before exiting, with a bounded visible failure
+  if local delivery cannot recover. A missing Codex `Stop` can therefore no
+  longer lose its App Server fallback final merely because the TUI closes.
+- Staged provider activation now refuses to run from a checkout different from
+  the LaunchAgent's live working directory. It fails before touching Git,
+  provider hooks, configuration, or the public `sab` link, preventing an
+  isolated release worktree from becoming a disposable runtime dependency.
+- Interactive team Refresh and auto/manual actions now render a fresh team
+  status and control panel after they run, so state-dependent buttons cannot
+  remain stale and strand the owner on the previous continuation mode.
+- Codex semantic commentary and completed finals now cross the loopback event
+  proxy in their exact App Server source order. A delayed earlier Slack/daemon
+  delivery can no longer be overtaken by a later final and then rejected as
+  stale; per-event deduplication and bounded retries remain intact.
+- Provider commentary and final responses no longer wait behind rate-limited
+  working-status edits or deletes. Status cleanup invalidates queued stale
+  timers and replacement bumps at the final Slack boundary, takes priority over
+  other cosmetic updates, and exposes its current queue pressure through
+  `/sab-health`.
+- Re-running an installer now replaces stale SAB provider hooks left by deleted
+  development worktrees or arbitrary custom checkout paths while preserving
+  unrelated hooks and registering the live checkout exactly once. The provider
+  staging helpers also make `--help` side-effect-free and reject unknown
+  arguments.
+- Interactive session controls carry their immutable rendered session identity
+  through asynchronous provider-catalog, terminal, update, and switch checks,
+  then revalidate it at every mutation boundary. Team controls additionally
+  bind the exact rendered team generation, so neither `/clear` identity changes
+  nor close-and-recreate races can redirect an old panel to replacement state.
+- A completed turn now promotes every provisional status-reanchor cleanup ahead
+  of unrelated cosmetic Slack traffic. A final that crosses the replacement
+  post boundary invalidates both the old and provisional working lines instead
+  of waiting behind the workspace timer queue.
+- Provider updates reserve the exact native session before their first Slack
+  notice, so delayed API calls cannot admit a second restart or lose a prompt.
+  Status dashboards likewise bind the pre-await native identity, and empty
+  status clears no longer consume workspace rate-limit slots.
+- Pi model and effort controls now carry the expected native session into the
+  extension and fail before mutation after a native conversation change.
+  Provider maintenance rejects overlapping setting or lifecycle actions while
+  retaining read-only management, and App Home no longer reports rejected
+  switch requests as started.
+- Deferred working-status cleanup retains the source channel captured when the
+  turn finished, so a provider handoff cannot strand the old leg's timer. App
+  Home stale-load recovery also renders a defined, internally consistent fresh
+  overview.
+- Status reanchor cleanup now retains that immutable source channel across the
+  entire provisional bump, including a handoff that lands between replacement
+  post and cleanup. Interactive option values preserve Slack's full
+  150-character identity allowance and omit overlong values rather than
+  truncating them into another project or model.
+- Account, flag, and Codex model/effort restarts now reserve the exact native
+  session before their first Slack wait. Overlapping controls are rejected and
+  owner messages—including question-shaped replies—queue for the replacement
+  process. A staged Pi extension fails closed with an actionable activation
+  message when the older daemon cannot supply its native-session fence.
+- A running Pi extension must now advertise exact-session setting support on
+  its authenticated local stream before the daemon will send model or effort
+  controls. Active Pi processes preserved across a daemon-only upgrade therefore
+  fail closed with an actionable `/sab-update current` instruction instead of
+  relying on an older extension to understand a new control field.
+- Interactive Claude model choices now carry the exact provider model ID.
+  Standard and 1M-context siblings remain distinct selections, while deliberate
+  bare textual family aliases retain their documented long-context preference.
 - Codex App Server turns no longer lose their final Slack response when Codex
   omits the configured Stop hook. The transparent proxy now releases only a
   completed `final_answer` after its exact successful `turn/completed`; the
@@ -144,6 +452,9 @@ Notable changes to this project. Format based on
   directed-edge agreement. Collaborator turns fail closed; uncertain restart
   dispatches are never replayed; team files use content-hashed private copies
   and a permission distinct from artifact grants.
+
+[2.1.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0
+[2.1.0-rc.7]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.1.0-rc.7
 
 ## [2.0.1] — 2026-08-26
 
