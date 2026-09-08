@@ -251,6 +251,10 @@ for a legacy running task: SAB cannot prove whether a journaled dispatch reached
 the old provider, so that historical task fails closed. A durable
 `awaiting_release` report needs no replay and is reattached to the exact session
 binding after daemon restart, including while the provider process is dormant.
+An owner message in that dormant worker channel wakes the same reserved native
+session but is deliberately not submitted as unrelated task input. Coordinator
+follow-ups accepted during downtime remain durable, are mirrored in both team
+channels, and enter the provider exactly once after re-adoption.
 
 For Pi, a persisted turn-start timestamp is not post-restart liveness proof.
 SAB waits for a new native extension status/start event before restoring its

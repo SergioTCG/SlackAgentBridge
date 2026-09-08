@@ -424,6 +424,9 @@ does not fabricate a failure, invent a final, or release the worker. An already
 idle pre-upgrade task found during daemon boot has no equivalent continuous
 proof and still fails closed. An `awaiting_release` task and its exact worker
 binding survive daemon restart, including while the provider is dormant.
+An owner message in the dormant worker channel may wake that same reserved
+session without becoming unrelated provider input; any durable coordinator
+follow-up is already visible in both channels and is delivered after re-adoption.
 Availability and the `queued → dispatching` task claim are persisted together,
 and context output includes observation time plus the last task/availability
 transition reason.

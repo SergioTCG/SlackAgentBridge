@@ -289,7 +289,9 @@ accounts, and the Mac user running the daemon.
   continuously by its live poller may create only a warning-bearing turn report
   after that same proof; it does not release the task. An already-idle legacy
   task discovered during boot fails closed, while an already-reported task is
-  durably re-adopted. Both paths preserve the journal, never replay work, and
+  durably re-adopted. The owner may wake that exact reserved session, but SAB
+  consumes the wake message without submitting it as unrelated task input.
+  Both paths preserve the journal, never replay work, and
   never release a replacement session. No fallback path fabricates a provider
   final response from terminal output.
 - **Rate-safe status delivery:** live status edits use one workspace-wide,

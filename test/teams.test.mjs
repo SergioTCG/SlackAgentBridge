@@ -358,6 +358,57 @@ test('mutation receipts expose accepted state and session binding repair is exac
   assert.equal(worker.teamActiveTaskId, undefined)
 })
 
+test('a task creation request ID cannot be reused for coordinator control', () => {
+  const { state, team } = fixture()
+  const queued = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Original task.', requestId: 'same-request', id: 'task_collision_queued', now: 2000,
+  }).task
+
+  assert.throws(() => replaceQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', text: 'Replacement.', requestId: 'same-request', now: 2100,
+  }), error => error.code === 'request_conflict')
+  assert.equal(queued.instruction, 'Original task.')
+  assert.throws(() => cancelQueuedTeamTask(state, queued.id, {
+    sourceChannel: 'C-MASTER', requestId: 'same-request', now: 2200,
+  }), error => error.code === 'request_conflict')
+  assert.equal(queued.status, 'queued')
+
+  claimTeamTask(state, queued.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 3000 })
+  assert.throws(() => appendCoordinatorTaskMessage(state, queued.id, {
+    sourceChannel: 'C-MASTER', text: 'Follow up.', requestId: 'same-request', now: 4000,
+  }), error => error.code === 'request_conflict')
+  assert.deepEqual(queued.messages, [])
+  assert.deepEqual(teamMutationForRequest(state, 'C-MASTER', 'same-request', { taskId: queued.id }), {
+    requestId: 'same-request',
+    kind: 'send',
+    status: 'accepted',
+    resourceId: queued.id,
+    taskId: queued.id,
+    taskStatus: 'dispatching',
+    lifecycleVersion: queued.lifecycleVersion,
+    acceptedAt: queued.createdAt,
+  })
+})
+
+test('worker request IDs cannot collide across replies and completion declarations', () => {
+  const { state, team } = fixture()
+  const task = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Worker task.', requestId: 'worker-collision-task', id: 'task_worker_collision', now: 2000,
+  }).task
+  claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Progress.', requestId: 'worker-same-request', now: 5000,
+  })
+  assert.throws(() => requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: 'worker', fromChannel: 'C-WORKER-1', summary: 'Ready.',
+    requestId: 'worker-same-request', now: 6000,
+  }), error => error.code === 'request_conflict')
+  assert.equal(task.completionRequest, null)
+})
+
 test('binding repair refuses to choose between conflicting durable tasks', () => {
   const { state, team } = fixture()
   const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }

@@ -77,6 +77,7 @@ import { handleTerminalHttp } from './terminal-http.mjs'
 import { handleTeamHttp } from './team-http.mjs'
 import {
   knownUndeliveredTeamMessage, recoverInterruptedTeamMessage, teamMessageFailureDisposition,
+  teamReportLifecycleNotice,
 } from './team-message-delivery.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
@@ -3191,6 +3192,13 @@ async function handleSlackMessage(channel, text, sender, request) {
 
   const managedSession = sessionByChannel(channel)
   if (managedSession?.teamActiveTaskId) {
+    if (!sender && !(managedSession.pid && pidAlive(managedSession.pid))) {
+      await post(channel,
+        `🕸️ Resuming the worker session reserved by task \`${managedSession.teamActiveTaskId}\`. ` +
+        'This message is only a wake request and was not submitted as unrelated task input.')
+      await resurrect(managedSession)
+      return
+    }
     return post(channel, `🕸️ Delegated team task \`${managedSession.teamActiveTaskId}\` currently owns this worker turn. Wait for its final response or use \`/sab-stop\` before sending unrelated work.`)
   }
   if (providerOf(managedSession) === 'pi' && (
@@ -4092,9 +4100,7 @@ async function performTeamReportDelivery(task, report) {
     const gates = task.pendingGates?.length
       ? `\n\nPending gates: ${task.pendingGates.map(gate => `\`${gate}\``).join(', ')}`
       : ''
-    const readiness = task.completionRequest && !task.pendingGates?.length
-      ? '\n\n✅ The worker declared this task ready; the coordinator may release it.'
-      : '\n\nThe worker remains reserved. Send a follow-up or wait for an explicit readiness declaration.'
+    const readiness = teamReportLifecycleNotice(task)
     const warning = report.warning ? `\n\n⚠️ ${report.warning}` : ''
     const auditWarning = auditUpdated ? '' : '\n\n⚠️ One or more task status cards could not be updated.'
     if (!report.slackTs) {
@@ -4194,9 +4200,27 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
   const durableAwaitingTarget = task.status === 'awaiting_release' && target &&
     state.sessions?.[target.id] === target && target.channel === task.targetChannel &&
     state.channels?.[task.targetChannel] === target.id && target.teamActiveTaskId === task.id
+  if (!message.sourceSlackTs) {
+    const posted = await postSlackMessage(task.sourceChannel, {
+      text: `📨 *Coordinator message to* <#${task.targetChannel}> · \`${task.id}\`\n\n${message.text}`,
+      unfurl_links: false,
+      client_msg_id: teamAuditClientId(task, `${message.id}:source`),
+    })
+    message.sourceSlackTs = posted?.ts || null
+    saveStateNow(state)
+  }
+  if (!message.targetSlackTs) {
+    const posted = await postSlackMessage(task.targetChannel, {
+      text: `📨 *Coordinator message* · \`${task.id}\`\n\n${message.text}`,
+      unfurl_links: false,
+      client_msg_id: teamAuditClientId(task, `${message.id}:target`),
+    })
+    message.targetSlackTs = posted?.ts || null
+    saveStateNow(state)
+  }
   if (durableAwaitingTarget && (!(target.pid && pidAlive(target.pid)) || !target.tmux)) {
     throw new TeamError('worker_dormant',
-      'The coordinator message is durable and will be delivered after the reserved worker session resumes.', 409)
+      'The coordinator message is durable, visible in both channels, and will be delivered after the reserved worker session resumes.', 409)
   }
   if (!(await validateCoordinatorTaskMessageTarget(task, target, expected))) {
     message.deliveryStatus = 'failed'
@@ -4206,24 +4230,6 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
   }
   let providerAttempted = false
   try {
-    if (!message.sourceSlackTs) {
-      const posted = await postSlackMessage(task.sourceChannel, {
-        text: `📨 *Coordinator message to* <#${task.targetChannel}> · \`${task.id}\`\n\n${message.text}`,
-        unfurl_links: false,
-        client_msg_id: teamAuditClientId(task, `${message.id}:source`),
-      })
-      message.sourceSlackTs = posted?.ts || null
-      saveStateNow(state)
-    }
-    if (!message.targetSlackTs) {
-      const posted = await postSlackMessage(task.targetChannel, {
-        text: `📨 *Coordinator message* · \`${task.id}\`\n\n${message.text}`,
-        unfurl_links: false,
-        client_msg_id: teamAuditClientId(task, `${message.id}:target`),
-      })
-      message.targetSlackTs = posted?.ts || null
-      saveStateNow(state)
-    }
     if (!(await validateCoordinatorTaskMessageTarget(task, target, expected))) {
       throw new TeamError('target_authority_lost', 'The exact active worker changed or entered maintenance before provider delivery.', 409)
     }
@@ -4238,6 +4244,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       message.text,
       '</sab-team-message>',
     ].join('\n'))
+    recordTeamWorkerProof(target, task)
     message.providerDeliveryStatus = 'delivered'
     message.deliveryStatus = 'delivered'
     message.deliveryError = null

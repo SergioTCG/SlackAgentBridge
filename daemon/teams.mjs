@@ -515,6 +515,10 @@ export function appendTeamTaskReply(state, taskId, {
     if (accepted) markTeamTaskRunning(state, task.id, { now })
     return { reply: existing, created: false, accepted }
   }
+  if ([task.completionRequest, ...(task.completionRequestHistory || [])]
+    .some(item => item?.requestId === key)) {
+    throw new TeamError('request_conflict', 'That request ID was already used for a completion declaration.', 409)
+  }
   if (!ACTIVE_TASK_STATES.has(task.status)) throw new TeamError('task_not_active', 'That task no longer accepts replies.', 409)
   if (task.replies.length >= TEAM_MAX_REPLIES) throw new TeamError('reply_limit', 'This task reached its bounded reply limit.', 409)
   if (normalizedGates !== null) invalidateCompletionRequest(task, {
@@ -579,6 +583,9 @@ export function requestTeamTaskCompletion(state, taskId, {
       throw new TeamError('completion_already_requested', 'This task already has a different completion declaration.', 409)
     }
     return { task, request: existing, created: false }
+  }
+  if (task.replies.some(reply => reply.requestId === key)) {
+    throw new TeamError('request_conflict', 'That request ID was already used for a task reply.', 409)
   }
   if (task.completionRequest) {
     throw new TeamError('completion_already_requested', 'This task already has a different active completion declaration.', 409)
@@ -779,6 +786,9 @@ export function failTeamTask(state, taskId, error, { now = Date.now(), cancelled
 function taskControlRequest(task, requestId, kind, payloadHash) {
   const key = String(requestId || '')
   if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
+  if (task.requestId === key) {
+    throw new TeamError('request_conflict', 'That request ID was already used to create this task.', 409)
+  }
   task.controlRequests ||= []
   const existing = task.controlRequests.find(request => request.requestId === key)
   if (existing && (existing.kind !== kind || existing.payloadHash !== payloadHash)) {

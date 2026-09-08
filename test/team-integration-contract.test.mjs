@@ -250,6 +250,22 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
 })
 
+test('reported dormant workers can be resumed and deferred follow-ups remain visible and proved', () => {
+  const inbound = /async function handleSlackMessage\([\s\S]*?\/\/ Collaborators may only send prompts/.exec(daemon)?.[0] || ''
+  assert.match(inbound, /managedSession\?\.teamActiveTaskId[\s\S]*!sender[\s\S]*pidAlive[\s\S]*resurrect\(managedSession\)/)
+
+  const delivery = /async function performCoordinatorTaskMessageDelivery\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  const sourceAudit = delivery.indexOf("message.sourceSlackTs")
+  const targetAudit = delivery.indexOf("message.targetSlackTs")
+  const dormant = delivery.indexOf("worker_dormant")
+  const injection = delivery.indexOf("injectCoordinatorTaskMessageOnce")
+  const proof = delivery.indexOf("recordTeamWorkerProof")
+  assert.ok(sourceAudit >= 0 && targetAudit > sourceAudit && dormant > targetAudit,
+    'both Slack audit copies must precede dormant provider deferral')
+  assert.ok(injection >= 0 && proof > injection,
+    'an exactly delivered follow-up must establish fresh live-turn proof')
+})
+
 test('team mutation responses carry the journaled receipt from the original authority check', () => {
   assert.match(daemon, /function acceptedTeamMutation\([\s\S]*teamMutationForRequest/)
   assert.match(daemon, /mutation: acceptedTeamMutation\(session, result\.task, request\.requestId\)/)

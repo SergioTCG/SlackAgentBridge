@@ -379,7 +379,11 @@ stable final, and keeps the task and worker reserved for coordinator follow-up
 or explicit release. An idle legacy task discovered during boot has no
 continuous delivery proof and therefore fails closed instead. A persisted
 `awaiting_release` report is already durable proof and is re-adopted without
-replaying provider input, even while its provider is dormant.
+replaying provider input, even while its provider is dormant. An owner may wake
+that exact reserved session without submitting the wake message as task input.
+Coordinator follow-ups are journaled and mirrored to both channels before a
+dormant provider defers their exact-once injection; successful injection creates
+fresh in-memory turn proof for restart reconciliation.
 
 Pi restart adoption never treats its persisted turn-start timestamp as current
 liveness. SAB restores Pi polling and delegated-task proof only after a new

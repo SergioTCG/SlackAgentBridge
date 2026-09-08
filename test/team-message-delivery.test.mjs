@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   knownUndeliveredTeamMessage,
   recoverInterruptedTeamMessage,
+  teamReportLifecycleNotice,
   teamMessageFailureDisposition,
 } from '../daemon/team-message-delivery.mjs'
 
@@ -39,4 +40,26 @@ test('restart recovery makes an interrupted provider write durably uncertain exa
     deliveryError: 'Provider delivery outcome became uncertain during daemon restart; SAB did not replay this task message.',
   })
   assert.equal(recoverInterruptedTeamMessage(message), false)
+})
+
+test('delayed worker reports describe the current lifecycle without stale release advice', () => {
+  assert.match(teamReportLifecycleNotice({
+    status: 'awaiting_release', completionRequest: { requestId: 'ready' }, pendingGates: [],
+  }), /may release/)
+  assert.match(teamReportLifecycleNotice({
+    status: 'awaiting_release', completionRequest: null, pendingGates: [],
+  }), /remains reserved/)
+  assert.match(teamReportLifecycleNotice({
+    status: 'running', completionRequest: { requestId: 'stale' }, pendingGates: [],
+  }), /currently `running`/)
+  assert.doesNotMatch(teamReportLifecycleNotice({
+    status: 'running', completionRequest: { requestId: 'stale' }, pendingGates: [],
+  }), /may release/)
+  for (const status of ['completed', 'completed_with_warning', 'failed', 'cancelled']) {
+    const notice = teamReportLifecycleNotice({
+      status, completionRequest: { requestId: 'stale' }, pendingGates: [],
+    })
+    assert.match(notice, /no release action is pending/)
+    assert.doesNotMatch(notice, /remains reserved|may release/)
+  }
 })

@@ -31,6 +31,13 @@ Notable changes to this project. Format based on
   provider downtime, and refuses conflicting bindings instead of guessing.
 - Every team mutation returns its journaled request receipt; generated CLI
   request IDs and safe retry/status guidance are retained across timeouts.
+- Reported workers can be resumed by an owner without injecting unrelated task
+  input. Deferred coordinator follow-ups are mirrored before provider delivery,
+  establish fresh post-restart turn proof, and no longer fail valid re-adopted
+  work as stale.
+- Per-task request-ID collisions now fail before mutation, and delayed worker
+  reports describe the current lifecycle instead of offering stale release
+  guidance after a task has already moved on.
 
 ## [2.1.0] — 2026-09-08
 
