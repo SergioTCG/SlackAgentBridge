@@ -4956,7 +4956,9 @@ const teamService = {
       throw new TeamError('invalid_continuation_task', 'Only one of this coordinator\'s terminal tasks may be continued.', 409)
     }
     return teamService.send(caller, {
-      to: previous.targetAlias,
+      // Channel identity is immutable; the historical presentation alias may
+      // have changed after a remove/re-add cycle.
+      to: previous.targetChannel,
       text: request.text,
       paths: [],
       requestId: request.requestId,
@@ -5077,8 +5079,12 @@ const teamService = {
     const session = await resolveTeamCaller(caller)
     requireTeamCallerContext(session)
     const task = teamTask(state, request.taskId)
-    if (session.teamActiveTaskId !== task.id || task.targetChannel !== session.channel ||
-        task.targetSessionId !== session.id) {
+    if (task.targetChannel !== session.channel || task.targetSessionId !== session.id) {
+      throw new TeamError('completion_not_allowed', 'This live worker session does not own that active task.', 403)
+    }
+    const priorRequest = [task.completionRequest, ...(task.completionRequestHistory || [])]
+      .find(item => item?.requestId === request.requestId)
+    if (!priorRequest && session.teamActiveTaskId !== task.id) {
       throw new TeamError('completion_not_allowed', 'This live worker session does not own that active task.', 403)
     }
     const result = requestTeamTaskCompletion(state, task.id, {

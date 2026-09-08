@@ -248,6 +248,12 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
+  assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('session.teamActiveTaskId !== task.id'),
+    'an exact completion retry must be recovered before the released session binding is rejected')
+
+  const continuation = /async continue\(caller, request\) \{[\s\S]*?\n  },\n  async reply/.exec(daemon)?.[0] || ''
+  assert.match(continuation, /to: previous\.targetChannel/)
+  assert.doesNotMatch(continuation, /to: previous\.targetAlias/)
 })
 
 test('reported dormant workers can be resumed and deferred follow-ups remain visible and proved', () => {
@@ -264,6 +270,9 @@ test('reported dormant workers can be resumed and deferred follow-ups remain vis
     'both Slack audit copies must precede dormant provider deferral')
   assert.ok(injection >= 0 && proof > injection,
     'an exactly delivered follow-up must establish fresh live-turn proof')
+
+  assert.match(teamModules, /function delegatedTaskPrompt[\s\S]*teamTaskCompletionPolicy\(task\)/)
+  assert.match(teamModules, /beginCoordinatorTaskMessageDelivery[\s\S]*task\.status === 'awaiting_release'[\s\S]*message\.resumesTask = true[\s\S]*invalidateCompletionRequest/)
 })
 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {

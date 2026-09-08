@@ -38,6 +38,9 @@ Notable changes to this project. Format based on
 - Per-task request-ID collisions now fail before mutation, and delayed worker
   reports describe the current lifecycle instead of offering stale release
   guidance after a task has already moved on.
+- Legacy queued work retains provider-final instructions, while delivery-time
+  follow-up races, post-release completion retries, and renamed-worker
+  continuations preserve their exact durable task identity.
 
 ## [2.1.0] — 2026-09-08
 

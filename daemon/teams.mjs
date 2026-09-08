@@ -565,9 +565,6 @@ export function requestTeamTaskCompletion(state, taskId, {
   if (task.targetChannel !== fromChannel || task.targetSessionId !== targetSessionId) {
     throw new TeamError('completion_not_allowed', 'Only the exact assigned worker session may declare this task ready.', 403)
   }
-  if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
-    throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
-  }
   const text = String(summary || '').trim()
   if (!text) throw new TeamError('empty_completion', 'Task completion needs a bounded summary.')
   if (textBytes(text) > TEAM_MESSAGE_MAX_BYTES) {
@@ -583,6 +580,9 @@ export function requestTeamTaskCompletion(state, taskId, {
       throw new TeamError('completion_already_requested', 'This task already has a different completion declaration.', 409)
     }
     return { task, request: existing, created: false }
+  }
+  if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
+    throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
   }
   if (task.replies.some(reply => reply.requestId === key)) {
     throw new TeamError('request_conflict', 'That request ID was already used for a task reply.', 409)
@@ -908,6 +908,16 @@ export function beginCoordinatorTaskMessageDelivery(state, taskId, messageId, { 
   const task = teamTask(state, taskId)
   const message = (task.messages || []).find(item => item.id === messageId)
   if (!message) throw new TeamError('task_message_not_found', 'That coordinator task message is unavailable.', 404)
+  // Slack mirroring is deliberately awaited before provider delivery. The
+  // worker can report during that window, so delivery-time state—not the state
+  // observed when the message was journaled—decides whether this is a resumed
+  // turn and invalidates the now-stale readiness declaration.
+  if (task.status === 'awaiting_release') {
+    message.resumesTask = true
+    if (invalidateCompletionRequest(task, {
+      reason: 'coordinator_follow_up', requestId: message.requestId, now,
+    })) message.invalidatedCompletion = true
+  }
   if (message.resumesTask && task.status === 'awaiting_release') {
     transitionTask(task, 'running', 'coordinator_follow_up_submitting', {
       now, requestId: message.requestId,
@@ -1206,6 +1216,17 @@ export function delegatedTaskPrompt(team, task, destinationFiles = []) {
   const paths = destinationFiles.length
     ? `\nFiles copied into this worker's private attachment area:\n${destinationFiles.map(file => `  • ${file.path}`).join('\n')}`
     : ''
+  const lifecycleInstructions = teamTaskCompletionPolicy(task) === LEGACY_COMPLETION_POLICY
+    ? [
+        'Complete this task independently. Your stable final answer will be returned automatically to the coordinator.',
+        `Use \`sab team reply --task ${task.id} --stdin\` for useful interim findings. Use \`sab team send-file --task ${task.id} -- FILE_PATH\` to return files when file relay is enabled.`,
+      ]
+    : [
+        'A provider turn ending reports progress; it does not release this task or its worker reservation.',
+        `Use \`sab team checkpoint --task ${task.id} --pending GATE[,GATE] --stdin\` whenever tests, CI, runtime proof, review, or merge work remains. Use \`--pending none\` only when every declared gate is clear.`,
+        `Only after all work and gates are complete, declare readiness with \`sab team complete --task ${task.id} --stdin\` before your final answer. The coordinator then releases the task.`,
+        `Use \`sab team reply --task ${task.id} --stdin\` for other useful interim findings. Use \`sab team send-file --task ${task.id} -- FILE_PATH\` to return files when file relay is enabled.`,
+      ]
   return [
     `<sab-team-task id="${task.id}" team="${team.id}" source="coordinator">`,
     '[Slack Agent Bridge delegated task]',
@@ -1213,10 +1234,7 @@ export function delegatedTaskPrompt(team, task, destinationFiles = []) {
     'Role: worker',
     `Task: ${task.id}`,
     'Origin: coordinator',
-    'A provider turn ending reports progress; it does not release this task or its worker reservation.',
-    `Use \`sab team checkpoint --task ${task.id} --pending GATE[,GATE] --stdin\` whenever tests, CI, runtime proof, review, or merge work remains. Use \`--pending none\` only when every declared gate is clear.`,
-    `Only after all work and gates are complete, declare readiness with \`sab team complete --task ${task.id} --stdin\` before your final answer. The coordinator then releases the task.`,
-    `Use \`sab team reply --task ${task.id} --stdin\` for other useful interim findings. Use \`sab team send-file --task ${task.id} -- FILE_PATH\` to return files when file relay is enabled.`,
+    ...lifecycleInstructions,
     'You may not delegate this task to another SAB channel.',
     '</sab-team-task>',
     '',

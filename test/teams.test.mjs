@@ -319,6 +319,54 @@ test('new tasks separate provider turn reports from explicit coordinator release
   assert.equal(releaseTeamTask(state, task.id, {
     sourceChannel: 'C-MASTER', requestId: 'release-1', now: 9100,
   }).created, false)
+  const completionRetry = requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id,
+    fromChannel: worker.channel,
+    summary: 'Final confirmation supplied.',
+    requestId: 'complete-2',
+    now: 9200,
+  })
+  assert.equal(completionRetry.created, false)
+  assert.equal(completionRetry.request.summary, 'Final confirmation supplied.')
+  assert.equal(task.status, 'completed')
+})
+
+test('delivery-time coordinator follow-up wins a concurrent worker report', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Verify the result.', requestId: 'race-task', id: 'task_follow_up_race', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+
+  const followUp = appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'Confirm the runtime proof.', requestId: 'race-follow-up', now: 5000,
+  })
+  assert.equal(followUp.message.resumesTask, false)
+  requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel,
+    summary: 'Ready before follow-up delivery.', requestId: 'race-complete', now: 5100,
+  })
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id, result: 'First report.', now: 5200,
+  })
+  assert.equal(task.status, 'awaiting_release')
+
+  beginCoordinatorTaskMessageDelivery(state, task.id, followUp.message.id, { now: 5300 })
+  assert.equal(followUp.message.resumesTask, true)
+  assert.equal(followUp.message.invalidatedCompletion, true)
+  assert.equal(task.completionRequest, null)
+  assert.equal(task.status, 'running')
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id, result: 'Second report after the follow-up.', now: 5400,
+  })
+  assert.equal(task.status, 'awaiting_release')
+  assert.equal(task.reports.length, 2)
+  assert.equal(task.reports.at(-1).result, 'Second report after the follow-up.')
 })
 
 test('provider final remains backward-compatible for tasks without a completion policy', () => {
@@ -645,12 +693,40 @@ test('delegated prompts carry immutable provenance and a task marker', () => {
   assert.match(prompt, /Origin: coordinator/)
   assert.doesNotMatch(prompt, /C-MASTER/)
   assert.match(prompt, /sab team reply --task task_prompt/)
+  assert.match(prompt, /provider turn ending reports progress/)
+  assert.match(prompt, /sab team complete --task task_prompt/)
   assert.match(prompt, /\/private\/attachment\/report\.txt/)
+
+  delete task.completionPolicy
+  const legacyPrompt = delegatedTaskPrompt(team, task)
+  assert.match(legacyPrompt, /stable final answer will be returned automatically/)
+  assert.doesNotMatch(legacyPrompt, /sab team (?:checkpoint|complete|release)/)
   assert.deepEqual(withoutDelegatedTaskPrompt([
     'ordinary queued prompt',
     prompt,
     { text: prompt, route: 'native' },
   ], 'task_prompt'), ['ordinary queued prompt'])
+})
+
+test('linked continuations resolve an immutable worker channel after its alias changes', () => {
+  const { state, team } = fixture()
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Original work.', requestId: 'alias-original', id: 'task_alias_original', now: 2000,
+  })
+  delete task.completionPolicy
+  claimTeamTask(state, task.id, { targetSessionId: 'worker-sid', targetProvider: 'codex', now: 3000 })
+  completeTeamTask(state, task.id, { targetSessionId: 'worker-sid', result: 'Done.', now: 4000 })
+  removeTeamWorker(state, team.id, 'parallel-1', { now: 5000 })
+  addTeamWorker(state, team.id, { channel: 'C-WORKER-1', alias: 'renamed-worker', now: 6000 })
+
+  const continuation = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: task.targetChannel, text: 'Follow up.', parentTaskId: task.id,
+    requestId: 'alias-continuation', id: 'task_alias_continuation', now: 7000,
+  }).task
+  assert.equal(continuation.targetChannel, 'C-WORKER-1')
+  assert.equal(continuation.targetAlias, 'renamed-worker')
 })
 
 test('channel inboxes contain only tasks involving that exact channel', () => {
