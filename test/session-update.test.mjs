@@ -5,6 +5,9 @@ import {
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
   shouldRetryDormantSessionWake,
 } from '../daemon/session-update.mjs'
+import {
+  artifactDeliveryInstruction, artifactGrantTokensFromPrompts, createArtifactGrantStore,
+} from '../daemon/artifacts.mjs'
 
 function stateFixture() {
   return {
@@ -185,6 +188,69 @@ test('failed session input delivery restores the undelivered item ahead of later
   assert.deepEqual(pending.get('session'), ['first', 'second'])
   assert.equal(updating.has('session'), true)
   assert.equal(draining.has('session'), false)
+})
+
+test('native replacement preserves grants for the exact in-flight queue remainder', async () => {
+  const session = { id: 'old-session' }
+  const first = `first${artifactDeliveryInstruction('first-token')}`
+  const second = `second${artifactDeliveryInstruction('second-token')}`
+  const pending = new Map([['old-session', [first, second]]])
+  const updating = new Set(['old-session'])
+  const draining = new Set()
+  const inFlightPrompts = new WeakMap()
+  const grants = createArtifactGrantStore({ token: (() => {
+    const values = ['first-token', 'second-token', 'unrelated-token']
+    return () => values.shift()
+  })() })
+  for (let index = 0; index < 3; index++) {
+    grants.issue({
+      sessionId: 'old-session', channelId: 'C1', provider: 'codex',
+      userId: 'U1', workspaceRoot: process.cwd(),
+    })
+  }
+  let rejectDelivery
+  let deliveryStarted
+  const started = new Promise(resolve => { deliveryStarted = resolve })
+  const drain = drainSessionInputQueue(() => session.id, {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+    drainingSessionIds: draining,
+    inFlightPrompts,
+    inFlightOwner: session,
+    deliver: () => new Promise((resolve, reject) => {
+      rejectDelivery = reject
+      deliveryStarted()
+    }),
+  })
+
+  await started
+  assert.deepEqual(pending.get('old-session'), [])
+  assert.deepEqual(inFlightPrompts.get(session), [first, second])
+  rebindSessionRuntimeState('old-session', 'new-session', {
+    pendingBySession: pending,
+    updatingSessionIds: updating,
+  })
+  assert.equal(grants.rebind({
+    fromSessionId: 'old-session', toSessionId: 'new-session', channelId: 'C1', provider: 'codex',
+    tokens: artifactGrantTokensFromPrompts([
+      ...(pending.get('new-session') || []), ...(inFlightPrompts.get(session) || []),
+    ]),
+  }), 2)
+  session.id = 'new-session'
+  rejectDelivery(new Error('replacement raced with delivery'))
+  await assert.rejects(drain, /replacement raced with delivery/)
+
+  assert.deepEqual(pending.get('new-session'), [first, second])
+  assert.equal(inFlightPrompts.has(session), false)
+  assert.equal(grants.claim('first-token', {
+    sessionId: 'new-session', channelId: 'C1', provider: 'codex',
+  }).sessionId, 'new-session')
+  assert.equal(grants.claim('second-token', {
+    sessionId: 'new-session', channelId: 'C1', provider: 'codex',
+  }).sessionId, 'new-session')
+  assert.throws(() => grants.claim('unrelated-token', {
+    sessionId: 'new-session', channelId: 'C1', provider: 'codex',
+  }), /invalid/)
 })
 
 test('pending-only dormant input retries wake without weakening active maintenance fences', () => {

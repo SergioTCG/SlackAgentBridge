@@ -276,6 +276,7 @@ const restarting = new Set() // session ids intentionally restarting (suppress t
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
 const drainingSessionInput = new Set() // exact sessions serially flushing input queued across a wake/restart
 const sessionInputDrainOwners = new WeakSet() // stable session objects reserve one scheduler across native id replacement
+const sessionInputDrainPrompts = new WeakMap() // stable session object → exact queue remainder temporarily owned by its drain
 const sessionInputFenceOwners = new Map() // native id → opaque owner; stale async failures cannot release a newer fence
 let sessionInputFenceGeneration = 0
 
@@ -1484,6 +1485,8 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
         drainingSessionIds: drainingSessionInput,
         fenceOwners: sessionInputFenceOwners,
         expectedOwner: fenceOwner,
+        inFlightPrompts: sessionInputDrainPrompts,
+        inFlightOwner: session,
         deliver: async m => {
           const currentSid = session.id
           const prompt = queuedPromptText(m)
@@ -1685,7 +1688,10 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       toSessionId: sid,
       channelId: session.channel,
       provider,
-      tokens: artifactGrantTokensFromPrompts(pendingBySid.get(sid)),
+      tokens: artifactGrantTokensFromPrompts([
+        ...(pendingBySid.get(sid) || []),
+        ...(sessionInputDrainPrompts.get(session) || []),
+      ]),
     })
     session.id = sid
     session.offset = 0

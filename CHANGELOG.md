@@ -6,6 +6,16 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.15] — 2026-09-08
+
+### Fixed
+
+- Native in-place session replacement now includes the exact prompt remainder
+  temporarily owned by an active input drain when selecting artifact grants to
+  rebind. A delivery failure after replacement can therefore restore and retry
+  that accepted prompt without losing its one-use upload capability, while
+  unrelated grants remain bound to the superseded session.
+
 ## [2.1.0-rc.14] — 2026-09-08
 
 ### Fixed

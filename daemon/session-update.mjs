@@ -125,6 +125,8 @@ export async function drainSessionInputQueue(sessionIdentity, {
   drainingSessionIds,
   fenceOwners,
   expectedOwner = null,
+  inFlightPrompts,
+  inFlightOwner = null,
   deliver,
 } = {}) {
   const resolveIdentity = typeof sessionIdentity === 'function' ? sessionIdentity : () => sessionIdentity
@@ -149,8 +151,13 @@ export async function drainSessionInputQueue(sessionIdentity, {
       if (!batch.length) break
       pendingBySession.set(sessionId, [])
       for (let index = 0; index < batch.length; index++) {
+        if (inFlightPrompts && inFlightOwner) inFlightPrompts.set(inFlightOwner, batch.slice(index))
         try {
           await deliver(batch[index])
+          if (inFlightPrompts && inFlightOwner) {
+            if (index + 1 < batch.length) inFlightPrompts.set(inFlightOwner, batch.slice(index + 1))
+            else inFlightPrompts.delete(inFlightOwner)
+          }
         } catch (error) {
           const replacementId = followReplacement()
           const arrived = pendingBySession.get(replacementId) || []
@@ -170,6 +177,7 @@ export async function drainSessionInputQueue(sessionIdentity, {
     return true
   } finally {
     drainingSessionIds?.delete(activeId)
+    if (inFlightPrompts && inFlightOwner) inFlightPrompts.delete(inFlightOwner)
     // A failed delivery deliberately retains the maintenance fence and queue.
     // Callers may retry, but direct provider input must not overtake it.
     if (!completed && pendingBySession && !pendingBySession.has(activeId)) pendingBySession.set(activeId, [])
