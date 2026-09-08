@@ -90,7 +90,8 @@ import {
   appendTeamTaskReply,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
-  beginCoordinatorTaskMessageDelivery, closeTeam, consumeCoordinatorDispatch, coordinatorPromptContext,
+  beginCoordinatorTaskMessageDelivery, completeCoordinatorTaskMessageDelivery, closeTeam,
+  consumeCoordinatorDispatch, coordinatorPromptContext,
   createTeam, createTeamTask, delegatedTaskPrompt, failTeamTask, markTeamTaskRunning, normalizeTeamAlias,
   isActiveTeamTask, isTerminalTeamTask, isWorkerBoundTeamTask, publicTeamTask, reconcileTeamSessionBindings,
   deferCoordinatorTaskMessageDelivery, releaseTeamTask, removeTeamWorker, replaceQueuedTeamTask, reportTeamTaskTurn,
@@ -98,6 +99,7 @@ import {
   resolveTeamPeer, setTeamDispatchMode,
   setTeamWorkerFiles, taskMarker, tasksForChannel, tasksPageForChannel, teamById, teamContext,
   teamDispatchMode, teamMutationForRequest, teamTask, teamTaskDeliverySettled, teamTaskForRequest,
+  teamTaskProviderWorkGeneration,
   withoutDelegatedTaskPrompt,
 } from './teams.mjs'
 import {
@@ -694,7 +696,10 @@ async function clearQuestionForm(session) {
 
 function startPoller(session) {
   if (pollers.has(session.id)) return
-  const p = { timer: null, last: '', stopped: false, sawSpinner: false, idle: 0 }
+  const p = {
+    timer: null, last: '', stopped: false, sawSpinner: false, idle: 0,
+    teamTaskTurn: currentTeamTaskProviderTurn(session),
+  }
   p.timer = setInterval(async () => {
     if (p.stopped || !session.tmux || !(session.pid && pidAlive(session.pid))) return
     const pane = await tmuxCapture(session.tmux)
@@ -750,7 +755,7 @@ function startPoller(session) {
     if (decision.action === 'failure') {
       p.stopped = true
       log('poller failure finalize (Stop hook missing)', session.id.slice(0, 8), decision.failure.key)
-      await finalizeTurn(session, { terminalFailure: decision.failure })
+      await finalizeTurn(session, { terminalFailure: decision.failure, teamTaskTurn: p.teamTaskTurn })
       return
     }
     if (decision.action === 'finalize') {
@@ -759,7 +764,7 @@ function startPoller(session) {
       // long/compacted turn), do it here so the response is never silently lost.
       p.stopped = true
       log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
-      await finalizeTurn(session)
+      await finalizeTurn(session, { teamTaskTurn: p.teamTaskTurn })
     }
   }, 3000)
   pollers.set(session.id, p)
@@ -823,6 +828,7 @@ function startCodexPoller(session) {
     failureConfirmations: 0,
     idleObservation: null,
     turnStartedAt: session.codexTurnStartedAt,
+    teamTaskTurn: currentTeamTaskProviderTurn(session),
   }
   const tick = async () => {
     if (p.stopped || p.running || !(session.pid && pidAlive(session.pid))) return
@@ -843,7 +849,7 @@ function startCodexPoller(session) {
       if (failureDecision.action === 'failure') {
         p.stopped = true
         log('Codex terminal failure finalize (Stop hook missing)', session.id.slice(0, 8), failureDecision.failure.key)
-        await finalizeCodexTerminalFailure(session, failureDecision.failure, p.turnStartedAt)
+        await finalizeCodexTerminalFailure(session, failureDecision.failure, p.turnStartedAt, p.teamTaskTurn)
         return
       }
       const idleDecision = observeIdleCodexTurn(session, {
@@ -882,7 +888,8 @@ function startCodexPoller(session) {
         stopPoller(session)
         await finishTeamTaskWithWarningForSession(session, task.status === 'running'
           ? 'Codex returned to idle without its lifecycle completion hook. The accepted worker turn completed, but SAB could not authenticate a stable final response.'
-          : 'Codex returned to idle after the injected worker turn, but omitted its acknowledgement and completion hooks. SAB completed the task with a warning and did not replay it.')
+          : 'Codex returned to idle after the injected worker turn, but omitted its acknowledgement and completion hooks. SAB completed the task with a warning and did not replay it.',
+        p.teamTaskTurn)
         clearTeamInputReservation(session)
         saveStateNow(state)
         await clearStatus(session)
@@ -1049,11 +1056,22 @@ function stopPoller(session) {
   }
 }
 const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel === session.channel)
+
+function currentTeamTaskProviderTurn(session) {
+  const taskId = session?.teamActiveTaskId
+  const task = taskId ? state.teamTasks?.[taskId] : null
+  if (!task || task.targetSessionId !== session.id || task.targetChannel !== session.channel) return null
+  return Object.freeze({
+    taskId,
+    providerWorkGeneration: teamTaskProviderWorkGeneration(task),
+  })
+}
+
 // Mirror a turn's final assistant text and clear its live status. Called by the
 // Stop hook and, as a fallback, by the poller when a turn ends without a Stop.
 // Idempotent: readNewAssistantText advances the read offset, so a second caller
 // (whichever of Stop / poller runs later) reads nothing and posts nothing.
-async function finalizeTurn(session, { terminalFailure = null } = {}) {
+async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = currentTeamTaskProviderTurn(session) } = {}) {
   stopPoller(session)
   clearStatusDeferred(session)
   void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
@@ -1070,7 +1088,7 @@ async function finalizeTurn(session, { terminalFailure = null } = {}) {
   const taskFailure = terminalFailure
     ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
     : delivery.failure?.text || null
-  await finishTeamTaskForSession(session, delivery.text, taskFailure)
+  await finishTeamTaskForSession(session, delivery.text, taskFailure, { expectedTeamTaskTurn: teamTaskTurn })
   clearTeamInputReservation(session)
   saveState(state)
   // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
@@ -1086,7 +1104,7 @@ async function finalizeTurn(session, { terminalFailure = null } = {}) {
 
 // Codex exposes stable final text on Stop and on the supported App Server's
 // successful turn completion. Both enter here; JSONL and terminal output never do.
-async function finalizeCodexTurn(session, body) {
+async function finalizeCodexTurn(session, body, teamTaskTurn = currentTeamTaskProviderTurn(session)) {
   const turnId = body.turn_id || null
   const deliveryKey = turnId ? `${session.id}\u0000${turnId}` : null
   if (deliveryKey && codexFinalDeliveries.has(deliveryKey)) return codexFinalDeliveries.get(deliveryKey)
@@ -1118,7 +1136,7 @@ async function finalizeCodexTurn(session, body) {
       throw error
     }
     if (ownsLifecycle && codexFinalLifecycleStillCurrent(session, expected)) {
-      await finishTeamTaskForSession(session, text)
+      await finishTeamTaskForSession(session, text, null, { expectedTeamTaskTurn: teamTaskTurn })
       clearTeamInputReservation(session)
     } else {
       log('Codex final arrived after a newer turn started; preserved newer lifecycle state', session.id.slice(0, 8), turnId)
@@ -1134,7 +1152,8 @@ async function finalizeCodexTurn(session, body) {
   }
 }
 
-async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt) {
+async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt,
+  expectedTeamTaskTurn = currentTeamTaskProviderTurn(session)) {
   // Claim only the turn observed by this poller. A newer UserPromptSubmit may
   // already have replaced it while tmux capture or Slack I/O was in flight.
   if (!expectedStartedAt || session.codexTurnStartedAt !== expectedStartedAt) return false
@@ -1142,20 +1161,20 @@ async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt)
   clearStatusDeferred(session)
   const text = String(failure?.text || 'Codex could not start this turn.').slice(0, 2000)
   if (session.channel) await postProviderOutput(session.channel, `⚠️ *Codex turn failed:* ${text}`)
-  await finishTeamTaskForSession(session, '', text)
+  await finishTeamTaskForSession(session, '', text, { expectedTeamTaskTurn })
   clearTeamInputReservation(session)
   saveState(state)
   return true
 }
 
-async function finalizePiTurn(session, body) {
+async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProviderTurn(session)) {
   stopPoller(session)
   clearStatusDeferred(session)
   const turnId = body.turn_id || null
   if (turnId && session.lastMirroredTurn === turnId) return
   const text = String(body.last_assistant_message || '').trim()
   if (text && session.channel) await postProviderOutput(session.channel, text)
-  await finishTeamTaskForSession(session, text)
+  await finishTeamTaskForSession(session, text, null, { expectedTeamTaskTurn: teamTaskTurn })
   clearTeamInputReservation(session)
   recordPiUsage(session, body)
   if (turnId) session.lastMirroredTurn = turnId
@@ -2009,10 +2028,15 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
   }
   if (ev === 'Stop') {
     log('stop hook', session.id.slice(0, 8))
+    // Capture delegated-work identity before the private-turn await yields. A
+    // coordinator follow-up may complete provider delivery while an older Stop
+    // hook is still posting its Slack output; that older final must retain its
+    // original work generation.
+    const teamTaskTurn = currentTeamTaskProviderTurn(session)
     if (await completePrivateTurn(session, body, targetClaim)) return
-    if (provider === 'codex') await finalizeCodexTurn(session, body)
-    else if (provider === 'pi') await finalizePiTurn(session, body)
-    else await finalizeTurn(session)
+    if (provider === 'codex') await finalizeCodexTurn(session, body, teamTaskTurn)
+    else if (provider === 'pi') await finalizePiTurn(session, body, teamTaskTurn)
+    else await finalizeTurn(session, { teamTaskTurn })
     return
   }
   if (ev === 'SessionEnd') {
@@ -4253,10 +4277,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       '</sab-team-message>',
     ].join('\n'))
     recordTeamWorkerProof(target, task)
-    message.providerDeliveryStatus = 'delivered'
-    message.deliveryStatus = 'delivered'
-    message.deliveryError = null
-    message.deliveredAt = new Date().toISOString()
+    completeCoordinatorTaskMessageDelivery(state, task.id, message.id)
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_delivered')
     saveStateNow(state)
     if (message.resumesTask) await updateTeamTaskAudit(task).catch(error =>
@@ -4663,11 +4684,11 @@ async function recoverInterruptedTeamContinuations() {
   }
 }
 
-async function finishTeamTaskForSession(session, result, error = null, { warning = null } = {}) {
-  const taskId = session.teamActiveTaskId
+async function finishTeamTaskForSession(session, result, error = null, { warning = null, expectedTeamTaskTurn = currentTeamTaskProviderTurn(session) } = {}) {
+  const taskId = expectedTeamTaskTurn?.taskId || session.teamActiveTaskId
   const finalText = String(result || '').trim()
-  const revokedTurn = clearTeamTurn(session)
   if (!taskId) {
+    const revokedTurn = clearTeamTurn(session)
     if (revokedTurn) saveStateNow(state)
     else saveState(state)
     return false
@@ -4675,24 +4696,31 @@ async function finishTeamTaskForSession(session, result, error = null, { warning
   let task
   try {
     task = teamTask(state, taskId)
-    // Stop, App Server finalization, and provider-exit recovery can converge on
-    // one completed turn. Once its report is durable, a later lifecycle path
-    // must not replace it with a duplicate report or a false failure. A
-    // confirmed coordinator follow-up first returns the task to `running`, so
-    // genuine next-turn failures still take the normal failure path.
-    if (task.status === 'awaiting_release') {
-      if (revokedTurn) saveStateNow(state)
-      teamTurnProof.delete(session.id)
-      return true
+    if (session.teamActiveTaskId !== task.id || task.targetSessionId !== session.id ||
+        task.targetChannel !== session.channel ||
+        (expectedTeamTaskTurn &&
+         teamTaskProviderWorkGeneration(task) !== expectedTeamTaskTurn.providerWorkGeneration)) {
+      log('ignored stale team task final', taskId,
+        expectedTeamTaskTurn?.providerWorkGeneration,
+        teamTaskProviderWorkGeneration(task))
+      return false
     }
+    const revokedTurn = clearTeamTurn(session)
     if (error) {
       failTeamTask(state, task.id, error)
     } else {
-      reportTeamTaskTurn(state, task.id, {
+      const reported = reportTeamTaskTurn(state, task.id, {
         targetSessionId: session.id,
         result: finalText,
         warning: warning || (!finalText ? 'The provider turn ended without a stable final response.' : null),
+        providerWorkGeneration: expectedTeamTaskTurn?.providerWorkGeneration ?? null,
       })
+      if (reported.stale) return false
+      if (!reported.created) {
+        teamTurnProof.delete(session.id)
+        if (revokedTurn) saveStateNow(state)
+        return true
+      }
     }
   } catch (failure) {
     log('team task completion rejected', taskId, String(failure?.message || failure))
@@ -4719,13 +4747,15 @@ async function finishTeamTaskForSession(session, result, error = null, { warning
   return true
 }
 
-async function finishTeamTaskWithWarningForSession(session, warning) {
+async function finishTeamTaskWithWarningForSession(session, warning,
+  expectedTeamTaskTurn = currentTeamTaskProviderTurn(session)) {
   const taskId = session?.teamActiveTaskId
   if (!taskId) { clearTeamTurn(session); saveStateNow(state); return false }
   const task = state.teamTasks?.[taskId]
   const latestReply = task?.replies?.at(-1)?.text || ''
   return finishTeamTaskForSession(session,
-    latestReply ? `Last authenticated worker update:\n${latestReply}` : '', null, { warning })
+    latestReply ? `Last authenticated worker update:\n${latestReply}` : '', null,
+    { warning, expectedTeamTaskTurn })
 }
 
 async function releaseIdleReadoptedTeamTask(session, label) {

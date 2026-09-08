@@ -168,8 +168,12 @@ pending gates in the inbox.
 
 The coordinator may use `message` for questions or amendments while the task is
 reserved. Any such follow-up invalidates the previous completion declaration;
-after confirmed delivery the task returns to `running` and the worker must
-declare completion again. If a terminal task needs more work, `continue`
+from the moment it is accepted, it fences completion and release until exact
+provider delivery. After confirmed delivery the task returns to `running` and
+the worker must declare completion again. Reports and messages carry a
+monotonic task-local work generation, preventing a delayed final from the
+preceding turn from satisfying the new instruction. If a terminal task needs
+more work, `continue`
 creates a new task linked through `parentTaskId`; terminal history is immutable.
 
 Tasks created by older bridge releases do not contain a completion policy and

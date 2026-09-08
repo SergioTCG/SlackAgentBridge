@@ -70,6 +70,28 @@ export function teamTaskCompletionPolicy(task) {
     : LEGACY_COMPLETION_POLICY
 }
 
+export function teamTaskWorkGeneration(task) {
+  return Math.max(1, Number(task?.workGeneration) || 1)
+}
+
+export function teamTaskProviderWorkGeneration(task) {
+  return Math.max(1, Number(task?.providerWorkGeneration) || 1)
+}
+
+function unresolvedCoordinatorMessages(task) {
+  return (task?.messages || []).filter(message =>
+    message.deliveryStatus !== 'delivered' || message.providerDeliveryStatus !== 'delivered')
+}
+
+export function teamTaskReleaseReady(task) {
+  if (task?.status !== 'awaiting_release' || !task.completionRequest || task.pendingGates?.length) return false
+  const requiredGeneration = teamTaskWorkGeneration(task)
+  if (teamTaskProviderWorkGeneration(task) !== requiredGeneration ||
+      Number(task.completionRequest.workGeneration) !== requiredGeneration ||
+      unresolvedCoordinatorMessages(task).length) return false
+  return (task.reports || []).some(report => Number(report.workGeneration) === requiredGeneration)
+}
+
 function normalizePendingGates(value) {
   if (!Array.isArray(value)) throw new TeamError('invalid_pending_gates', 'Pending gates must be an array.')
   const gates = [...new Set(value.map(item => String(item || '').trim().toLowerCase()).filter(Boolean))]
@@ -364,6 +386,8 @@ export function createTeamTask(state, {
     targetNodeId: null,
     status: 'queued',
     completionPolicy: DEFAULT_COMPLETION_POLICY,
+    workGeneration: 1,
+    providerWorkGeneration: 1,
     pendingGates: [],
     completionRequest: null,
     lifecycleVersion: 1,
@@ -523,8 +547,9 @@ export function appendTeamTaskReply(state, taskId, {
   // Keep one bounded journal slot available for the checkpoint that clears the
   // final declared gate. Otherwise progress chatter could make a two-phase task
   // impossible to complete successfully.
-  const clearsFinalGate = normalizedGates?.length === 0 && (task.pendingGates || []).length > 0
-  const replyLimit = clearsFinalGate ? TEAM_MAX_REPLIES : TEAM_MAX_REPLIES - 1
+  const reservesGateSlot = teamTaskCompletionPolicy(task) !== LEGACY_COMPLETION_POLICY
+  const clearsFinalGate = reservesGateSlot && normalizedGates?.length === 0 && (task.pendingGates || []).length > 0
+  const replyLimit = !reservesGateSlot || clearsFinalGate ? TEAM_MAX_REPLIES : TEAM_MAX_REPLIES - 1
   if (task.replies.length >= replyLimit) {
     throw new TeamError('reply_limit', clearsFinalGate
       ? 'This task reached its bounded reply limit.'
@@ -593,9 +618,9 @@ export function requestTeamTaskCompletion(state, taskId, {
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
   }
-  if ((task.messages || []).some(message => message.providerDeliveryStatus === 'delivering')) {
+  if (unresolvedCoordinatorMessages(task).length) {
     throw new TeamError('task_message_in_flight',
-      'A coordinator follow-up is entering this task; declare completion only after receiving it.', 409)
+      'A coordinator follow-up has not completed exact provider delivery; declare completion only after receiving it.', 409)
   }
   if (task.replies.some(reply => reply.requestId === key)) {
     throw new TeamError('request_conflict', 'That request ID was already used for a task reply.', 409)
@@ -612,6 +637,7 @@ export function requestTeamTaskCompletion(state, taskId, {
     payloadHash,
     summary: text,
     requestedAt: nowIso(now),
+    workGeneration: teamTaskProviderWorkGeneration(task),
   }
   bumpTask(task, now)
   task.completionRequest.lifecycleVersion = task.lifecycleVersion
@@ -634,21 +660,32 @@ export function reportTeamTaskTurn(state, taskId, {
   targetSessionId,
   result,
   warning = null,
+  providerWorkGeneration = null,
   now = Date.now(),
 } = {}) {
   const task = teamTask(state, taskId)
   if (teamTaskCompletionPolicy(task) === LEGACY_COMPLETION_POLICY) {
-    return warning
+    const completed = warning
       ? completeTeamTaskWithWarning(state, taskId, { targetSessionId, result, warning, now })
       : completeTeamTask(state, taskId, { targetSessionId, result, now })
+    return { task: completed, report: null, created: true, stale: false }
   }
   if (task.targetSessionId !== targetSessionId) {
     throw new TeamError('task_target_changed', 'The task belongs to another native session.', 409)
   }
+  const currentGeneration = teamTaskProviderWorkGeneration(task)
+  const observedGeneration = providerWorkGeneration === null
+    ? currentGeneration
+    : Math.max(1, Number(providerWorkGeneration) || 1)
+  if (observedGeneration !== currentGeneration) {
+    return { task, report: null, created: false, stale: true }
+  }
   // Stop, App Server completion, and the idle fallback can converge on the
-  // same provider turn. Once that turn is reported, only a confirmed
-  // coordinator follow-up may return the task to running for another report.
-  if (task.status === 'awaiting_release') return task
+  // same native turn. Deduplicate that exact provider-work generation while
+  // still allowing a later delivered coordinator follow-up to report anew.
+  const existingReport = (task.reports || []).find(report =>
+    Number(report.workGeneration || 1) === observedGeneration)
+  if (existingReport) return { task, report: existingReport, created: false, stale: false }
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_running', 'Only the assigned active task may report a completed provider turn.', 409)
   }
@@ -668,6 +705,7 @@ export function reportTeamTaskTurn(state, taskId, {
     report = task.reports.at(-1)
     report.result = task.result
     report.warning = task.warning
+    report.workGeneration = observedGeneration
     report.deliveryStatus = 'pending'
     report.deliveryError = null
     report.coalescedCount = Number(report.coalescedCount || 1) + 1
@@ -677,6 +715,7 @@ export function reportTeamTaskTurn(state, taskId, {
       id: randomId('report'),
       result: task.result,
       warning: task.warning,
+      workGeneration: observedGeneration,
       deliveryStatus: 'pending',
       deliveryError: null,
       slackTs: null,
@@ -688,7 +727,7 @@ export function reportTeamTaskTurn(state, taskId, {
     ? 'provider_turn_idle_without_completion_hook'
     : 'provider_turn_completed', { now })
   report.lifecycleVersion = task.lifecycleVersion
-  return task
+  return { task, report, created: true, stale: false }
 }
 
 export function releaseTeamTask(state, taskId, {
@@ -718,6 +757,17 @@ export function releaseTeamTask(state, taskId, {
   const pending = normalizePendingGates(task.pendingGates || [])
   if (pending.length) {
     throw new TeamError('task_gates_pending', `Task release is blocked by pending gates: ${pending.join(', ')}.`, 409)
+  }
+  if (unresolvedCoordinatorMessages(task).length) {
+    throw new TeamError('task_message_in_flight',
+      'A coordinator follow-up has not completed exact provider delivery; this task cannot be released.', 409)
+  }
+  const requiredGeneration = teamTaskWorkGeneration(task)
+  if (teamTaskProviderWorkGeneration(task) !== requiredGeneration ||
+      Number(task.completionRequest.workGeneration) !== requiredGeneration ||
+      !(task.reports || []).some(report => Number(report.workGeneration) === requiredGeneration)) {
+    throw new TeamError('stale_task_report',
+      'The completion declaration and provider report do not cover the latest delivered coordinator work.', 409)
   }
   // Release is a terminal safety valve and must remain available even when a
   // long task used its bounded coordinator-message/control journal.
@@ -832,7 +882,11 @@ export function cancelQueuedTeamTask(state, taskId, {
   const payloadHash = hash(body)
   const control = taskControlRequest(task, requestId, 'cancel', payloadHash)
   if (task.status === 'cancelled') {
-    if (task.terminalRequest?.requestId === control.key && task.terminalRequest.payloadHash === payloadHash) return task
+    if (task.terminalRequest?.requestId === control.key) {
+      if (task.terminalRequest.payloadHash === payloadHash) return task
+      throw new TeamError('request_conflict',
+        'That cancellation request ID was already accepted with a different reason.', 409)
+    }
     if (control.existing) return task
     // Preserve the historical idempotent cancellation surface while making a
     // new bounded request identity queryable when journal capacity permits.
@@ -908,11 +962,13 @@ export function appendCoordinatorTaskMessage(state, taskId, {
     deliveryStatus: 'pending', deliveryError: null, sourceSlackTs: null,
     targetSlackTs: null, createdAt: nowIso(now),
     resumesTask: task.status === 'awaiting_release',
+    workGeneration: teamTaskWorkGeneration(task) + 1,
   }
   if (invalidateCompletionRequest(task, {
     reason: 'coordinator_follow_up', requestId: control.key, now,
   })) message.invalidatedCompletion = true
   task.messages.push(message)
+  task.workGeneration = message.workGeneration
   bumpTask(task, now)
   return { message, created: true }
 }
@@ -921,6 +977,7 @@ export function beginCoordinatorTaskMessageDelivery(state, taskId, messageId, { 
   const task = teamTask(state, taskId)
   const message = (task.messages || []).find(item => item.id === messageId)
   if (!message) throw new TeamError('task_message_not_found', 'That coordinator task message is unavailable.', 404)
+  message.deliveryStartedAt ||= nowIso(now)
   // Slack mirroring is deliberately awaited before provider delivery. The
   // worker can report during that window, so delivery-time state—not the state
   // observed when the message was journaled—decides whether this is a resumed
@@ -931,11 +988,33 @@ export function beginCoordinatorTaskMessageDelivery(state, taskId, messageId, { 
       reason: 'coordinator_follow_up', requestId: message.requestId, now,
     })) message.invalidatedCompletion = true
   }
-  if (message.resumesTask && task.status === 'awaiting_release') {
-    transitionTask(task, 'running', 'coordinator_follow_up_submitting', {
-      now, requestId: message.requestId,
-    })
+  return task
+}
+
+export function completeCoordinatorTaskMessageDelivery(state, taskId, messageId, { now = Date.now() } = {}) {
+  const task = teamTask(state, taskId)
+  const message = (task.messages || []).find(item => item.id === messageId)
+  if (!message) throw new TeamError('task_message_not_found', 'That coordinator task message is unavailable.', 404)
+  if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
+    throw new TeamError('task_not_active', 'The task ended before this coordinator message completed delivery.', 409)
   }
+  if (task.status === 'awaiting_release') {
+    message.resumesTask = true
+    if (invalidateCompletionRequest(task, {
+      reason: 'coordinator_follow_up', requestId: message.requestId, now,
+    })) message.invalidatedCompletion = true
+  }
+  task.providerWorkGeneration = Math.max(
+    teamTaskProviderWorkGeneration(task),
+    Math.max(1, Number(message.workGeneration) || teamTaskWorkGeneration(task)),
+  )
+  message.providerDeliveryStatus = 'delivered'
+  message.deliveryStatus = 'delivered'
+  message.deliveryError = null
+  message.deliveredAt = nowIso(now)
+  transitionTask(task, 'running', 'coordinator_follow_up_delivered', {
+    now, requestId: message.requestId,
+  })
   return task
 }
 
@@ -943,13 +1022,7 @@ export function deferCoordinatorTaskMessageDelivery(state, taskId, messageId, { 
   const task = teamTask(state, taskId)
   const message = (task.messages || []).find(item => item.id === messageId)
   if (!message) throw new TeamError('task_message_not_found', 'That coordinator task message is unavailable.', 404)
-  if (message.resumesTask && task.status === 'running' &&
-      task.lastTransition?.reason === 'coordinator_follow_up_submitting' &&
-      task.lastTransition?.requestId === message.requestId) {
-    transitionTask(task, 'awaiting_release', 'coordinator_follow_up_not_delivered', {
-      now, requestId: message.requestId,
-    })
-  }
+  message.deliveryDeferredAt = nowIso(now)
   return task
 }
 
@@ -1042,7 +1115,9 @@ export function publicTeamTask(task, callerChannel) {
     pendingGates: [...(task.pendingGates || [])],
     completionRequestedAt: task.completionRequest?.requestedAt || null,
     completionSummary: task.completionRequest?.summary || null,
-    releaseReady: task.status === 'awaiting_release' && Boolean(task.completionRequest) && !(task.pendingGates || []).length,
+    workGeneration: teamTaskWorkGeneration(task),
+    providerWorkGeneration: teamTaskProviderWorkGeneration(task),
+    releaseReady: teamTaskReleaseReady(task),
     instruction: task.instruction ?? task.text ?? '',
     fileDeliveryStatus: task.fileDeliveryStatus,
     fileDeliveryError: task.fileDeliveryError,
@@ -1067,6 +1142,7 @@ export function publicTeamTask(task, callerChannel) {
       text: message.text,
       deliveryStatus: message.deliveryStatus,
       deliveryError: message.deliveryError,
+      workGeneration: Number(message.workGeneration) || null,
       createdAt: message.createdAt,
     })),
     reports: (task.reports || []).map(report => ({
@@ -1075,6 +1151,7 @@ export function publicTeamTask(task, callerChannel) {
       warning: report.warning || null,
       deliveryStatus: report.deliveryStatus,
       deliveryError: report.deliveryError,
+      workGeneration: Number(report.workGeneration) || null,
       createdAt: report.createdAt,
       lifecycleVersion: report.lifecycleVersion,
     })),

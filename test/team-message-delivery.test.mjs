@@ -44,7 +44,9 @@ test('restart recovery makes an interrupted provider write durably uncertain exa
 
 test('delayed worker reports describe the current lifecycle without stale release advice', () => {
   assert.match(teamReportLifecycleNotice({
-    status: 'awaiting_release', completionRequest: { requestId: 'ready' }, pendingGates: [],
+    status: 'awaiting_release', completionRequest: { requestId: 'ready', workGeneration: 1 },
+    pendingGates: [], workGeneration: 1, providerWorkGeneration: 1,
+    reports: [{ workGeneration: 1 }], messages: [],
   }), /may release/)
   assert.match(teamReportLifecycleNotice({
     status: 'awaiting_release', completionRequest: null, pendingGates: [],

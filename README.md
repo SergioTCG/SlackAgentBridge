@@ -406,7 +406,11 @@ worker reserved. Workers publish the complete list of unfinished gates with
 complete`, and only then may the coordinator use `sab team release`. A
 coordinator follow-up invalidates the previous readiness declaration. If work
 was already released accidentally, `sab team continue` creates a new, linked,
-auditable task rather than reopening a terminal journal entry.
+auditable task rather than reopening a terminal journal entry. An accepted
+follow-up immediately fences completion and release until exact provider
+delivery succeeds; reports are bound to the corresponding durable work
+generation, so a delayed final from the preceding turn cannot release newer
+work.
 
 Eligible owner turns receive private, provider-neutral role/tool context. A
 delegated worker receives an exact task header, while collaborators receive no

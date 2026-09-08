@@ -236,7 +236,8 @@ test('worker lifecycle transitions and coordinator wakes share one atomic state 
 test('provider turn reporting preserves task and process ownership until explicit release', () => {
   const completion = /async function finishTeamTaskForSession\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.match(completion, /reportTeamTaskTurn/)
-  assert.match(completion, /task\.status === 'awaiting_release'[\s\S]*return true[\s\S]*if \(error\)/)
+  assert.match(completion, /expectedTeamTaskTurn[\s\S]*teamTaskProviderWorkGeneration\(task\)[\s\S]*ignored stale team task final/)
+  assert.match(completion, /reported\.stale[\s\S]*!reported\.created/)
   assert.match(completion, /if \(isTerminalTeamTask\(task\)\) \{[\s\S]*delete session\.teamActiveTaskId/)
   assert.doesNotMatch(completion, /process\.kill|tmuxKill/)
   assert.match(daemon, /task\.status === 'awaiting_release'[\s\S]*Preserve[\s\S]*task reservation/)
@@ -245,6 +246,8 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon, /preserveReported && existingTask\?\.status === 'awaiting_release'/)
   assert.match(daemon, /releaseTeamTask\(state[\s\S]*delete target\.teamActiveTaskId[\s\S]*persistTeamLifecycle\(task\)/)
   assert.match(daemon, /beginCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
+  assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*completeCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)/)
+  assert.match(daemon, /const teamTaskTurn = currentTeamTaskProviderTurn\(session\)[\s\S]*completePrivateTurn[\s\S]*finalizeTurn\(session, \{ teamTaskTurn \}\)/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)

@@ -134,7 +134,10 @@ generated MCP configuration. Do not print secrets during diagnostics.
   cancel/replace may affect only queued work. A provider final is a report, not
   task release: new tasks remain reserved until declared gates are clear, the
   worker declares readiness, and the coordinator explicitly releases them.
-  Coordinator follow-up invalidates stale readiness. Journal before
+  Coordinator follow-up invalidates stale readiness; any accepted but unresolved
+  message fences completion and release. Provider turn reports carry the exact
+  durable work generation so a delayed earlier final cannot satisfy later work.
+  Journal before
   Slack/provider side effects, never retry an uncertain dispatch or task message,
   and keep every transfer visible in both affected channels. A continuously
   observed hookless Codex worker may emit only a warning-bearing turn report;

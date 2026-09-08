@@ -96,7 +96,10 @@ accounts, and the Mac user running the daemon.
   prevent already-accepted work from being misclassified as uncertain; stable
   provider finals can report only their bound task/session. New tasks keep that
   exact worker reserved until bounded gates are clear, the worker declares
-  readiness, and the coordinator releases it. Repeated live exact-process idle
+  readiness, and the coordinator releases it. Accepted coordinator messages
+  fence readiness/release until exact provider delivery, and task-local work
+  generations prevent delayed earlier finals from satisfying newer work.
+  Repeated live exact-process idle
   proof may close a hookless Codex turn only as a warning-bearing report;
   boot-time idle lacks that proof and fails closed for legacy running work.
   Report and completion posts have durable,
@@ -338,7 +341,9 @@ Slack when its scope or progress is no longer appropriate.
   Workers must declare bounded pending gates with `sab team checkpoint`, clear
   them, and call `sab team complete`; only the exact coordinator may then call
   `sab team release`. A follow-up invalidates the prior readiness declaration.
-  This prevents a provider final from implicitly certifying tests, CI, runtime
+  Until its exact provider delivery succeeds, that accepted follow-up also
+  blocks a new completion declaration and release. This prevents a provider
+  final from implicitly certifying tests, CI, runtime
   proof, review, or merge state that SAB cannot independently observe.
 - Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
   replies create only durable event identifiers; the coordinator rereads the

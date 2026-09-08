@@ -44,6 +44,15 @@ Notable changes to this project. Format based on
 - Completion declarations are fenced while coordinator follow-up is entering
   the provider, dormant wakeups preserve only durably reported work, and the
   bounded reply journal reserves capacity to clear the final task gate.
+- Accepted coordinator messages now fence completion and release before Slack
+  mirroring begins, and provider reports bind to a monotonic task-local work
+  generation so a delayed earlier final cannot satisfy a delivered follow-up.
+- Legacy tasks retain their historical 32-reply capacity, while a saturated
+  cancellation journal rejects reuse of its terminal request ID with a changed
+  payload.
+- The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
+  form-nesting denial-of-service, and query-fragment advisories reported against
+  the earlier transitive release.
 
 ## [2.1.0] — 2026-09-08
 

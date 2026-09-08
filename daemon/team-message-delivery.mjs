@@ -26,7 +26,15 @@ export function recoverInterruptedTeamMessage(message) {
 export function teamReportLifecycleNotice(task) {
   const status = String(task?.status || 'unknown')
   if (status === 'awaiting_release') {
-    return task?.completionRequest && !task?.pendingGates?.length
+    const requiredGeneration = Math.max(1, Number(task?.workGeneration) || 1)
+    const providerGeneration = Math.max(1, Number(task?.providerWorkGeneration) || 1)
+    const messagesSettled = (task?.messages || []).every(message =>
+      message.deliveryStatus === 'delivered' && message.providerDeliveryStatus === 'delivered')
+    const currentReport = (task?.reports || []).some(report => Number(report.workGeneration) === requiredGeneration)
+    const releaseReady = task?.completionRequest && !task?.pendingGates?.length && messagesSettled &&
+      providerGeneration === requiredGeneration &&
+      Number(task.completionRequest.workGeneration) === requiredGeneration && currentReport
+    return releaseReady
       ? '\n\n✅ The worker declared this task ready; the coordinator may release it.'
       : '\n\nThe worker remains reserved. Send a follow-up or wait for an explicit readiness declaration.'
   }

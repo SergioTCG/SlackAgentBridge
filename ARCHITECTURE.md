@@ -317,7 +317,10 @@ end of one provider turn is only a durable report and moves the task to
 `awaiting_release`; it does not clear the worker reservation. The worker
 maintains an explicit bounded pending-gate set, must clear it, and must declare
 completion before the coordinator can release the task. Coordinator follow-up
-invalidates the old declaration. Pre-upgrade tasks without an explicit
+invalidates the old declaration. Accepted follow-ups fence completion and
+release until exact provider delivery; both delivery and provider reports carry
+a monotonic task-local work generation so a delayed earlier final cannot be
+mistaken for the follow-up result. Pre-upgrade tasks without an explicit
 completion policy retain provider-final semantics so an upgrade cannot
 reinterpret an already-running turn.
 
@@ -424,7 +427,10 @@ Task delivery is journal-first:
    set. A completion declaration is rejected while any gate remains. Once the
    worker declares readiness and a turn report exists, an authorized
    coordinator may release the task. A coordinator message invalidates stale
-   readiness; a terminal task can receive work only as a new linked task.
+   readiness and fences release from journal acceptance through exact provider
+   delivery. Release requires a readiness declaration and report from the latest
+   delivered work generation; a terminal task can receive work only as a new
+   linked task.
 7. Persist `completed`, `completed_with_warning`, failure, or cancellation and a
    delivery claim before updating both audit cards and
    idempotently posting the stable result in the coordinator channel. A missing
