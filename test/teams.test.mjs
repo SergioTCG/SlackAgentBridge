@@ -1023,6 +1023,9 @@ test('queued cancellation remains available after the bounded control journal fi
   assert.throws(() => cancelQueuedTeamTask(state, task.id, {
     sourceChannel: 'C-MASTER', reason: 'Conflicting reason.', requestId: 'cancel-final', now: 3100,
   }), error => error.code === 'request_conflict')
+  assert.throws(() => cancelQueuedTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'another-cancel', now: 3200,
+  }), error => error.code === 'task_control_limit')
 })
 
 test('coordinator release remains available after the bounded control journal fills', () => {

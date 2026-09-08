@@ -6,6 +6,17 @@
 payload=$(cat)
 event=$(printf '%s' "$payload" | jq -r '.hook_event_name // empty' 2>/dev/null)
 
+# Preserve when Codex emitted each lifecycle event, not merely when the daemon
+# eventually dequeued its HTTP request. This lets a delayed Stop remain bound
+# to the native turn which ended before a newer prompt was accepted.
+if [ "$event" = "Stop" ] || [ "$event" = "UserPromptSubmit" ]; then
+  observed_at=$(node -e 'process.stdout.write(String(Date.now()))' 2>/dev/null) || observed_at=''
+  if [ -n "$observed_at" ]; then
+    stamped=$(printf '%s' "$payload" | jq -c --argjson observed_at "$observed_at" '. + {observed_at: $observed_at}' 2>/dev/null) || stamped=''
+    [ -n "$stamped" ] && payload=$stamped
+  fi
+fi
+
 if [ "$event" = "PermissionRequest" ]; then
   # PermissionRequest is synchronous: Slack's verdict is returned as Codex hook
   # JSON. If the daemon is unavailable or times out, emit no decision (`{}`), so

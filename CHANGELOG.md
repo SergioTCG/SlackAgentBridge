@@ -50,6 +50,11 @@ Notable changes to this project. Format based on
 - Legacy tasks retain their historical 32-reply capacity, while a saturated
   cancellation journal rejects reuse of its terminal request ID with a changed
   payload.
+- Provider turns now retain a bounded, durable task-generation fingerprint;
+  delayed native finals resolve by turn identity or observation time instead of
+  sampling mutable task state. Continuation timeout guidance no longer filters
+  mutation lookup by the unknowable child task, and saturated cancelled-task
+  retries fail explicitly instead of acknowledging an unqueryable receipt.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

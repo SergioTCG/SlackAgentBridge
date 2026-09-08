@@ -48,6 +48,10 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
     if (req.url.startsWith('/team/checkpoint')) return res.end(JSON.stringify({ ok: true, reply: { id: 'reply_checkpoint' } }))
     if (req.url.startsWith('/team/complete')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', completionRequestedAt: 'now' } }))
     if (req.url.startsWith('/team/release')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'completed' } }))
+    if (req.url.startsWith('/team/continue') && JSON.parse(body).text === 'Uncertain continuation.') {
+      res.writeHead(503)
+      return res.end(JSON.stringify({ ok: false, error: 'temporary bridge failure' }))
+    }
     if (req.url.startsWith('/team/continue')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_two', parentTaskId: 'task_one' } }))
     if (req.url.startsWith('/team/cancel')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'cancelled' } }))
     if (req.url.startsWith('/team/replace')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', instruction: JSON.parse(body).text } }))
@@ -81,6 +85,15 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   assert.equal((await run(['complete', '--task', 'task_one', '--message', 'Everything passed.'], env)).status, 0)
   assert.equal((await run(['release', '--task', 'task_one'], env)).status, 0)
   assert.equal((await run(['continue', '--task', 'task_one', '--message', 'Follow up.'], env)).status, 0)
+  const uncertainContinuation = await run([
+    'continue', '--task', 'task_one', '--message', 'Uncertain continuation.',
+  ], env)
+  assert.equal(uncertainContinuation.status, 1)
+  const uncertainContinuationRequest = requests.find(request =>
+    request.url.startsWith('/team/continue') && request.body?.text === 'Uncertain continuation.')
+  assert.match(uncertainContinuation.stderr,
+    new RegExp(`sab team mutation --request-id ${uncertainContinuationRequest.body.requestId}(?:\\s|$)`))
+  assert.doesNotMatch(uncertainContinuation.stderr, /--task task_one/)
   assert.equal((await run(['mutation', '--request-id', 'stable-request-1', '--task', 'task_one'], env)).status, 0)
   const file = await run(['send-file', '--task', 'task_one', '--message', 'Report.', '--', 'report final.pdf'], env)
   assert.equal(file.status, 0, file.stderr)

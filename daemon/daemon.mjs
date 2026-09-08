@@ -79,6 +79,10 @@ import {
   knownUndeliveredTeamMessage, recoverInterruptedTeamMessage, teamMessageFailureDisposition,
   teamReportLifecycleNotice,
 } from './team-message-delivery.mjs'
+import {
+  activateTeamProviderTurn, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
+  providerTurnForCompletion, retireTeamProviderTurn, stageTeamProviderTurn,
+} from './team-provider-turn.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
 import {
@@ -1057,14 +1061,23 @@ function stopPoller(session) {
 }
 const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel === session.channel)
 
-function currentTeamTaskProviderTurn(session) {
+function currentTeamTaskProviderTurn(session, body = null) {
   const taskId = session?.teamActiveTaskId
   const task = taskId ? state.teamTasks?.[taskId] : null
   if (!task || task.targetSessionId !== session.id || task.targetChannel !== session.channel) return null
-  return Object.freeze({
-    taskId,
-    providerWorkGeneration: teamTaskProviderWorkGeneration(task),
+  const tracked = providerTurnForCompletion(session, {
+    providerTurnId: body?.turn_id || null,
+    observedAt: body?.observed_at || null,
   })
+  if (tracked) {
+    if (tracked.taskId !== taskId) return null
+    return Object.freeze(tracked)
+  }
+  // Upgrade compatibility: provider-final tasks created before durable turn
+  // snapshots existed have only the exact active task binding to consult. New
+  // turns always stage/activate a snapshot before their provider can complete.
+  if (hasTeamProviderTurnTracking(session)) return null
+  return Object.freeze({ taskId, providerWorkGeneration: teamTaskProviderWorkGeneration(task) })
 }
 
 // Mirror a turn's final assistant text and clear its live status. Called by the
@@ -1104,7 +1117,8 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
 
 // Codex exposes stable final text on Stop and on the supported App Server's
 // successful turn completion. Both enter here; JSONL and terminal output never do.
-async function finalizeCodexTurn(session, body, teamTaskTurn = currentTeamTaskProviderTurn(session)) {
+async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
+  teamTaskTurn ||= currentTeamTaskProviderTurn(session, body)
   const turnId = body.turn_id || null
   const deliveryKey = turnId ? `${session.id}\u0000${turnId}` : null
   if (deliveryKey && codexFinalDeliveries.has(deliveryKey)) return codexFinalDeliveries.get(deliveryKey)
@@ -1999,6 +2013,27 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       clearTeamTurn(session)
       saveStateNow(state)
     }
+    const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
+    const pendingTurn = session.teamProviderTurnPending
+    const acknowledgedTurn = task && task.targetSessionId === session.id && task.targetChannel === session.channel
+      ? teamTaskId === task.id
+        ? { taskId: task.id, providerWorkGeneration: teamTaskProviderWorkGeneration(task) }
+        : injected && pendingTurn?.taskId === task.id
+          ? pendingTurn
+          : injected && session.teamProviderTurn?.taskId === task.id
+            ? session.teamProviderTurn
+          : null
+      : null
+    if (acknowledgedTurn) {
+      activateTeamProviderTurn(session, {
+        turn: acknowledgedTurn,
+        providerTurnId: body.turn_id || null,
+        startedAt: body.observed_at || Date.now(),
+      })
+      saveStateNow(state)
+    } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
+      saveStateNow(state)
+    }
     // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
     // system-injected content (task notifications, reminders, local-command echoes).
     if (p && !automationEcho && !injected && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
@@ -2032,7 +2067,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     // coordinator follow-up may complete provider delivery while an older Stop
     // hook is still posting its Slack output; that older final must retain its
     // original work generation.
-    const teamTaskTurn = currentTeamTaskProviderTurn(session)
+    const teamTaskTurn = currentTeamTaskProviderTurn(session, body)
     if (await completePrivateTurn(session, body, targetClaim)) return
     if (provider === 'codex') await finalizeCodexTurn(session, body, teamTaskTurn)
     else if (provider === 'pi') await finalizePiTurn(session, body, teamTaskTurn)
@@ -3369,18 +3404,45 @@ async function injectText(session, text, options = {}) {
     return
   }
   const alive = providerAlive
+  const expectedTask = options.expectedTeamTaskId
+    ? state.teamTasks?.[options.expectedTeamTaskId]
+    : null
+  const expectedTeamTurn = expectedTask && expectedTask.targetSessionId === session.id &&
+      expectedTask.targetChannel === session.channel
+    ? {
+        taskId: expectedTask.id,
+        providerWorkGeneration: Number(options.expectedTeamTaskGeneration) ||
+          teamTaskProviderWorkGeneration(expectedTask),
+      }
+    : null
+  if (expectedTeamTurn) {
+    stageTeamProviderTurn(session, expectedTeamTurn)
+    saveStateNow(state)
+  }
+  const acceptExpectedTeamTurn = () => {
+    if (!expectedTeamTurn) return
+    activateTeamProviderTurn(session, { turn: expectedTeamTurn })
+    saveStateNow(state)
+  }
+  const discardExpectedTeamTurn = () => {
+    if (discardPendingTeamProviderTurn(session, expectedTeamTurn)) saveStateNow(state)
+  }
   if (provider === 'pi') {
     const queuedPrompt = piPromptQueueItem(text, options)
     const combined = queuedPromptText(queuedPrompt)
     if (alive) {
       assertExpectedBinding()
       if (injectQueuedPiPrompt(session.pid, queuedPrompt)) {
+        acceptExpectedTeamTurn()
         rememberInjected(session.id, combined)
         log('inject (Pi extension) → session', session.id.slice(0, 8), JSON.stringify(String(text).slice(0, 50)))
         return
       }
     }
-    if (options.expectedSessionId) throw new TeamError('target_busy', 'The exact Pi input surface did not accept the task message.', 409)
+    if (options.expectedSessionId) {
+      discardExpectedTeamTurn()
+      throw new TeamError('target_busy', 'The exact Pi input surface did not accept the task message.', 409)
+    }
     log('queue Pi prompt', session.id.slice(0, 8), 'pid', session.pid, 'cwd', session.cwd)
     const queued = pendingBySid.get(session.id) || []
     pendingBySid.set(session.id, [...queued, queuedPrompt])
@@ -3393,6 +3455,7 @@ async function injectText(session, text, options = {}) {
     rememberInjected(session.id, delivered)
     try {
       await tmuxPaste(session.tmux, delivered)
+      acceptExpectedTeamTurn()
       if (provider === 'codex') ensureCodexTurnStarted(session)
       log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
       return
@@ -3405,13 +3468,17 @@ async function injectText(session, text, options = {}) {
     assertExpectedBinding()
     rememberInjected(session.id, delivered)
     if (injectToSession(session.pid, delivered)) {
+      acceptExpectedTeamTurn()
       if (provider === 'codex') ensureCodexTurnStarted(session)
       log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
       return
     }
     forgetInjected(session.id, delivered)
   }
-  if (options.expectedSessionId) throw new TeamError('target_busy', 'The exact provider input surface did not accept the task message.', 409)
+  if (options.expectedSessionId) {
+    discardExpectedTeamTurn()
+    throw new TeamError('target_busy', 'The exact provider input surface did not accept the task message.', 409)
+  }
   log('resurrect', session.id.slice(0, 8), 'pid', session.pid, 'cwd', session.cwd)
   const q = pendingBySid.get(session.id) || []
   pendingBySid.set(session.id, [...q, delivered])
@@ -4186,7 +4253,7 @@ async function validateCoordinatorTaskMessageTarget(task, target, expected) {
   return coordinatorTaskMessageTargetMatches(task, target, expected)
 }
 
-async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt) {
+async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, providerTurn) {
   if (!coordinatorTaskMessageTargetMatches(task, target, expected)) {
     throw new TeamError('target_authority_lost', 'The exact active worker changed before provider delivery.', 409)
   }
@@ -4196,6 +4263,7 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt) 
       forgetInjected(expected.sid, prompt)
       throw knownUndeliveredTeamMessage('The exact Pi input stream did not accept the coordinator message.')
     }
+    activateTeamProviderTurn(target, { turn: providerTurn })
     return
   }
   // This is deliberately one transport attempt. tmuxPaste can become
@@ -4206,6 +4274,7 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt) 
     throw new TeamError('target_authority_lost',
       'The worker changed while the coordinator message was being submitted; delivery is uncertain.', 409)
   }
+  activateTeamProviderTurn(target, { turn: providerTurn })
   if (expected.provider === 'codex') ensureCodexTurnStarted(target)
 }
 
@@ -4267,15 +4336,20 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     }
     message.providerDeliveryStatus = 'delivering'
     beginCoordinatorTaskMessageDelivery(state, task.id, message.id)
+    const providerTurn = {
+      taskId: task.id,
+      providerWorkGeneration: Math.max(1, Number(message.workGeneration) || 1),
+    }
+    stageTeamProviderTurn(target, providerTurn)
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_submitting')
     saveStateNow(state)
     providerAttempted = true
     await injectCoordinatorTaskMessageOnce(task, target, expected, [
-      `<sab-team-message task="${task.id}" source="coordinator">`,
+      `<sab-team-message task="${task.id}" generation="${providerTurn.providerWorkGeneration}" source="coordinator">`,
       '[Slack Agent Bridge coordinator message for your active delegated task]',
       message.text,
       '</sab-team-message>',
-    ].join('\n'))
+    ].join('\n'), providerTurn)
     recordTeamWorkerProof(target, task)
     completeCoordinatorTaskMessageDelivery(state, task.id, message.id)
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_delivered')
@@ -4284,6 +4358,10 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       log('team follow-up lifecycle audit deferred', task.id, String(error?.message || error)))
     return true
   } catch (error) {
+    discardPendingTeamProviderTurn(target, {
+      taskId: task.id,
+      providerWorkGeneration: Math.max(1, Number(message.workGeneration) || 1),
+    })
     const failure = teamMessageFailureDisposition({ providerAttempted, error })
     message.providerDeliveryStatus = failure.providerDeliveryStatus
     message.deliveryStatus = failure.deliveryStatus

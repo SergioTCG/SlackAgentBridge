@@ -134,7 +134,10 @@ async function mutate(pathname, body, { timeout = 30_000 } = {}) {
   try {
     return await request(pathname, { method: 'POST', body: { ...body, requestId }, timeout })
   } catch (error) {
-    const task = body.taskId ? ` --task ${body.taskId}` : ''
+    // A continuation request names its terminal parent, but the accepted
+    // mutation belongs to a newly created child whose ID is unknown after a
+    // timeout. Query that request workspace-wide instead of filtering it out.
+    const task = pathname !== '/team/continue' && body.taskId ? ` --task ${body.taskId}` : ''
     error.message = `${error.message}; retry safely with --request-id ${requestId}, or verify acceptance with sab team mutation --request-id ${requestId}${task}`
     throw error
   }

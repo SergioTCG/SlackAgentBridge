@@ -890,10 +890,12 @@ export function cancelQueuedTeamTask(state, taskId, {
     if (control.existing) return task
     // Preserve the historical idempotent cancellation surface while making a
     // new bounded request identity queryable when journal capacity permits.
-    if (task.controlRequests.length < TASK_CONTROL_MAX) {
-      rememberTaskControl(task, control.key, 'cancel', payloadHash, now)
-      bumpTask(task, now)
+    if (task.controlRequests.length >= TASK_CONTROL_MAX) {
+      throw new TeamError('task_control_limit',
+        'This cancelled task cannot journal another cancellation request identity.', 409)
     }
+    rememberTaskControl(task, control.key, 'cancel', payloadHash, now)
+    bumpTask(task, now)
     return task
   }
   if (control.existing) return task

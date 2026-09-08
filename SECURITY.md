@@ -98,7 +98,8 @@ accounts, and the Mac user running the daemon.
   exact worker reserved until bounded gates are clear, the worker declares
   readiness, and the coordinator releases it. Accepted coordinator messages
   fence readiness/release until exact provider delivery, and task-local work
-  generations prevent delayed earlier finals from satisfying newer work.
+  generations are durably attached to the accepted native turn so delayed
+  earlier finals cannot satisfy newer work by sampling current task state.
   Repeated live exact-process idle
   proof may close a hookless Codex turn only as a warning-bearing report;
   boot-time idle lacks that proof and fails closed for legacy running work.

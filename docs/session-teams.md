@@ -172,7 +172,10 @@ from the moment it is accepted, it fences completion and release until exact
 provider delivery. After confirmed delivery the task returns to `running` and
 the worker must declare completion again. Reports and messages carry a
 monotonic task-local work generation, preventing a delayed final from the
-preceding turn from satisfying the new instruction. If a terminal task needs
+preceding turn from satisfying the new instruction. SAB stages that generation
+before provider input and promotes it to a bounded durable native-turn record
+when the input is accepted; final hooks resolve the record by turn identity or
+event observation time. If a terminal task needs
 more work, `continue`
 creates a new task linked through `parentTaskId`; terminal history is immutable.
 

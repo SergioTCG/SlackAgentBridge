@@ -318,9 +318,11 @@ end of one provider turn is only a durable report and moves the task to
 maintains an explicit bounded pending-gate set, must clear it, and must declare
 completion before the coordinator can release the task. Coordinator follow-up
 invalidates the old declaration. Accepted follow-ups fence completion and
-release until exact provider delivery; both delivery and provider reports carry
-a monotonic task-local work generation so a delayed earlier final cannot be
-mistaken for the follow-up result. Pre-upgrade tasks without an explicit
+release until exact provider delivery. Before provider input, SAB journals the
+intended generation; accepted input promotes it to a bounded durable native-turn
+fingerprint. Provider finals resolve that fingerprint by native turn identity or
+event observation time rather than sampling mutable task state, so a delayed
+earlier final cannot be mistaken for the follow-up result. Pre-upgrade tasks without an explicit
 completion policy retain provider-final semantics so an upgrade cannot
 reinterpret an already-running turn.
 

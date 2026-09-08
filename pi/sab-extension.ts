@@ -87,6 +87,7 @@ function sessionState(ctx: ExtensionContext) {
     session_id: ctx.sessionManager.getSessionId(),
     session_file: ctx.sessionManager.getSessionFile(),
     cwd: ctx.cwd,
+    observed_at: Date.now(),
     ...modelState(ctx),
   };
 }

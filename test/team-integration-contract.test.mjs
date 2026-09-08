@@ -247,7 +247,10 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon, /releaseTeamTask\(state[\s\S]*delete target\.teamActiveTaskId[\s\S]*persistTeamLifecycle\(task\)/)
   assert.match(daemon, /beginCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*completeCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)/)
-  assert.match(daemon, /const teamTaskTurn = currentTeamTaskProviderTurn\(session\)[\s\S]*completePrivateTurn[\s\S]*finalizeTurn\(session, \{ teamTaskTurn \}\)/)
+  assert.match(daemon, /const teamTaskTurn = currentTeamTaskProviderTurn\(session, body\)[\s\S]*completePrivateTurn[\s\S]*finalizeTurn\(session, \{ teamTaskTurn \}\)/)
+  assert.match(daemon, /stageTeamProviderTurn\(target,[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
+  assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*activateTeamProviderTurn\(target[\s\S]*ensureCodexTurnStarted\(target/)
+  assert.match(daemon, /currentTeamTaskProviderTurn\(session, body\)/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
