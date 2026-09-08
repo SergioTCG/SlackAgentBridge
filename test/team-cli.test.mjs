@@ -40,6 +40,10 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
     if (req.url.startsWith('/team/reply')) return res.end(JSON.stringify({ ok: true, reply: { id: 'reply_one', text: body ? JSON.parse(body).text : '' } }))
     if (req.url.startsWith('/team/cancel')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'cancelled' } }))
     if (req.url.startsWith('/team/replace')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', instruction: JSON.parse(body).text } }))
+    if (req.url.startsWith('/team/message') && JSON.parse(body).text === 'Uncertain delivery.') {
+      res.writeHead(503)
+      return res.end(JSON.stringify({ ok: false, error: 'provider unavailable' }))
+    }
     if (req.url.startsWith('/team/message')) return res.end(JSON.stringify({ ok: true, message: { id: 'message_one', text: JSON.parse(body).text } }))
     if (req.url.startsWith('/team/mode')) return res.end(JSON.stringify({ ok: true, mode: JSON.parse(body).mode }))
     res.writeHead(404); res.end(JSON.stringify({ ok: false }))
@@ -71,6 +75,12 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   assert.equal((await run(['cancel', '--task', 'task_one', '--reason', 'Done elsewhere.'], env)).status, 0)
   assert.equal((await run(['replace', '--task', 'task_one', '--stdin'], env, 'New work.')).status, 0)
   assert.equal((await run(['message', '--task', 'task_one', '--message', 'Proceed.'], env)).status, 0)
+  const uncertainMessage = await run(['message', '--task', 'task_one', '--message', 'Uncertain delivery.'], env)
+  assert.equal(uncertainMessage.status, 1)
+  const uncertainRequest = requests.find(request =>
+    request.url.startsWith('/team/message') && request.body?.text === 'Uncertain delivery.')
+  assert.match(uncertainRequest.body.requestId, /^[0-9a-f-]{36}$/)
+  assert.match(uncertainMessage.stderr, new RegExp(`retry safely with --request-id ${uncertainRequest.body.requestId}`))
   assert.equal((await run(['mode', 'draining'], env)).status, 0)
   const waited = await run(['wait', '--task', 'task_one', '--timeout', '2', '--json'], env)
   assert.equal(waited.status, 0, waited.stderr)

@@ -38,8 +38,8 @@ import { handleCodexFinalHttp } from './codex-final-http.mjs'
 import { codexTerminalFailure, codexTerminalFailureDecision } from './codex-terminal.mjs'
 import { codexFooterSettings, shouldPromoteCodexFooter } from './codex-footer.mjs'
 import {
-  ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
-  slackArtifactUploadOptions,
+  ArtifactUploadError, artifactDeliveryInstruction, artifactGrantTokensFromPrompts,
+  createArtifactGrantStore, fulfillArtifactUpload, slackArtifactUploadOptions,
 } from './artifacts.mjs'
 import {
   codexProjectUsage, codexSessionUsage, codexTokenSnapshot, formatCodexWorkingStatus,
@@ -75,7 +75,9 @@ import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './
 import { createTerminalControl } from './terminal-control.mjs'
 import { handleTerminalHttp } from './terminal-http.mjs'
 import { handleTeamHttp } from './team-http.mjs'
-import { knownUndeliveredTeamMessage, teamMessageFailureDisposition } from './team-message-delivery.mjs'
+import {
+  knownUndeliveredTeamMessage, recoverInterruptedTeamMessage, teamMessageFailureDisposition,
+} from './team-message-delivery.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
 import {
@@ -1683,6 +1685,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       toSessionId: sid,
       channelId: session.channel,
       provider,
+      tokens: artifactGrantTokensFromPrompts(pendingBySid.get(sid)),
     })
     session.id = sid
     session.offset = 0
@@ -4064,9 +4067,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     throw new TeamError('task_message_uncertain',
       message.deliveryError || 'Provider delivery outcome is uncertain; SAB will not replay this task message.', 409)
   }
-  if (message.providerDeliveryStatus === 'delivering') {
-    message.deliveryStatus = 'failed'
-    message.deliveryError = 'Provider delivery outcome became uncertain during daemon restart; SAB did not replay this task message.'
+  if (recoverInterruptedTeamMessage(message)) {
     saveStateNow(state)
     throw new TeamError('task_message_uncertain', message.deliveryError, 409)
   }

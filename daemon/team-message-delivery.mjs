@@ -14,3 +14,11 @@ export function teamMessageFailureDisposition({ providerAttempted = false, error
     retryable,
   }
 }
+
+export function recoverInterruptedTeamMessage(message) {
+  if (!message || message.providerDeliveryStatus !== 'delivering') return false
+  message.providerDeliveryStatus = 'uncertain'
+  message.deliveryStatus = 'failed'
+  message.deliveryError = 'Provider delivery outcome became uncertain during daemon restart; SAB did not replay this task message.'
+  return true
+}

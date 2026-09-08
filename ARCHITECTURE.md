@@ -554,9 +554,11 @@ uses its extension event. The two Codex sources atomically claim the same native
 turn before Slack delivery. Codex turns that omit `UserPromptSubmit` are tracked from the
 successful bridge injection, and a rendered `Working (...)` footer allows
 restart re-adoption when the timestamp was lost. Two unchanged idle-surface
-observations can release an owner turn; for a delegated task they fail only
-that exact journal entry and never fabricate or replay a final. Deduplication
-fences hook retries and restart races.
+observations can release an owner turn. For an exact delegated turn observed
+continuously by the live poller, they complete that task with an explicit
+warning and never fabricate or replay a final. An already-idle delegated task
+discovered only during boot still fails closed. Deduplication fences hook
+retries and restart races.
 
 ## Provider switching
 

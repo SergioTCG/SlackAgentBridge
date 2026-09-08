@@ -200,10 +200,16 @@ try {
   } else if (command === 'message' || command === 'replace') {
     const parsed = commonMessageArgs(args)
     if (!parsed.taskId || !parsed.text) usage(`${command} requires --task and either --stdin or --message`)
-    const result = await request(`/team/${command}`, {
-      method: 'POST', body: { taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId || crypto.randomUUID() },
-    })
-    output(result.message || result.task)
+    const requestId = parsed.requestId || crypto.randomUUID()
+    try {
+      const result = await request(`/team/${command}`, {
+        method: 'POST', body: { taskId: parsed.taskId, text: parsed.text, requestId },
+      })
+      output(result.message || result.task)
+    } catch (error) {
+      error.message = `${error.message}; retry safely with --request-id ${requestId}`
+      throw error
+    }
   } else if (command === 'cancel') {
     let taskId = null
     let reason = 'Cancelled by the coordinator.'

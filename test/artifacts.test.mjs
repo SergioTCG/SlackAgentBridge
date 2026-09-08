@@ -4,7 +4,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  ARTIFACT_GRANT_TTL_MS, artifactDeliveryInstruction, createArtifactGrantStore,
+  ARTIFACT_GRANT_TTL_MS, artifactDeliveryInstruction, artifactGrantTokensFromPrompts,
+  createArtifactGrantStore,
   fulfillArtifactUpload, resolveArtifactFiles, slackArtifactUploadOptions,
 } from '../daemon/artifacts.mjs'
 
@@ -129,23 +130,36 @@ test('provider handoff revokes old session grants without affecting the target',
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
 })
 
-test('verified native replacement rebinds only matching live-session grants', () => {
+test('verified native replacement rebinds only queued matching live-session grants', () => {
   const { temp, workspace } = fixture()
   try {
     let n = 0
     const store = createArtifactGrantStore({ token: () => `grant-${++n}` })
     const moved = store.issue(grantFields(workspace, { sessionId: 'old', channelId: 'C1', provider: 'codex' }))
+    const notQueued = store.issue(grantFields(workspace, { sessionId: 'old', channelId: 'C1', provider: 'codex' }))
     const otherChannel = store.issue(grantFields(workspace, { sessionId: 'old', channelId: 'C2', provider: 'codex' }))
     const otherProvider = store.issue(grantFields(workspace, { sessionId: 'old', channelId: 'C1', provider: 'claude' }))
 
     assert.equal(store.rebind({
       fromSessionId: 'old', toSessionId: 'new', channelId: 'C1', provider: 'codex',
+      tokens: [moved.token],
     }), 1)
     assert.throws(() => store.claim(moved.token, { sessionId: 'old', channelId: 'C1', provider: 'codex' }), /invalid/)
     assert.equal(store.claim(moved.token, { sessionId: 'new', channelId: 'C1', provider: 'codex' }).sessionId, 'new')
+    assert.throws(() => store.claim(notQueued.token, { sessionId: 'new', channelId: 'C1', provider: 'codex' }), /invalid/)
+    assert.equal(store.claim(notQueued.token, { sessionId: 'old', channelId: 'C1', provider: 'codex' }).sessionId, 'old')
     assert.equal(store.claim(otherChannel.token, { sessionId: 'old', channelId: 'C2', provider: 'codex' }).channelId, 'C2')
     assert.equal(store.claim(otherProvider.token, { sessionId: 'old', channelId: 'C1', provider: 'claude' }).provider, 'claude')
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+})
+
+test('artifact grant rebind candidates come only from exact queued upload instructions', () => {
+  assert.deepEqual(artifactGrantTokensFromPrompts([
+    `Owner request.${artifactDeliveryInstruction('queued-token_1')}`,
+    { text: 'Pi owner request.', privateContext: artifactDeliveryInstruction('queued-token-2') },
+    'Mentioning queued-token-3 without an upload instruction is not authority.',
+    'sab upload --grant malformed-token FILE_PATH',
+  ]), ['queued-token_1', 'queued-token-2'])
 })
 
 test('an in-flight grant cannot be used concurrently', async () => {

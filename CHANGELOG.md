@@ -6,6 +6,22 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.1.0-rc.14] — 2026-09-08
+
+### Fixed
+
+- Native in-place session replacement now rebinds only artifact grants whose
+  exact upload commands remain in the migrated pending-prompt queue. Other
+  unexpired grants retain the superseded session binding and cannot become
+  usable by a replacement merely because its channel, provider, and tmux match.
+- `sab team message` and queued-task replacement now retain their generated
+  request identity and print an exact safe-retry command after an uncertain
+  client outcome, preserving journal idempotency without requiring callers to
+  pre-generate UUIDs.
+- A coordinator message interrupted while its provider write was in flight is
+  persisted as `uncertain` on the first post-restart reconciliation. Later
+  passes fail closed without repeatedly rewriting state or replaying the text.
+
 ## [2.1.0-rc.13] — 2026-09-08
 
 ### Fixed

@@ -282,11 +282,12 @@ accounts, and the Mac user running the daemon.
   Codex worker may clear its bridge-owned busy markers only after two unchanged
   idle-surface observations following the grace period. The fallback proves the
   exact session, channel, PID/tmux ancestry, and turn fingerprint, persists
-  cleanup before waking queued dispatch. A delegated task may be failed and
-  released only after the same exact proof, preserving its journal and
-  completion delivery while never replaying work or releasing a replacement
-  session. No fallback path fabricates a provider final response from terminal
-  output.
+  cleanup before waking queued dispatch. An exact delegated task observed
+  continuously by its live poller may become `completed_with_warning` only
+  after that same proof; an already-idle historical task discovered during boot
+  fails closed. Both paths preserve the journal, never replay work, and never
+  release a replacement session. No fallback path fabricates a provider final
+  response from terminal output.
 - **Rate-safe status delivery:** live status edits use one workspace-wide,
   bounded queue, discard superseded timer text before Slack I/O, and prioritize
   end-of-turn cleanup. Provider commentary and finals do not wait on cosmetic
