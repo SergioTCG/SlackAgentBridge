@@ -520,7 +520,16 @@ export function appendTeamTaskReply(state, taskId, {
     throw new TeamError('request_conflict', 'That request ID was already used for a completion declaration.', 409)
   }
   if (!ACTIVE_TASK_STATES.has(task.status)) throw new TeamError('task_not_active', 'That task no longer accepts replies.', 409)
-  if (task.replies.length >= TEAM_MAX_REPLIES) throw new TeamError('reply_limit', 'This task reached its bounded reply limit.', 409)
+  // Keep one bounded journal slot available for the checkpoint that clears the
+  // final declared gate. Otherwise progress chatter could make a two-phase task
+  // impossible to complete successfully.
+  const clearsFinalGate = normalizedGates?.length === 0 && (task.pendingGates || []).length > 0
+  const replyLimit = clearsFinalGate ? TEAM_MAX_REPLIES : TEAM_MAX_REPLIES - 1
+  if (task.replies.length >= replyLimit) {
+    throw new TeamError('reply_limit', clearsFinalGate
+      ? 'This task reached its bounded reply limit.'
+      : 'This task reserved its final reply slot for a gate-clearing checkpoint.', 409)
+  }
   if (normalizedGates !== null) invalidateCompletionRequest(task, {
     reason: 'worker_checkpoint_changed', requestId: key, now,
   })
@@ -583,6 +592,10 @@ export function requestTeamTaskCompletion(state, taskId, {
   }
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
+  }
+  if ((task.messages || []).some(message => message.providerDeliveryStatus === 'delivering')) {
+    throw new TeamError('task_message_in_flight',
+      'A coordinator follow-up is entering this task; declare completion only after receiving it.', 409)
   }
   if (task.replies.some(reply => reply.requestId === key)) {
     throw new TeamError('request_conflict', 'That request ID was already used for a task reply.', 409)

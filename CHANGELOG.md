@@ -41,6 +41,9 @@ Notable changes to this project. Format based on
 - Legacy queued work retains provider-final instructions, while delivery-time
   follow-up races, post-release completion retries, and renamed-worker
   continuations preserve their exact durable task identity.
+- Completion declarations are fenced while coordinator follow-up is entering
+  the provider, dormant wakeups preserve only durably reported work, and the
+  bounded reply journal reserves capacity to clear the final task gate.
 
 ## [2.1.0] — 2026-09-08
 

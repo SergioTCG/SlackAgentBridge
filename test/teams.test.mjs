@@ -361,12 +361,62 @@ test('delivery-time coordinator follow-up wins a concurrent worker report', () =
   assert.equal(followUp.message.invalidatedCompletion, true)
   assert.equal(task.completionRequest, null)
   assert.equal(task.status, 'running')
+  followUp.message.providerDeliveryStatus = 'delivering'
+  assert.throws(() => requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel,
+    summary: 'This readiness predates the delivered follow-up.', requestId: 'race-too-early', now: 5350,
+  }), error => error.code === 'task_message_in_flight')
+  followUp.message.providerDeliveryStatus = 'delivered'
+  requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel,
+    summary: 'Ready after receiving the follow-up.', requestId: 'race-after-delivery', now: 5375,
+  })
   reportTeamTaskTurn(state, task.id, {
     targetSessionId: worker.id, result: 'Second report after the follow-up.', now: 5400,
   })
   assert.equal(task.status, 'awaiting_release')
   assert.equal(task.reports.length, 2)
   assert.equal(task.reports.at(-1).result, 'Second report after the follow-up.')
+  assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, true)
+})
+
+test('the bounded reply journal reserves capacity to clear the final gate', () => {
+  const { state, team } = fixture()
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Long-running validation.', requestId: 'gate-capacity-task',
+    id: 'task_gate_capacity', now: 2000,
+  })
+  claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'CI is pending.', pendingGates: ['ci'],
+    requestId: 'gate-checkpoint-1', now: 5000,
+  })
+  for (let index = 1; index < 31; index++) {
+    appendTeamTaskReply(state, task.id, {
+      fromChannel: 'C-WORKER-1', text: `Progress ${index}.`, requestId: `gate-progress-${index}`, now: 5000 + index,
+    })
+  }
+  assert.equal(task.replies.length, 31)
+  assert.throws(() => appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'One more progress note.', requestId: 'gate-progress-overflow', now: 5100,
+  }), error => error.code === 'reply_limit')
+  assert.throws(() => appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'CI remains pending.', pendingGates: ['ci'],
+    requestId: 'gate-still-pending-overflow', now: 5200,
+  }), error => error.code === 'reply_limit')
+
+  appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'CI passed.', pendingGates: [],
+    requestId: 'gate-cleared-final-slot', now: 5300,
+  })
+  assert.equal(task.replies.length, 32)
+  assert.deepEqual(task.pendingGates, [])
+  assert.equal(requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: 'worker', fromChannel: 'C-WORKER-1', summary: 'All gates passed.',
+    requestId: 'gate-capacity-complete', now: 5400,
+  }).created, true)
 })
 
 test('provider final remains backward-compatible for tasks without a completion policy', () => {

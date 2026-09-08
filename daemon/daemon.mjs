@@ -3192,12 +3192,20 @@ async function handleSlackMessage(channel, text, sender, request) {
 
   const managedSession = sessionByChannel(channel)
   if (managedSession?.teamActiveTaskId) {
-    if (!sender && !(managedSession.pid && pidAlive(managedSession.pid))) {
+    const activeTeamTask = state.teamTasks?.[managedSession.teamActiveTaskId]
+    if (activeTeamTask?.status === 'awaiting_release' &&
+        !sender && !(managedSession.pid && pidAlive(managedSession.pid))) {
       await post(channel,
         `🕸️ Resuming the worker session reserved by task \`${managedSession.teamActiveTaskId}\`. ` +
         'This message is only a wake request and was not submitted as unrelated task input.')
       await resurrect(managedSession)
       return
+    }
+    if (!sender && !(managedSession.pid && pidAlive(managedSession.pid))) {
+      await failTeamTaskForSession(managedSession,
+        'The worker process exited before producing a durable report; SAB released the task without replay.')
+      return post(channel,
+        '⚠️ The unreported delegated task was released without replay because its provider process exited. Send your message again to begin a fresh owner turn.')
     }
     return post(channel, `🕸️ Delegated team task \`${managedSession.teamActiveTaskId}\` currently owns this worker turn. Wait for its final response or use \`/sab-stop\` before sending unrelated work.`)
   }
@@ -4951,6 +4959,23 @@ const teamService = {
     const session = await resolveTeamCaller(caller)
     const context = requireTeamCallerContext(session)
     if (context.role !== 'coordinator') throw new TeamError('dispatch_not_allowed', 'Only the team coordinator may continue work.', 403)
+    // A bounded journal may prune the terminal parent after the continuation is
+    // accepted. Recover that exact mutation before loading parent history so an
+    // idempotent retry never depends on an already-pruned record.
+    const prior = teamTaskForRequest(state, session.channel, request.requestId)
+    if (prior) {
+      assertTeamTaskRetry(state, prior, {
+        teamId: context.id,
+        target: prior.targetChannel,
+        text: request.text,
+        files: [],
+        parentTaskId: request.taskId,
+      })
+      return {
+        task: publicTeamTask(prior, session.channel), created: false,
+        mutation: acceptedTeamMutation(session, prior, request.requestId),
+      }
+    }
     const previous = teamTask(state, request.taskId)
     if (previous.sourceChannel !== session.channel || previous.teamId !== context.id || !isTerminalTeamTask(previous)) {
       throw new TeamError('invalid_continuation_task', 'Only one of this coordinator\'s terminal tasks may be continued.', 409)

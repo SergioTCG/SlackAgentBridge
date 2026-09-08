@@ -254,11 +254,13 @@ test('provider turn reporting preserves task and process ownership until explici
   const continuation = /async continue\(caller, request\) \{[\s\S]*?\n  },\n  async reply/.exec(daemon)?.[0] || ''
   assert.match(continuation, /to: previous\.targetChannel/)
   assert.doesNotMatch(continuation, /to: previous\.targetAlias/)
+  assert.ok(continuation.indexOf('teamTaskForRequest') < continuation.indexOf('teamTask(state, request.taskId)'),
+    'an accepted continuation retry must resolve before its bounded parent history is loaded')
 })
 
 test('reported dormant workers can be resumed and deferred follow-ups remain visible and proved', () => {
   const inbound = /async function handleSlackMessage\([\s\S]*?\/\/ Collaborators may only send prompts/.exec(daemon)?.[0] || ''
-  assert.match(inbound, /managedSession\?\.teamActiveTaskId[\s\S]*!sender[\s\S]*pidAlive[\s\S]*resurrect\(managedSession\)/)
+  assert.match(inbound, /managedSession\?\.teamActiveTaskId[\s\S]*activeTeamTask\?\.status === 'awaiting_release'[\s\S]*!sender[\s\S]*pidAlive[\s\S]*resurrect\(managedSession\)/)
 
   const delivery = /async function performCoordinatorTaskMessageDelivery\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   const sourceAudit = delivery.indexOf("message.sourceSlackTs")
