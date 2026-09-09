@@ -1005,10 +1005,45 @@ export function beginCoordinatorTaskMessageDelivery(state, taskId, messageId, { 
   return task
 }
 
+export function acknowledgeCoordinatorTaskMessageDelivery(state, taskId, {
+  targetSessionId,
+  providerWorkGeneration,
+  now = Date.now(),
+} = {}) {
+  const task = teamTask(state, taskId)
+  if (task.targetSessionId !== targetSessionId) {
+    throw new TeamError('task_target_changed', 'The task belongs to another native session.', 409)
+  }
+  const generation = Number(providerWorkGeneration)
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw new TeamError('invalid_work_generation', 'A valid provider work generation is required.', 400)
+  }
+  const matches = (task.messages || []).filter(message =>
+    Number(message.workGeneration) === generation)
+  if (matches.length > 1) {
+    throw new TeamError('ambiguous_task_message',
+      'More than one coordinator message claims this provider work generation.', 500)
+  }
+  const message = matches[0] || null
+  if (!message) return { task, message: null, created: false }
+  if (message.providerDeliveryStatus === 'delivered' && message.deliveryStatus === 'delivered') {
+    return { task, message, created: false }
+  }
+  // Only a provider attempt journaled as in-flight or uncertain may be healed
+  // by its exact native prompt acknowledgement. A merely queued message was
+  // never offered to this provider and must not be promoted by copied text.
+  if (!['delivering', 'uncertain'].includes(message.providerDeliveryStatus)) {
+    return { task, message, created: false }
+  }
+  completeCoordinatorTaskMessageDelivery(state, task.id, message.id, { now })
+  return { task, message, created: true }
+}
+
 export function completeCoordinatorTaskMessageDelivery(state, taskId, messageId, { now = Date.now() } = {}) {
   const task = teamTask(state, taskId)
   const message = (task.messages || []).find(item => item.id === messageId)
   if (!message) throw new TeamError('task_message_not_found', 'That coordinator task message is unavailable.', 404)
+  if (message.providerDeliveryStatus === 'delivered' && message.deliveryStatus === 'delivered') return task
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_active', 'The task ended before this coordinator message completed delivery.', 409)
   }

@@ -98,7 +98,8 @@ import {
   appendTeamTaskReply,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
-  beginCoordinatorTaskMessageDelivery, completeCoordinatorTaskMessageDelivery, closeTeam,
+  acknowledgeCoordinatorTaskMessageDelivery, beginCoordinatorTaskMessageDelivery,
+  completeCoordinatorTaskMessageDelivery, closeTeam,
   consumeCoordinatorDispatch, coordinatorPromptContext,
   createTeam, createTeamTask, delegatedTaskPrompt, failTeamTask, markTeamTaskRunning, normalizeTeamAlias,
   isActiveTeamTask, isTerminalTeamTask, isWorkerBoundTeamTask, publicTeamTask, reconcileTeamSessionBindings,
@@ -2125,6 +2126,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       submittedTeamTaskTurn?.taskId === task.id
       ? submittedTeamTaskTurn
       : null
+    let acknowledgedCoordinatorMessage = null
     if (acknowledgedTurn) {
       // An uncertain tmux delivery may leave only the pending generation for
       // this hook to recover. Promote and persist it before channel/audit I/O:
@@ -2136,6 +2138,11 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       const activeTurn = pendingPromptTeamTurn
         ? activatePendingTeamProviderTurn(session, pendingPromptTeamTurn, activation)
         : activateTeamProviderTurn(session, { turn: acknowledgedTurn, ...activation })
+      acknowledgedCoordinatorMessage = acknowledgeCoordinatorTaskMessageDelivery(state, task.id, {
+        targetSessionId: session.id,
+        providerWorkGeneration: acknowledgedTurn.providerWorkGeneration,
+        now: activation.startedAt,
+      })
       refreshTeamTaskPoller(session, activeTurn)
       saveStateNow(state)
     } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
@@ -2143,6 +2150,10 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     }
     if (p && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
     const ch = session.channel || (await ensureChannel(session))
+    if (acknowledgedCoordinatorMessage?.created) {
+      await updateTeamTaskAudit(task).catch(error =>
+        log('team coordinator message acknowledgement audit deferred', task.id, String(error?.message || error)))
+    }
     if (teamTaskId && session.teamActiveTaskId === teamTaskId) {
       try {
         const task = markTeamTaskRunning(state, teamTaskId)
@@ -4546,11 +4557,22 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       log('team follow-up lifecycle audit deferred', task.id, String(error?.message || error)))
     return true
   } catch (error) {
-    discardPendingTeamProviderTurn(target, {
-      taskId: task.id,
-      providerWorkGeneration: Math.max(1, Number(message.workGeneration) || 1),
-    })
+    // The provider hook may have authenticated this exact prompt while the
+    // multi-step tmux call was still unwinding. That durable acknowledgement
+    // wins: never let a later transport error reopen or poison the message.
+    if (message.providerDeliveryStatus === 'delivered' && message.deliveryStatus === 'delivered') {
+      return true
+    }
     const failure = teamMessageFailureDisposition({ providerAttempted, error })
+    if (failure.retryable) {
+      // A known pre-write rejection cannot produce a legitimate later prompt
+      // acknowledgement, so its staged generation is safe to discard. An
+      // uncertain attempt retains the marker for exact hook recovery.
+      discardPendingTeamProviderTurn(target, {
+        taskId: task.id,
+        providerWorkGeneration: Math.max(1, Number(message.workGeneration) || 1),
+      })
+    }
     message.providerDeliveryStatus = failure.providerDeliveryStatus
     message.deliveryStatus = failure.deliveryStatus
     message.deliveryError = String(error?.data?.error || error?.message || error).slice(0, 1000)

@@ -391,6 +391,29 @@ test('reported dormant workers can be resumed and deferred follow-ups remain vis
     /beginCoordinatorTaskMessageDelivery[\s\S]*message\.resumesTask = task\.status === 'awaiting_release'[\s\S]*if \(message\.resumesTask\)[\s\S]*invalidateCompletionRequest/)
 })
 
+test('authenticated coordinator-message acknowledgement wins a late uncertain transport result', () => {
+  const promptHook = daemon.slice(
+    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
+    daemon.indexOf("if (ev === 'PreToolUse')"),
+  )
+  assert.match(promptHook,
+    /acknowledgeCoordinatorTaskMessageDelivery\(state, task\.id,[\s\S]*providerWorkGeneration: acknowledgedTurn\.providerWorkGeneration/)
+
+  const delivery = daemon.slice(
+    daemon.indexOf('async function performCoordinatorTaskMessageDelivery('),
+    daemon.indexOf('function ensureCoordinatorTaskMessageDelivery('),
+  )
+  const catchStart = delivery.indexOf('catch (error)')
+  const acceptedGuard = delivery.indexOf("message.providerDeliveryStatus === 'delivered'", catchStart)
+  const failureDisposition = delivery.indexOf('teamMessageFailureDisposition', catchStart)
+  const pendingDiscard = delivery.indexOf('discardPendingTeamProviderTurn', catchStart)
+  assert.ok(catchStart >= 0 && acceptedGuard > catchStart && failureDisposition > acceptedGuard,
+    'an authenticated acknowledgement must win a racing transport error')
+  assert.ok(pendingDiscard > failureDisposition,
+    'only a classified known-undelivered result may discard the recovery marker')
+  assert.match(delivery, /if \(failure\.retryable\)[\s\S]*discardPendingTeamProviderTurn/)
+})
+
 test('team mutation responses carry the journaled receipt from the original authority check', () => {
   assert.match(daemon, /function acceptedTeamMutation\([\s\S]*teamMutationForRequest/)
   assert.match(daemon, /mutation: acceptedTeamMutation\(session, result\.task, request\.requestId\)/)

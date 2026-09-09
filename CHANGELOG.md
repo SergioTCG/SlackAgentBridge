@@ -88,6 +88,10 @@ Notable changes to this project. Format based on
   durable post-restart coordinator-message markers promote the exact pending
   generation instead of leaving work reserved or misclassifying it as local
   terminal input.
+- An exact native prompt acknowledgement now settles a coordinator follow-up
+  whose tmux delivery was uncertain or interrupted by restart. The authenticated
+  acknowledgement wins a racing late transport error, advances the durable work
+  generation once, and removes the stale completion/release fence.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

@@ -4,6 +4,7 @@ import {
   TeamError,
   activeTeamForChannel,
   addTeamWorker,
+  acknowledgeCoordinatorTaskMessageDelivery,
   appendCoordinatorTaskMessage,
   appendTeamTaskCheckpoint,
   appendTeamTaskReply,
@@ -468,6 +469,52 @@ test('accepted coordinator messages fence readiness until exact provider deliver
     summary: 'Ready after the follow-up.', requestId: 'pending-message-complete', now: 5400,
   })
   assert.equal(declared.created, true)
+})
+
+test('an authenticated prompt acknowledgement settles an uncertain coordinator follow-up exactly once', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Verify the result.', requestId: 'ack-task',
+    id: 'task_ack_follow_up', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  const followUp = appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'Also verify the runtime proof.',
+    requestId: 'ack-follow-up', now: 5000,
+  }).message
+  beginCoordinatorTaskMessageDelivery(state, task.id, followUp.id, { now: 5100 })
+  followUp.providerDeliveryStatus = 'uncertain'
+  followUp.deliveryStatus = 'failed'
+  followUp.deliveryError = 'tmux write outcome was uncertain'
+
+  const acknowledged = acknowledgeCoordinatorTaskMessageDelivery(state, task.id, {
+    targetSessionId: worker.id,
+    providerWorkGeneration: followUp.workGeneration,
+    now: 5200,
+  })
+  assert.equal(acknowledged.created, true)
+  assert.equal(acknowledged.message.id, followUp.id)
+  assert.equal(followUp.providerDeliveryStatus, 'delivered')
+  assert.equal(followUp.deliveryStatus, 'delivered')
+  assert.equal(followUp.deliveryError, null)
+  assert.equal(task.providerWorkGeneration, followUp.workGeneration)
+  assert.equal(task.status, 'running')
+
+  const version = task.lifecycleVersion
+  const duplicate = acknowledgeCoordinatorTaskMessageDelivery(state, task.id, {
+    targetSessionId: worker.id,
+    providerWorkGeneration: followUp.workGeneration,
+    now: 5300,
+  })
+  assert.equal(duplicate.created, false)
+  assert.equal(task.lifecycleVersion, version)
+  completeCoordinatorTaskMessageDelivery(state, task.id, followUp.id, { now: 5400 })
+  assert.equal(task.lifecycleVersion, version)
 })
 
 test('worker turn reports deduplicate by provider work generation', () => {
