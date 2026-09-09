@@ -170,7 +170,11 @@ export function providerTurnForCompletion(session, {
     if (exactCandidates.length) return null
     // Once the current turn has a different native identity, an unknown final
     // is not allowed to borrow it merely because it arrived later.
-    if (current?.providerTurnId) return null
+    // An inherited identity means the follow-up may have steered the existing
+    // native turn, but it may also have started a distinct turn after the old
+    // final ended. Until a prompt hook replaces it, use the event boundary to
+    // resolve a different native id instead of treating the copied id as final.
+    if (current?.providerTurnId && !current.inheritProviderTurnId) return null
   }
   if (hasObservedAt) return publicTurn(latest(candidates))
   return publicTurn(current)

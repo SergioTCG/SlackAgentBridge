@@ -59,6 +59,7 @@ import {
 import {
   CLAUDE_FAILURE_DEDUPE_MS, claudePollerDecision, prepareClaudeTerminalDelivery,
 } from './claude-terminal.mjs'
+import { staleTeamTurnTranscriptPrefixBytes } from './claude-transcript.mjs'
 import {
   nextStructuredQuestion, questionBlocks, questionFormFromPane, questionFormMatches, questionFormsFromHook,
 } from './claude-question.mjs'
@@ -1134,6 +1135,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     // of the newer turn's transcript bytes or clearing its status.
     if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
       log('ignored stale Claude final after transcript settle', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
+      if (teamTaskTurn && discardStaleClaudeTeamTurnTranscript(session, teamTaskTurn)) saveStateNow(state)
       return false
     }
     clearStatusDeferred(session)
@@ -1467,6 +1469,21 @@ function assistantTextSinceOffset(session, advance = false) {
 
 const peekNewAssistantText = session => assistantTextSinceOffset(session, false)
 const readNewAssistantText = session => assistantTextSinceOffset(session, true)
+
+function discardStaleClaudeTeamTurnTranscript(session, expected) {
+  if (providerOf(session) !== 'claude' || !session.transcript || !fs.existsSync(session.transcript)) return false
+  const size = fs.statSync(session.transcript).size
+  const from = Number(session.offset) || 0
+  if (size <= from) return false
+  const fd = fs.openSync(session.transcript, 'r')
+  const buffer = Buffer.alloc(size - from)
+  try { fs.readSync(fd, buffer, 0, buffer.length, from) }
+  finally { fs.closeSync(fd) }
+  const consumed = staleTeamTurnTranscriptPrefixBytes(buffer.toString('utf8'), expected)
+  if (consumed <= 0) return false
+  session.offset = from + consumed
+  return true
+}
 
 async function privateAssistantText(session, body = {}) {
   stopPoller(session)
@@ -5411,12 +5428,16 @@ const teamService = {
       summary: request.text,
       requestId: request.requestId,
     })
+    const startCodexStatus = isWorkerBoundTeamTask(task)
+      ? recordTeamWorkerProof(session, task)
+      : false
     const continuationTeamId = result.created && task.status === 'awaiting_release'
       ? stageTeamContinuation(task, {
           kind: 'ready', lifecycleVersion: result.request.lifecycleVersion || task.lifecycleVersion,
         })
       : null
     saveStateNow(state)
+    if (startCodexStatus) startCodexPoller(session)
     if (continuationTeamId) scheduleTeamContinuation(continuationTeamId)
     await updateTeamTaskAudit(task).catch(error =>
       log('team completion declaration audit deferred', task.id, String(error?.message || error)))

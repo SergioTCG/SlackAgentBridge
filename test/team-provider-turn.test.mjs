@@ -60,9 +60,9 @@ test('prompt acknowledgement can recover the exact pending turn after an uncerta
   stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 3 }, { now: 3000 })
 
   const initial = providerPromptTurnMarker(
-    '<sab-team-task id="task_one" team="team_one" source="coordinator">',
+    '<sab-team-task id="task_one" team="team_one" generation="3" source="coordinator">',
   )
-  assert.deepEqual(initial, { taskId: 'task_one', providerWorkGeneration: null })
+  assert.deepEqual(initial, { taskId: 'task_one', providerWorkGeneration: 3 })
   assert.deepEqual(pendingTeamProviderTurn(session, initial), {
     taskId: 'task_one', providerWorkGeneration: 3,
   })
@@ -84,6 +84,20 @@ test('prompt acknowledgement can recover the exact pending turn after an uncerta
   assert.deepEqual(providerTurnForCompletion(session, { providerTurnId: 'turn-three' }), {
     taskId: 'task_one', providerWorkGeneration: 3,
   })
+})
+
+test('a delayed initial acknowledgement cannot promote a newer pending generation', () => {
+  const session = {}
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 1 }, { now: 1000 })
+  const initial = providerPromptTurnMarker(
+    '<sab-team-task id="task_one" team="team_one" generation="1" source="coordinator">',
+  )
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 2 }, { now: 2000 })
+
+  assert.equal(pendingTeamProviderTurn(session, initial), null)
+  assert.deepEqual(pendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
 })
 
 test('steered native turns resolve the newest generation without delayed-hook rollback', () => {
@@ -117,6 +131,24 @@ test('steered native turns resolve the newest generation without delayed-hook ro
   }), { taskId: 'task_one', providerWorkGeneration: 2 })
   assert.deepEqual(providerTurnForCompletion(session, {
     providerTurnId: 'shared-turn',
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
+})
+
+test('an inherited native turn id remains provisional for a distinct follow-up turn', () => {
+  const session = {}
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 1 })
+  activateTeamProviderTurn(session, { providerTurnId: 'turn-one', startedAt: 1000 })
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2, inheritProviderTurnId: true,
+  }, { now: 2000 })
+  activateTeamProviderTurn(session, {
+    turn: session.teamProviderTurnPending,
+    providerTurnId: 'turn-one',
+    startedAt: 2000,
+  })
+
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'turn-two', observedAt: 2500,
   }), { taskId: 'task_one', providerWorkGeneration: 2 })
 })
 

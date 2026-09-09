@@ -382,6 +382,63 @@ test('delivery-time coordinator follow-up wins a concurrent worker report', () =
   assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, true)
 })
 
+test('queued follow-ups recompute whether each delivery resumes the task', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Verify the result.', requestId: 'queued-follow-ups-task',
+    id: 'task_queued_follow_ups', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id, result: 'Initial report.', now: 4500,
+  })
+
+  const first = appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'First follow-up.', requestId: 'queued-follow-up-1', now: 5000,
+  }).message
+  const second = appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'Second follow-up.', requestId: 'queued-follow-up-2', now: 5100,
+  }).message
+  assert.equal(first.resumesTask, true)
+  assert.equal(second.resumesTask, true)
+
+  beginCoordinatorTaskMessageDelivery(state, task.id, first.id, { now: 5200 })
+  completeCoordinatorTaskMessageDelivery(state, task.id, first.id, { now: 5300 })
+  assert.equal(task.status, 'running')
+
+  beginCoordinatorTaskMessageDelivery(state, task.id, second.id, { now: 5400 })
+  assert.equal(second.resumesTask, false)
+  completeCoordinatorTaskMessageDelivery(state, task.id, second.id, { now: 5500 })
+  assert.equal(second.resumesTask, false)
+})
+
+test('a completion declaration heals dispatching into authenticated running state', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Verify the result.', requestId: 'completion-proof-task',
+    id: 'task_completion_proof', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: 3000 })
+
+  const declared = requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel,
+    summary: 'All gates are clear.', requestId: 'completion-proof', now: 4000,
+  })
+  assert.equal(declared.created, true)
+  assert.equal(declared.accepted, true)
+  assert.equal(task.status, 'running')
+  assert.equal(task.acceptedAt, new Date(4000).toISOString())
+})
+
 test('accepted coordinator messages fence readiness until exact provider delivery', () => {
   const { state, team } = fixture()
   const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
@@ -832,6 +889,7 @@ test('delegated prompts carry immutable provenance and a task marker', () => {
   const prompt = delegatedTaskPrompt(team, task, [{ path: '/private/attachment/report.txt' }])
   assert.equal(taskMarker(prompt), 'task_prompt')
   assert.match(prompt, /Role: worker/)
+  assert.match(prompt, /<sab-team-task[^>]*generation="1"/)
   assert.match(prompt, /Origin: coordinator/)
   assert.doesNotMatch(prompt, /C-MASTER/)
   assert.match(prompt, /sab team reply --task task_prompt/)

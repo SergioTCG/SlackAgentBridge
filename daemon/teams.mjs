@@ -613,7 +613,9 @@ export function requestTeamTaskCompletion(state, taskId, {
     if (existing.payloadHash !== payloadHash) {
       throw new TeamError('completion_already_requested', 'This task already has a different completion declaration.', 409)
     }
-    return { task, request: existing, created: false }
+    const accepted = task.status === 'dispatching'
+    if (accepted) markTeamTaskRunning(state, task.id, { now })
+    return { task, request: existing, created: false, accepted }
   }
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
@@ -632,6 +634,8 @@ export function requestTeamTaskCompletion(state, taskId, {
   if (pending.length) {
     throw new TeamError('task_gates_pending', `Task completion is blocked by pending gates: ${pending.join(', ')}.`, 409)
   }
+  const accepted = task.status === 'dispatching'
+  if (accepted) markTeamTaskRunning(state, task.id, { now })
   task.completionRequest = {
     requestId: key,
     payloadHash,
@@ -641,7 +645,7 @@ export function requestTeamTaskCompletion(state, taskId, {
   }
   bumpTask(task, now)
   task.completionRequest.lifecycleVersion = task.lifecycleVersion
-  return { task, request: task.completionRequest, created: true }
+  return { task, request: task.completionRequest, created: true, accepted }
 }
 
 function boundedResult(result) {
@@ -992,8 +996,8 @@ export function beginCoordinatorTaskMessageDelivery(state, taskId, messageId, { 
   // worker can report during that window, so delivery-time state—not the state
   // observed when the message was journaled—decides whether this is a resumed
   // turn and invalidates the now-stale readiness declaration.
-  if (task.status === 'awaiting_release') {
-    message.resumesTask = true
+  message.resumesTask = task.status === 'awaiting_release'
+  if (message.resumesTask) {
     if (invalidateCompletionRequest(task, {
       reason: 'coordinator_follow_up', requestId: message.requestId, now,
     })) message.invalidatedCompletion = true
@@ -1328,7 +1332,7 @@ export function delegatedTaskPrompt(team, task, destinationFiles = []) {
         `Use \`sab team reply --task ${task.id} --stdin\` for other useful interim findings. Use \`sab team send-file --task ${task.id} -- FILE_PATH\` to return files when file relay is enabled.`,
       ]
   return [
-    `<sab-team-task id="${task.id}" team="${team.id}" source="coordinator">`,
+    `<sab-team-task id="${task.id}" team="${team.id}" generation="${teamTaskProviderWorkGeneration(task)}" source="coordinator">`,
     '[Slack Agent Bridge delegated task]',
     `Team: ${team.name}`,
     'Role: worker',

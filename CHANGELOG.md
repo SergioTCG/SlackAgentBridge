@@ -6,14 +6,6 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
-### Fixed
-
-- Coordinator waits now return the actionable `awaiting_release` state instead
-  of deadlocking the only turn authorized to release the worker.
-- Exact-generation Claude finalization is claimed before transcript settling,
-  stale Pi finals are fenced before and after Slack delivery, and dormant
-  coordinator messages no longer create three-second reconciliation log storms.
-
 ### Added
 
 - New session-team tasks now use explicit two-phase completion: bounded worker
@@ -34,6 +26,18 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Coordinator waits now return the actionable `awaiting_release` state instead
+  of deadlocking the only turn authorized to release the worker.
+- Exact-generation Claude finalization is claimed before transcript settling,
+  stale Pi finals are fenced before and after Slack delivery, and dormant
+  coordinator messages no longer create three-second reconciliation log storms.
+- Initial delegated prompts now carry their immutable work generation;
+  sequential coordinator messages recompute resume semantics at delivery, and
+  inherited Codex native-turn identities remain replaceable by exact later
+  lifecycle events.
+- Discarded stale Claude finals preserve the next generation's transcript
+  boundary, while authenticated completion declarations establish live worker
+  proof and heal a missed initial provider acknowledgement.
 - Bound provider prompt acknowledgements and finals to immutable task
   generations across audit waits, serialized coordinator follow-ups, preserved
   reported workers that become dormant during Slack audit delivery, and kept

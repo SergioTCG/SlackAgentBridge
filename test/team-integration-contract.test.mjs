@@ -291,6 +291,8 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
   assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('session.teamActiveTaskId !== task.id'),
     'an exact completion retry must be recovered before the released session binding is rejected')
+  assert.match(completionDeclaration,
+    /requestTeamTaskCompletion\(state[\s\S]*recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)/)
 
   const continuation = /async continue\(caller, request\) \{[\s\S]*?\n  },\n  async reply/.exec(daemon)?.[0] || ''
   assert.match(continuation, /to: previous\.targetChannel/)
@@ -369,7 +371,8 @@ test('reported dormant workers can be resumed and deferred follow-ups remain vis
     'an exactly delivered follow-up must establish fresh live-turn proof')
 
   assert.match(teamModules, /function delegatedTaskPrompt[\s\S]*teamTaskCompletionPolicy\(task\)/)
-  assert.match(teamModules, /beginCoordinatorTaskMessageDelivery[\s\S]*task\.status === 'awaiting_release'[\s\S]*message\.resumesTask = true[\s\S]*invalidateCompletionRequest/)
+  assert.match(teamModules,
+    /beginCoordinatorTaskMessageDelivery[\s\S]*message\.resumesTask = task\.status === 'awaiting_release'[\s\S]*if \(message\.resumesTask\)[\s\S]*invalidateCompletionRequest/)
 })
 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {
