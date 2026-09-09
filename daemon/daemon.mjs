@@ -116,7 +116,7 @@ import {
   resolveTeamPeer, setTeamDispatchMode,
   setTeamWorkerFiles, taskMarker, tasksForChannel, tasksPageForChannel, teamById, teamContext,
   teamDispatchMode, teamMutationForRequest, teamTask, teamTaskDeliverySettled, teamTaskForRequest,
-  teamTaskCompletionPolicy, teamTaskProviderWorkGeneration,
+  teamTaskCompletionPolicy, teamTaskProviderWorkGeneration, teamTaskReleaseReady,
   withoutDelegatedTaskPrompt,
 } from './teams.mjs'
 import {
@@ -4306,7 +4306,7 @@ function teamTaskStatusText(task) {
   const releaseDetail = task.status === 'awaiting_release'
     ? task.pendingGates?.length
       ? ` — pending: ${task.pendingGates.join(', ')}`
-      : task.completionRequest ? ' — ready for coordinator release' : ' — worker remains reserved'
+      : teamTaskReleaseReady(task) ? ' — ready for coordinator release' : ' — worker remains reserved'
     : task.pendingGates?.length ? ` — pending: ${task.pendingGates.join(', ')}`
       : task.completionRequest && task.status === 'running' ? ' — completion declared; awaiting turn report' : ''
   const issue = task.error ? ` — ${String(task.error).slice(0, 600)}`

@@ -54,11 +54,20 @@ test('coordinator messages remain ordered behind every unsettled predecessor', (
   assert.equal(undeliveredTeamMessagePredecessor(task, second), null)
 })
 
-test('delayed worker reports describe the current lifecycle without stale release advice', () => {
+test('delayed worker reports require a post-declaration report before release advice', () => {
   assert.match(teamReportLifecycleNotice({
-    status: 'awaiting_release', completionRequest: { requestId: 'ready', workGeneration: 1 },
+    status: 'awaiting_release', completionRequest: {
+      requestId: 'ready', workGeneration: 1, lifecycleVersion: 5,
+    },
     pendingGates: [], workGeneration: 1, providerWorkGeneration: 1,
-    reports: [{ workGeneration: 1 }], messages: [],
+    reports: [{ workGeneration: 1, lifecycleVersion: 6 }], messages: [],
+  }), /may release/)
+  assert.doesNotMatch(teamReportLifecycleNotice({
+    status: 'awaiting_release', completionRequest: {
+      requestId: 'ready', workGeneration: 1, lifecycleVersion: 5,
+    },
+    pendingGates: [], workGeneration: 1, providerWorkGeneration: 1,
+    reports: [{ workGeneration: 1, lifecycleVersion: 4 }], messages: [],
   }), /may release/)
   assert.match(teamReportLifecycleNotice({
     status: 'awaiting_release', completionRequest: null, pendingGates: [],

@@ -383,6 +383,12 @@ test('coordinator wait returns actionable release state and dormant message retr
     /\['worker_dormant', 'task_message_predecessor_pending'\]\.includes\(error\?\.code\)[\s\S]*return/)
 })
 
+test('task status cards use the canonical release-readiness predicate', () => {
+  const status = /function teamTaskStatusText\(task\) \{[\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(status, /teamTaskReleaseReady\(task\)/)
+  assert.doesNotMatch(status, /task\.completionRequest\s*\?\s*['"] — ready for coordinator release/)
+})
+
 test('stale Pi finals cannot clear a newer provider turn', () => {
   const piFinal = /async function finalizePiTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   const firstGuard = piFinal.indexOf('if (!stillCurrent())')
