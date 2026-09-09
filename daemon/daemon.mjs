@@ -81,7 +81,8 @@ import {
 } from './team-message-delivery.mjs'
 import {
   activateTeamProviderTurn, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
-  providerTurnForCompletion, retireTeamProviderTurn, stageTeamProviderTurn,
+  pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
+  retireTeamProviderTurn, stageTeamProviderTurn,
 } from './team-provider-turn.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
@@ -90,7 +91,7 @@ import {
   stageTeamFiles as stagePrivateTeamFiles, teamSourceFileMetadata,
 } from './team-files.mjs'
 import {
-  TeamError, activeTeamForChannel, addTeamWorker, appendCoordinatorTaskMessage, appendTeamTaskCheckpoint,
+  LEGACY_COMPLETION_POLICY, TeamError, activeTeamForChannel, addTeamWorker, appendCoordinatorTaskMessage, appendTeamTaskCheckpoint,
   appendTeamTaskReply,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
@@ -103,7 +104,7 @@ import {
   resolveTeamPeer, setTeamDispatchMode,
   setTeamWorkerFiles, taskMarker, tasksForChannel, tasksPageForChannel, teamById, teamContext,
   teamDispatchMode, teamMutationForRequest, teamTask, teamTaskDeliverySettled, teamTaskForRequest,
-  teamTaskProviderWorkGeneration,
+  teamTaskCompletionPolicy, teamTaskProviderWorkGeneration,
   withoutDelegatedTaskPrompt,
 } from './teams.mjs'
 import {
@@ -1099,15 +1100,36 @@ function currentTeamTaskProviderTurn(session, body = null) {
   return Object.freeze({ taskId, providerWorkGeneration: teamTaskProviderWorkGeneration(task) })
 }
 
+function teamTaskTurnOwnsCurrentLifecycle(session, expected) {
+  const taskId = session?.teamActiveTaskId || null
+  if (!taskId) return expected == null
+  if (!expected || expected.taskId !== taskId) return false
+  const task = state.teamTasks?.[taskId]
+  return Boolean(task && task.targetSessionId === session.id &&
+    task.targetChannel === session.channel &&
+    teamTaskProviderWorkGeneration(task) === expected.providerWorkGeneration)
+}
+
 // Mirror a turn's final assistant text and clear its live status. Called by the
 // Stop hook and, as a fallback, by the poller when a turn ends without a Stop.
 // Idempotent: readNewAssistantText advances the read offset, so a second caller
 // (whichever of Stop / poller runs later) reads nothing and posts nothing.
 async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = currentTeamTaskProviderTurn(session) } = {}) {
+  if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
+    log('ignored stale Claude final before lifecycle mutation', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
+    return false
+  }
+  if (session.transcript) await waitTranscriptSettle(session.transcript)
+  // Transcript settling yields. A coordinator follow-up may have advanced the
+  // task generation meanwhile; reject that older final before stopping the new
+  // poller or consuming any of its transcript bytes.
+  if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
+    log('ignored stale Claude final after transcript settle', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
+    return false
+  }
   stopPoller(session)
   clearStatusDeferred(session)
   void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
-  if (session.transcript) await waitTranscriptSettle(session.transcript)
   const rawText = readNewAssistantText(session)
   const delivery = prepareClaudeTerminalDelivery(
     rawText || terminalFailure?.text || '',
@@ -1120,8 +1142,15 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
   const taskFailure = terminalFailure
     ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
     : delivery.failure?.text || null
-  await finishTeamTaskForSession(session, delivery.text, taskFailure, { expectedTeamTaskTurn: teamTaskTurn })
-  clearTeamInputReservation(session)
+  const finalizedTask = await finishTeamTaskForSession(session, delivery.text, taskFailure, {
+    expectedTeamTaskTurn: teamTaskTurn,
+  })
+  // Slack delivery above can yield while a coordinator follow-up enters the
+  // same Claude process. Never clear that newer input reservation.
+  if (!teamTaskTurn || (finalizedTask && (!session.teamActiveTaskId ||
+      teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)))) {
+    clearTeamInputReservation(session)
+  }
   saveState(state)
   // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
   // poller is watching — check once, shortly after, and hand off to a poller.
@@ -1132,6 +1161,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
       if (form) { await relayQuestionForm(session, form); startPoller(session) }
     } catch (e) { log('post-stop form check failed', String(e?.message || e)) }
   }, 5000)
+  return true
 }
 
 // Codex exposes stable final text on Stop and on the supported App Server's
@@ -2011,10 +2041,14 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       return
     }
     const teamTaskId = taskMarker(p)
+    const promptTeamTurn = providerPromptTurnMarker(p)
     // Snapshot the exact task generation represented by this native prompt
     // before any Slack audit await can let a coordinator follow-up advance the
     // mutable task journal underneath this hook.
-    const submittedTeamTaskTurn = currentTeamTaskProviderTurn(session, body)
+    const submittedTeamTaskTurn = (promptTeamTurn
+      ? pendingTeamProviderTurn(session, promptTeamTurn)
+      : null) ||
+      currentTeamTaskProviderTurn(session, body)
     if (p && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
     const ch = session.channel || (await ensureChannel(session))
     const injected = consumeInjected(sid, p)
@@ -2037,12 +2071,12 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       saveStateNow(state)
     }
     const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
-    const acknowledgedTurn = task && task.targetSessionId === session.id && task.targetChannel === session.channel
-      ? teamTaskId === task.id
-        ? submittedTeamTaskTurn
-        : injected && submittedTeamTaskTurn?.taskId === task.id
-          ? submittedTeamTaskTurn
-          : null
+    const acknowledgesTask = teamTaskId === task?.id ||
+      (injected && promptTeamTurn?.taskId === task?.id)
+    const acknowledgedTurn = task && task.targetSessionId === session.id &&
+      task.targetChannel === session.channel && acknowledgesTask &&
+      submittedTeamTaskTurn?.taskId === task.id
+      ? submittedTeamTaskTurn
       : null
     if (acknowledgedTurn) {
       const activeTurn = activateTeamProviderTurn(session, {
@@ -4337,7 +4371,8 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
     turn: providerTurn, providerTurnId: steeredNativeTurnId,
   })
   refreshTeamTaskPoller(target, activeTurn)
-  if (expected.provider === 'codex') ensureCodexTurnStarted(target)
+  if (expected.provider === 'claude') startPoller(target)
+  else if (expected.provider === 'codex') ensureCodexTurnStarted(target)
 }
 
 async function performCoordinatorTaskMessageDelivery(task, message) {
@@ -4887,10 +4922,15 @@ async function finishTeamTaskForSession(session, result, error = null, { warning
     if (error) {
       failTeamTask(state, task.id, error)
     } else {
+      const reportWarning = warning || (
+        !finalText && teamTaskCompletionPolicy(task) !== LEGACY_COMPLETION_POLICY
+          ? 'The provider turn ended without a stable final response.'
+          : null
+      )
       const reported = reportTeamTaskTurn(state, task.id, {
         targetSessionId: session.id,
         result: finalText,
-        warning: warning || (!finalText ? 'The provider turn ended without a stable final response.' : null),
+        warning: reportWarning,
         providerWorkGeneration: expectedTeamTaskTurn?.providerWorkGeneration ?? null,
       })
       if (reported.stale) return false
@@ -4907,7 +4947,7 @@ async function finishTeamTaskForSession(session, result, error = null, { warning
   }
   if (isTerminalTeamTask(task)) {
     delete session.teamActiveTaskId
-    noteTeamAvailability(session, error ? 'team_task_failed' : 'legacy_team_task_completed')
+    noteTeamAvailability(session, task.status === 'failed' ? 'team_task_failed' : 'legacy_team_task_completed')
   } else {
     noteTeamAvailability(session, 'provider_turn_reported_awaiting_release')
   }
@@ -4920,7 +4960,9 @@ async function finishTeamTaskForSession(session, result, error = null, { warning
     if (report) await ensureTeamReportDelivery(task, report).catch(failure =>
       log('team turn report delivery deferred', task.id, String(failure?.message || failure)))
   }
-  teamTurnProof.delete(session.id)
+  if (!session.teamActiveTaskId || teamTaskTurnOwnsCurrentLifecycle(session, expectedTeamTaskTurn)) {
+    teamTurnProof.delete(session.id)
+  }
   setImmediate(() => reconcileTeamTasks().catch(failure => log('team follow-up dispatch failed', String(failure))))
   return true
 }

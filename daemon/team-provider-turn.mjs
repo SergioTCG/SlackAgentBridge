@@ -65,6 +65,30 @@ export function discardPendingTeamProviderTurn(session, expected = null) {
   return true
 }
 
+export function pendingTeamProviderTurn(session, expected = null) {
+  const pending = normalizedTurn(session?.teamProviderTurnPending,
+    session?.teamProviderTurnPending?.stagedAt)
+  if (!pending) return null
+  if (expected?.taskId && pending.taskId !== expected.taskId) return null
+  if (expected?.providerWorkGeneration != null &&
+      pending.providerWorkGeneration !== Number(expected.providerWorkGeneration)) return null
+  return publicTurn(pending)
+}
+
+// Both delegated-task envelopes and coordinator follow-ups carry a private,
+// provider-visible task identity. A prompt hook can use this marker to promote
+// a staged generation after a tmux write whose return status was uncertain.
+export function providerPromptTurnMarker(prompt) {
+  const tag = /<sab-team-(?:task|message)\b([^>]*)>/.exec(String(prompt || ''))
+  if (!tag) return null
+  const taskId = /\b(?:id|task)="(task_[A-Za-z0-9_-]+)"/.exec(tag[1])?.[1]
+  if (!taskId) return null
+  const rawGeneration = /\bgeneration="([1-9][0-9]*)"/.exec(tag[1])?.[1]
+  const providerWorkGeneration = rawGeneration ? Number(rawGeneration) : null
+  if (providerWorkGeneration !== null && !Number.isSafeInteger(providerWorkGeneration)) return null
+  return { taskId, providerWorkGeneration }
+}
+
 export function activateTeamProviderTurn(session, {
   turn = null,
   providerTurnId = null,

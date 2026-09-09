@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   activateTeamProviderTurn, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
-  providerTurnForCompletion, retireTeamProviderTurn, stageTeamProviderTurn,
+  pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
+  retireTeamProviderTurn, stageTeamProviderTurn,
 } from '../daemon/team-provider-turn.mjs'
 
 test('provider finals resolve the immutable task generation of their native turn', () => {
@@ -52,6 +53,37 @@ test('hook acknowledgement promotes a staged generation exactly once and survive
     taskId: 'task_one', providerWorkGeneration: 4,
   })
   assert.equal(recovered.teamProviderTurnHistory?.length || 0, 0)
+})
+
+test('prompt acknowledgement can recover the exact pending turn after an uncertain provider write', () => {
+  const session = {}
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 3 }, { now: 3000 })
+
+  const initial = providerPromptTurnMarker(
+    '<sab-team-task id="task_one" team="team_one" source="coordinator">',
+  )
+  assert.deepEqual(initial, { taskId: 'task_one', providerWorkGeneration: null })
+  assert.deepEqual(pendingTeamProviderTurn(session, initial), {
+    taskId: 'task_one', providerWorkGeneration: 3,
+  })
+
+  const followUp = providerPromptTurnMarker(
+    '<sab-team-message task="task_one" generation="3" source="coordinator">',
+  )
+  assert.deepEqual(followUp, { taskId: 'task_one', providerWorkGeneration: 3 })
+  assert.equal(pendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }), null)
+
+  activateTeamProviderTurn(session, {
+    turn: pendingTeamProviderTurn(session, followUp),
+    providerTurnId: 'turn-three',
+    startedAt: 3100,
+  })
+  assert.equal(session.teamProviderTurnPending, undefined)
+  assert.deepEqual(providerTurnForCompletion(session, { providerTurnId: 'turn-three' }), {
+    taskId: 'task_one', providerWorkGeneration: 3,
+  })
 })
 
 test('steered native turns resolve the newest generation without delayed-hook rollback', () => {

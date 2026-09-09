@@ -277,8 +277,14 @@ test('provider turn reporting preserves task and process ownership until explici
     promptHook.indexOf('await updateTeamTaskAudit(task)'),
   'prompt generation must be captured before an audit await can admit a follow-up')
   assert.match(promptHook, /acknowledgedTurn[\s\S]*submittedTeamTaskTurn/)
+  assert.match(promptHook, /providerPromptTurnMarker\(p\)[\s\S]*pendingTeamProviderTurn/)
   assert.match(claudeHook, /UserPromptSubmit[\s\S]*observed_at[\s\S]*--argjson observed_at/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
+  const claudeFinal = /async function finalizeTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(claudeFinal,
+    /teamTaskTurnOwnsCurrentLifecycle[\s\S]*waitTranscriptSettle[\s\S]*teamTaskTurnOwnsCurrentLifecycle[\s\S]*stopPoller/)
+  assert.ok(claudeFinal.indexOf('teamTaskTurnOwnsCurrentLifecycle') < claudeFinal.indexOf('readNewAssistantText'),
+    'a stale Claude final must be rejected before transcript consumption')
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
   assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('session.teamActiveTaskId !== task.id'),

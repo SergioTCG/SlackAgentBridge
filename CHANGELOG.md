@@ -64,6 +64,10 @@ Notable changes to this project. Format based on
   pollers advance with coordinator follow-ups, shared native turn IDs resolve
   to the generation current at hook observation time, and delayed prompt hooks
   cannot roll a task back to older work.
+- Provider prompt acknowledgements now promote an exact pending generation
+  after an uncertain tmux result. Delayed Claude finals are rejected before
+  stopping a newer poller or consuming newer transcript output, and legacy
+  empty finals retain their historical failure semantics.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

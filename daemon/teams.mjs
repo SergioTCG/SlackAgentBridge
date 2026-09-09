@@ -23,7 +23,7 @@ const WORKER_BOUND_TASK_STATES = new Set(['dispatching', 'running', 'awaiting_re
 const TERMINAL_TASK_STATES = new Set(['completed', 'completed_with_warning', 'failed', 'cancelled'])
 const TASK_CONTROL_MAX = 32
 const DEFAULT_COMPLETION_POLICY = 'coordinator-release'
-const LEGACY_COMPLETION_POLICY = 'provider-final'
+export const LEGACY_COMPLETION_POLICY = 'provider-final'
 
 export class TeamError extends Error {
   constructor(code, message, status = 400) {
@@ -665,9 +665,17 @@ export function reportTeamTaskTurn(state, taskId, {
 } = {}) {
   const task = teamTask(state, taskId)
   if (teamTaskCompletionPolicy(task) === LEGACY_COMPLETION_POLICY) {
+    if (!['dispatching', 'running'].includes(task.status)) {
+      throw new TeamError('task_not_running', 'Only the assigned active task may complete.', 409)
+    }
+    if (task.targetSessionId !== targetSessionId) {
+      throw new TeamError('task_target_changed', 'The task belongs to another native session.', 409)
+    }
     const completed = warning
       ? completeTeamTaskWithWarning(state, taskId, { targetSessionId, result, warning, now })
-      : completeTeamTask(state, taskId, { targetSessionId, result, now })
+      : String(result || '').trim()
+        ? completeTeamTask(state, taskId, { targetSessionId, result, now })
+        : failTeamTask(state, taskId, 'The worker turn ended without a stable final response.', { now })
     return { task: completed, report: null, created: true, stale: false }
   }
   if (task.targetSessionId !== targetSessionId) {

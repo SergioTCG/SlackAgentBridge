@@ -850,6 +850,41 @@ test('delegated prompts carry immutable provenance and a task marker', () => {
   ], 'task_prompt'), ['ordinary queued prompt'])
 })
 
+test('legacy empty provider finals remain failures while explicit hookless proof remains a warning', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker', channel: 'C-WORKER-1' }
+  const workerTwo = { id: 'worker-two', channel: 'C-WORKER-2' }
+  state.sessions[worker.id] = worker
+  state.sessions[workerTwo.id] = workerTwo
+  state.channels[worker.channel] = worker.id
+  state.channels[workerTwo.channel] = workerTwo.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Legacy work.', requestId: 'legacy-empty', id: 'task_legacy_empty',
+  })
+  delete task.completionPolicy
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'claude', now: 2000 })
+  markTeamTaskRunning(state, task.id, { now: 2100 })
+
+  const empty = reportTeamTaskTurn(state, task.id, {
+    targetSessionId: 'worker', result: '', now: 2200,
+  })
+  assert.equal(empty.task.status, 'failed')
+  assert.match(empty.task.error, /without a stable final response/)
+
+  const { task: warningTask } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-2', text: 'Legacy hookless work.', requestId: 'legacy-warning', id: 'task_legacy_warning',
+  })
+  delete warningTask.completionPolicy
+  claimTeamTaskForSession(state, warningTask.id, workerTwo, { targetProvider: 'codex', now: 2300 })
+  markTeamTaskRunning(state, warningTask.id, { now: 2400 })
+  const warning = reportTeamTaskTurn(state, warningTask.id, {
+    targetSessionId: 'worker-two', result: '', warning: 'Continuously observed idle.', now: 2500,
+  })
+  assert.equal(warning.task.status, 'completed_with_warning')
+})
+
 test('linked continuations resolve an immutable worker channel after its alias changes', () => {
   const { state, team } = fixture()
   const { task } = createTeamTask(state, {
