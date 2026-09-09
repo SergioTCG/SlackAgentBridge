@@ -697,6 +697,49 @@ test('a completion declaration requires a later exact provider report', () => {
   assert.equal(task.result, 'Implemented and verified.')
 })
 
+test('a delayed stale provider final cannot certify a later completion declaration', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'claude',
+    target: 'parallel-1', text: 'Implement and verify.', requestId: 'delayed-final-task',
+    id: 'task_delayed_final', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'claude', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+
+  requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel,
+    summary: 'The declared work is complete.', requestId: 'delayed-final-complete',
+    expectedProviderWorkGeneration: task.providerWorkGeneration, now: 6000,
+  })
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id,
+    result: 'This provider final was emitted before the completion declaration.',
+    reportKey: 'claude:stale-delayed-final',
+    observedAt: 5000,
+    now: 7000,
+  })
+
+  assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, false)
+  assert.throws(() => releaseTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'delayed-final-release-too-early', now: 7100,
+  }), error => error.code === 'stale_task_report')
+
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id,
+    result: 'This provider final was emitted after the completion declaration.',
+    reportKey: 'claude:fresh-final',
+    observedAt: 8000,
+    now: 9000,
+  })
+  const visible = publicTeamTask(task, 'C-MASTER')
+  assert.equal(visible.releaseReady, true)
+  assert.equal(visible.reports.at(-1).observedAt, new Date(8000).toISOString())
+})
+
 test('the bounded reply journal reserves capacity to clear the final gate', () => {
   const { state, team } = fixture()
   const { task } = createTeamTask(state, {

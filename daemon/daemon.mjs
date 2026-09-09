@@ -950,7 +950,7 @@ function startCodexPoller(session) {
         await finishTeamTaskWithWarningForSession(session, task.status === 'running'
           ? 'Codex returned to idle without its lifecycle completion hook. The accepted worker turn completed, but SAB could not authenticate a stable final response.'
           : 'Codex returned to idle after the injected worker turn, but omitted its acknowledgement and completion hooks. SAB recorded a warning-bearing turn report and did not replay the work; the task remains reserved until explicit release.',
-        observation.teamTaskTurn, `codex-idle:${p.turnStartedAt}`)
+        observation.teamTaskTurn, `codex-idle:${p.turnStartedAt}`, Date.now())
         clearTeamInputReservation(session)
         saveStateNow(state)
         await clearStatus(session)
@@ -1256,7 +1256,9 @@ async function flushDeferredTeamProviderFinal(session, expected = null) {
     } else if (deferred.provider === 'pi') {
       finalized = await finalizePiTurn(session, body, taskTurn, { deferredFinal: deferred })
     } else {
-      finalized = await finalizeTurn(session, { teamTaskTurn: taskTurn, deferredFinal: deferred })
+      finalized = await finalizeTurn(session, {
+        teamTaskTurn: taskTurn, deferredFinal: deferred, observedAt: deferred.observedAt,
+      })
     }
     if (finalized && !deferredTeamProviderFinal(session, deferred)) {
       log('flushed deferred provider final', session.id.slice(0, 8), deferred.taskId,
@@ -1308,7 +1310,10 @@ function teamTaskTurnOwnsCurrentLifecycle(session, expected) {
 // Stop hook and, as a fallback, by the poller when a turn ends without a Stop.
 // Idempotent: readNewAssistantText advances the read offset, so a second caller
 // (whichever of Stop / poller runs later) reads nothing and posts nothing.
-async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = currentTeamTaskProviderTurn(session), deferredFinal = null } = {}) {
+async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = currentTeamTaskProviderTurn(session), deferredFinal = null, observedAt = null } = {}) {
+  // Capture provider-event order before transcript settling or Slack delivery
+  // can delay journal insertion beyond a later completion declaration.
+  const reportObservedAt = Number(observedAt || deferredFinal?.observedAt) || Date.now()
   const deliveryKey = teamTaskTurn
     ? `${session.id}\u0000${teamTaskTurn.taskId}\u0000${teamTaskTurn.providerWorkGeneration}`
     : `${session.id}\u0000${session.transcript || ''}\u0000${Number(session.offset) || 0}`
@@ -1374,7 +1379,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
         ])).digest('base64url')}`
       : null
     const finalizedTask = await finishTeamTaskForSession(session, finalText, taskFailure, {
-      expectedTeamTaskTurn: teamTaskTurn, reportKey,
+      expectedTeamTaskTurn: teamTaskTurn, reportKey, observedAt: reportObservedAt,
     })
     // Slack delivery above can yield while a coordinator follow-up enters the
     // same Claude process. Never clear that newer input reservation.
@@ -1420,6 +1425,7 @@ async function finalizeCodexTurn(session, body, teamTaskTurn = null, { deferredF
   if (!teamTaskTurn && deferFinalAcrossPendingTeamSubmission(session, 'codex', body)) return true
   teamTaskTurn ||= currentTeamTaskProviderTurn(session, body)
   deferredFinal ||= matchingDeferredTeamProviderFinal(session, 'codex', teamTaskTurn, body)
+  const reportObservedAt = Number(body.observed_at || deferredFinal?.observedAt) || Date.now()
   const turnId = body.turn_id || null
   const deliveryKey = turnId ? `${session.id}\u0000${turnId}` : null
   if (deliveryKey && codexFinalDeliveries.has(deliveryKey)) return codexFinalDeliveries.get(deliveryKey)
@@ -1478,6 +1484,7 @@ async function finalizeCodexTurn(session, body, teamTaskTurn = null, { deferredF
         codexFinalLifecycleStillCurrent(session, expected)) {
       finalizedTask = await finishTeamTaskForSession(session, text, null, {
         expectedTeamTaskTurn: teamTaskTurn,
+        observedAt: reportObservedAt,
         reportKey: turnId
           ? `codex:${turnId}`
           : `codex-start:${expected.turnStartedAt || expected.observedAt}`,
@@ -1529,6 +1536,7 @@ async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProvi
   }
   const expectedStartedAt = session.piTurnStartedAt || null
   const observedAt = Number(body.observed_at) || null
+  const reportObservedAt = observedAt || Date.now()
   const stillCurrent = ({ afterStop = false } = {}) =>
     teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn) &&
     (!expectedStartedAt || !observedAt || observedAt >= expectedStartedAt) &&
@@ -1565,6 +1573,7 @@ async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProvi
   }
   const finalizedTask = await finishTeamTaskForSession(session, text, null, {
     expectedTeamTaskTurn: teamTaskTurn,
+    observedAt: reportObservedAt,
     reportKey: turnId ? `pi:${turnId}` : `pi-start:${expectedStartedAt || observedAt}`,
   })
   if (session.piTurnStartedAt || (teamTaskTurn && !finalizedTask)) {
@@ -2598,6 +2607,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     else await finalizeTurn(session, {
       teamTaskTurn,
       deferredFinal: matchingDeferredTeamProviderFinal(session, 'claude', teamTaskTurn, body),
+      observedAt: Number(body.observed_at) || Date.now(),
     })
     return
   }
@@ -5464,6 +5474,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
   warning = null,
   expectedTeamTaskTurn = currentTeamTaskProviderTurn(session),
   reportKey = null,
+  observedAt = Date.now(),
 } = {}) {
   // `null` is an authenticated non-match, not permission to borrow the latest
   // mutable task binding. Legacy untracked tasks are synthesized by
@@ -5507,6 +5518,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
         warning: reportWarning,
         providerWorkGeneration: expectedTeamTaskTurn?.providerWorkGeneration ?? null,
         reportKey,
+        observedAt,
       })
       if (reported.stale) return false
       if (!reported.created) {
@@ -5543,14 +5555,15 @@ async function finishTeamTaskForSession(session, result, error = null, {
 }
 
 async function finishTeamTaskWithWarningForSession(session, warning,
-  expectedTeamTaskTurn = currentTeamTaskProviderTurn(session), reportKey = null) {
+  expectedTeamTaskTurn = currentTeamTaskProviderTurn(session), reportKey = null,
+  observedAt = Date.now()) {
   const taskId = session?.teamActiveTaskId
   if (!taskId) { clearTeamTurn(session); saveStateNow(state); return false }
   const task = state.teamTasks?.[taskId]
   const latestReply = task?.replies?.at(-1)?.text || ''
   return finishTeamTaskForSession(session,
     latestReply ? `Last authenticated worker update:\n${latestReply}` : '', null,
-    { warning, expectedTeamTaskTurn, reportKey })
+    { warning, expectedTeamTaskTurn, reportKey, observedAt })
 }
 
 async function releaseIdleReadoptedTeamTask(session, label) {
@@ -8607,15 +8620,19 @@ setInterval(async () => {
     }
     saveState(state)
   }
+  // Restore exact worker authority before enabling any external ingress. A
+  // persisted task remains authoritative even when its redundant session
+  // projection was lost in the preceding crash.
+  repairDurableTeamBindings()
   await startConfiguredNodeListener()
   await socketCoordinator.start()
   log('socket mode connected — bridge ready')
   await recoverProviderSwitches()
   automationLifecycle.recover()
   startAutomationReconciler()
-  // Restore redundant exact task/session projections before any provider or
-  // deferred-final recovery interprets their absence as owner work or loss of
-  // authority. Conflicts remain untouched and fail closed.
+  // Switch recovery may have changed an authoritative leg after the pre-ingress
+  // repair. Reconcile once more before provider/deferred-final recovery;
+  // conflicts remain untouched and fail closed.
   repairDurableTeamBindings()
   await recoverHooklessCodexResumes()
   await flushSettledDeferredTeamProviderFinals()

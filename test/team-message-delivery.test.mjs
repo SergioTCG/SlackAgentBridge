@@ -58,16 +58,22 @@ test('delayed worker reports require a post-declaration report before release ad
   assert.match(teamReportLifecycleNotice({
     status: 'awaiting_release', completionRequest: {
       requestId: 'ready', workGeneration: 1, lifecycleVersion: 5,
+      requestedAt: new Date(5000).toISOString(),
     },
     pendingGates: [], workGeneration: 1, providerWorkGeneration: 1,
-    reports: [{ workGeneration: 1, lifecycleVersion: 6 }], messages: [],
+    reports: [{
+      workGeneration: 1, lifecycleVersion: 6, observedAt: new Date(6000).toISOString(),
+    }], messages: [],
   }), /may release/)
   assert.doesNotMatch(teamReportLifecycleNotice({
     status: 'awaiting_release', completionRequest: {
       requestId: 'ready', workGeneration: 1, lifecycleVersion: 5,
+      requestedAt: new Date(5000).toISOString(),
     },
     pendingGates: [], workGeneration: 1, providerWorkGeneration: 1,
-    reports: [{ workGeneration: 1, lifecycleVersion: 4 }], messages: [],
+    reports: [{
+      workGeneration: 1, lifecycleVersion: 7, observedAt: new Date(4000).toISOString(),
+    }], messages: [],
   }), /may release/)
   assert.match(teamReportLifecycleNotice({
     status: 'awaiting_release', completionRequest: null, pendingGates: [],

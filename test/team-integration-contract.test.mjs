@@ -13,6 +13,8 @@ test('all provider-stable final paths report the exact delegated team task', () 
   for (const fn of ['finalizeTurn', 'finalizeCodexTurn', 'finalizePiTurn']) {
     const body = new RegExp(`async function ${fn}\\([\\s\\S]*?\\n}`, 'm').exec(daemon)?.[0] || ''
     assert.match(body, /finishTeamTaskForSession/, `${fn} lost team final correlation`)
+    assert.match(body, /finishTeamTaskForSession\(session,[\s\S]*observedAt:/,
+      `${fn} lost provider-event ordering at task report insertion`)
   }
   assert.match(daemon, /await failTeamTaskForSession\(session, 'The worker session ended/)
   assert.match(daemon, /session\.teamActiveTaskId.*delegated team task in progress|teamActiveTaskId/s)
@@ -540,8 +542,11 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
 test('restart flushes settled deferred finals before idle re-adoption can fail their tasks', () => {
   const boot = daemon.slice(daemon.lastIndexOf(";(async () => {"))
   const bindingRepair = boot.indexOf('repairDurableTeamBindings(')
+  const socketStart = boot.indexOf('await socketCoordinator.start()')
   const flush = boot.indexOf('await flushSettledDeferredTeamProviderFinals()')
   const readopt = boot.indexOf('await readoptStatus()')
+  assert.ok(socketStart >= 0 && bindingRepair >= 0 && bindingRepair < socketStart,
+    'durable task authority must be restored before Slack ingress starts')
   assert.ok(bindingRepair >= 0 && flush > bindingRepair && readopt > flush,
     'exact task bindings must be repaired before deferred finals and boot-time idle handling')
 

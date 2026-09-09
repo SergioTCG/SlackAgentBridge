@@ -85,14 +85,22 @@ function unresolvedCoordinatorMessages(task) {
 
 function reportCoversCompletion(task, report, requiredGeneration = teamTaskWorkGeneration(task)) {
   if (!report || Number(report.workGeneration) !== requiredGeneration || !task?.completionRequest) return false
-  const reportVersion = Number(report.lifecycleVersion)
-  const requestVersion = Number(task.completionRequest.lifecycleVersion)
-  if (Number.isSafeInteger(reportVersion) && Number.isSafeInteger(requestVersion)) {
-    return reportVersion > requestVersion
-  }
-  const reportedAt = Date.parse(report.createdAt || 0)
-  const requestedAt = Date.parse(task.completionRequest.requestedAt || 0)
-  return Number.isFinite(reportedAt) && Number.isFinite(requestedAt) && reportedAt >= requestedAt
+  // Journal order is not provider-event order: Slack backoff or a delayed Stop
+  // hook can cause an older final to be inserted after the worker declares
+  // completion. Only the timestamp captured at the provider boundary may prove
+  // that the report covers that declaration. Pre-field records fail closed.
+  const observedAt = Date.parse(report.observedAt || '')
+  const requestedAt = Date.parse(task.completionRequest.requestedAt || '')
+  return Number.isFinite(observedAt) && Number.isFinite(requestedAt) && observedAt >= requestedAt
+}
+
+function providerObservationTime(observedAt, fallback) {
+  const numeric = Number(observedAt)
+  if (Number.isSafeInteger(numeric) && numeric > 0) return numeric
+  const parsed = typeof observedAt === 'string' ? Date.parse(observedAt) : Number.NaN
+  if (Number.isFinite(parsed) && parsed > 0) return parsed
+  const fallbackNumeric = Number(fallback)
+  return Number.isSafeInteger(fallbackNumeric) && fallbackNumeric > 0 ? fallbackNumeric : Date.now()
 }
 
 export function teamTaskReleaseReady(task) {
@@ -703,6 +711,7 @@ export function reportTeamTaskTurn(state, taskId, {
   providerWorkGeneration = null,
   reportKey = null,
   now = Date.now(),
+  observedAt = now,
 } = {}) {
   const task = teamTask(state, taskId)
   if (teamTaskCompletionPolicy(task) === LEGACY_COMPLETION_POLICY) {
@@ -740,9 +749,10 @@ export function reportTeamTaskTurn(state, taskId, {
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_running', 'Only the assigned active task may report a completed provider turn.', 409)
   }
+  const providerObservedAt = providerObservationTime(observedAt, now)
   task.result = boundedResult(result)
   task.warning = warning ? String(warning).slice(0, 2000) : null
-  task.turnCompletedAt = nowIso(now)
+  task.turnCompletedAt = nowIso(providerObservedAt)
   task.reports ||= []
   while (task.reports.length >= TEAM_MAX_REPORTS) {
     const delivered = task.reports.findIndex(item => item.deliveryStatus === 'delivered')
@@ -767,6 +777,7 @@ export function reportTeamTaskTurn(state, taskId, {
       slackTs: null,
       supersedesReportId: displaced.id,
       coalescedCount: Number(displaced.coalescedCount || 1) + 1,
+      observedAt: nowIso(providerObservedAt),
       createdAt: nowIso(now),
     }
     task.reports[task.reports.length - 1] = report
@@ -780,6 +791,7 @@ export function reportTeamTaskTurn(state, taskId, {
       deliveryStatus: 'pending',
       deliveryError: null,
       slackTs: null,
+      observedAt: nowIso(providerObservedAt),
       createdAt: nowIso(now),
     }
     task.reports.push(report)
@@ -1252,6 +1264,7 @@ export function publicTeamTask(task, callerChannel) {
       deliveryStatus: report.deliveryStatus,
       deliveryError: report.deliveryError,
       workGeneration: Number(report.workGeneration) || null,
+      observedAt: report.observedAt || null,
       createdAt: report.createdAt,
       lifecycleVersion: report.lifecycleVersion,
     })),

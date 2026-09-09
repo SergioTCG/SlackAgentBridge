@@ -347,7 +347,9 @@ Slack when its scope or progress is no longer appropriate.
   blocks a new completion declaration and release. Release additionally needs
   a provider report produced after that exact completion declaration. This
   prevents a provider final from implicitly certifying tests, CI, runtime
-  proof, review, or merge state that SAB cannot independently observe.
+  proof, review, or merge state that SAB cannot independently observe. SAB
+  compares the timestamp captured at the provider event boundary; delayed hook
+  processing and Slack backoff cannot turn an earlier final into later proof.
 - Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
   replies create only durable event identifiers; the coordinator rereads the
   authenticated team inbox before acting. An exhausted coordinator turn can

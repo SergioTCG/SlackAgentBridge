@@ -47,7 +47,8 @@ Notable changes to this project. Format based on
   coordinator release from generating spurious worker continuation authority.
 - Restart reconciliation repairs only exact redundant session/task bindings,
   preserves reported tasks and their worker reservations across daemon or
-  provider downtime, and refuses conflicting bindings instead of guessing.
+  provider downtime, refuses conflicting bindings instead of guessing, and
+  restores those bindings before Slack ingress can accept owner input.
 - Every team mutation returns its journaled request receipt; generated CLI
   request IDs and safe retry/status guidance are retained across timeouts.
 - Reported workers can be resumed by an owner without injecting unrelated task
@@ -153,6 +154,9 @@ Notable changes to this project. Format based on
   staged generation, streamed tool output persists its transcript-generation
   boundary, and boot repairs exact task bindings before recovering deferred
   finals or provider turns.
+- Release readiness now uses provider-event observation order rather than
+  journal insertion order, so a delayed older final cannot certify a later
+  completion declaration.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

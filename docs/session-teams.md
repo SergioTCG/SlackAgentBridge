@@ -164,6 +164,8 @@ exact generation shown in its current SAB task or follow-up prompt, then
 finishes its provider turn. A stale or omitted generation fails closed. The
 resulting later report is delivered to the
 coordinator, but the exact worker session remains reserved until `release`.
+SAB orders the declaration and report by the observation timestamp captured at
+the provider boundary, so an older final processed late cannot certify release.
 `sab team wait` returns as soon as a task becomes `awaiting_release`, because
 that state requires action from the current coordinator turn. The coordinator
 should inspect `releaseReady`, reports, and pending gates, then either send a

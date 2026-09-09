@@ -448,7 +448,9 @@ Task delivery is journal-first:
    authorized coordinator may release the task. A coordinator message invalidates stale
    readiness and fences release from journal acceptance through exact provider
    delivery. Release requires a readiness declaration and a subsequent report
-   from the latest delivered work generation. Exact provider-turn keys coalesce
+   from the latest delivered work generation. "Subsequent" is proved by the
+   provider-boundary observation timestamp, not by when delayed hook or Slack
+   processing happened to append the report journal. Exact provider-turn keys coalesce
    duplicate lifecycle delivery without discarding later turns in that same
    generation; a terminal task can receive work only as a new
    linked task.
