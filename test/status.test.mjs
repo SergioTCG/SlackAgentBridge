@@ -10,7 +10,7 @@ test('automation prompt echoes suppress mirroring without bypassing turn trackin
   assert.match(block, /const automationEcho = automationLifecycle\.consumeInitialPromptEcho/)
   assert.doesNotMatch(block, /consumeInitialPromptEcho\([^\n]+\)\) return/)
   assert.match(block, /if \(provider === 'claude'\) startPoller\(session\)/)
-  assert.match(block, /else if \(provider === 'codex' && !acknowledgedTurn\) beginCodexTurn\(session\)/)
+  assert.match(block, /else if \(provider === 'codex' && !acknowledgedTurn &&[\s\S]*beginCodexTurn\(session, body\.observed_at \|\| Date\.now\(\)\)/)
 })
 
 function fakeSlack() {

@@ -398,14 +398,14 @@ test('authenticated coordinator-message acknowledgement wins a late uncertain tr
   )
   assert.match(promptHook,
     /acknowledgeCoordinatorTaskMessageDelivery\(state, task\.id,[\s\S]*providerWorkGeneration: acknowledgedTurn\.providerWorkGeneration/)
-  const acknowledgedCodexStart = promptHook.indexOf("if (provider === 'codex') beginCodexTurn(session)")
+  const acknowledgedCodexStart = promptHook.indexOf("if (provider === 'codex' && acknowledgedTurnStillCurrent")
   const acknowledgedPersist = promptHook.indexOf('saveStateNow(state)', acknowledgedCodexStart)
   const acknowledgementAudit = promptHook.indexOf('await updateTeamTaskAudit(task)')
   assert.ok(acknowledgedCodexStart >= 0 && acknowledgedPersist > acknowledgedCodexStart &&
     acknowledgementAudit > acknowledgedPersist,
   'Codex lifecycle tracking must begin and persist before acknowledgement audit I/O can admit Stop')
   assert.match(promptHook,
-    /else if \(provider === 'codex' && !acknowledgedTurn\) beginCodexTurn\(session\)/,
+    /else if \(provider === 'codex' && !acknowledgedTurn &&[\s\S]*!codexFinalAlreadyClaimed\(session, body\.turn_id\)/,
   'the post-audit path must not recreate a Codex turn already tracked before the audit')
 
   const delivery = daemon.slice(
@@ -434,6 +434,35 @@ test('authenticated coordinator-message acknowledgement wins a late uncertain tr
   const retryReturn = release.indexOf('return { task: publicTeamTask', acceptedRetry)
   assert.ok(acceptedRetry >= 0 && retryPersist > acceptedRetry && retryReturn > retryPersist,
   'an accepted release retry must persist the already-mutated journal before confirming success')
+})
+
+test('fast provider finals retain pre-submit ordering and delayed Codex hooks cannot restart lifecycle', () => {
+  const injection = daemon.slice(
+    daemon.indexOf('async function injectText('),
+    daemon.indexOf('const RETIRED_CMDS', daemon.indexOf('async function injectText(')),
+  )
+  assert.match(injection,
+    /const expectedTeamTurnStartedAt = Date\.now\(\)[\s\S]*stageTeamProviderTurn\(session, expectedTeamTurn, \{ now: expectedTeamTurnStartedAt \}\)/)
+  assert.match(injection,
+    /activatePendingTeamProviderTurn\(session, expectedTeamTurn\)[\s\S]*startedAt: expectedTeamTurnStartedAt/)
+
+  const messageInjection = daemon.slice(
+    daemon.indexOf('async function injectCoordinatorTaskMessageOnce('),
+    daemon.indexOf('function ensureCoordinatorTaskMessageDelivery('),
+  )
+  assert.match(messageInjection,
+    /providerTurnStartedAt[\s\S]*activatePendingTeamProviderTurn\(target, providerTurn/)
+  assert.match(messageInjection,
+    /stageTeamProviderTurn\(target, providerTurn, \{ now: providerTurnStartedAt \}\)/)
+
+  const promptHook = daemon.slice(
+    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
+    daemon.indexOf("if (ev === 'PreToolUse')"),
+  )
+  assert.match(promptHook,
+    /const acknowledgedTurnStillCurrent[\s\S]*activeTurn\.taskId === acknowledgedTurn\.taskId[\s\S]*activeTurn\.providerWorkGeneration === acknowledgedTurn\.providerWorkGeneration/)
+  assert.match(promptHook,
+    /provider === 'codex' && acknowledgedTurnStillCurrent[\s\S]*!codexFinalAlreadyClaimed\(session, body\.turn_id\)[\s\S]*beginCodexTurn\(session, activation\.startedAt\)/)
 })
 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {

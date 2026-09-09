@@ -111,6 +111,27 @@ test('authenticated worker proof promotes an exact pending turn after restart', 
   }), null)
 })
 
+test('staged provider input retains its pre-submit event boundary when promoted', () => {
+  const session = {}
+  stageTeamProviderTurn(session, {
+    taskId: 'task_fast', providerWorkGeneration: 1,
+  }, { now: 1000 })
+
+  // Promotion happens only after the provider transport returns. A Stop event
+  // can already have been observed by then, so the durable staged boundary—not
+  // promotion wall-clock time—must order that final against this work.
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_fast', providerWorkGeneration: 1,
+  })
+
+  assert.equal(session.teamProviderTurn.startedAt, 1000)
+  assert.deepEqual(providerTurnForCompletion(session, {
+    observedAt: 1001,
+  }), {
+    taskId: 'task_fast', providerWorkGeneration: 1,
+  })
+})
+
 test('a delayed final retains its historical task identity during a newer task', () => {
   const session = {}
   stageTeamProviderTurn(session, { taskId: 'task_old', providerWorkGeneration: 1 })

@@ -107,10 +107,16 @@ export function pendingTeamProviderTurn(session, expected = null) {
 // metadata such as inheritProviderTurnId across a daemon restart.
 export function activatePendingTeamProviderTurn(session, expected, {
   providerTurnId = null,
-  startedAt = Date.now(),
+  startedAt = null,
 } = {}) {
-  if (!pendingTeamProviderTurn(session, expected)) return null
-  return activateTeamProviderTurn(session, { providerTurnId, startedAt })
+  const pending = normalizedTurn(session?.teamProviderTurnPending,
+    session?.teamProviderTurnPending?.stagedAt)
+  if (!pending || !pendingTeamProviderTurn(session, expected)) return null
+  // The transport can return after the provider has already emitted its Stop
+  // event. Keep the boundary journaled before submission so event ordering does
+  // not depend on when this promotion callback happened to run.
+  const boundary = startedAt == null ? pending.startedAt : startedAt
+  return activateTeamProviderTurn(session, { providerTurnId, startedAt: boundary })
 }
 
 // Both delegated-task envelopes and coordinator follow-ups carry a private,

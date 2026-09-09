@@ -69,6 +69,9 @@ Notable changes to this project. Format based on
 - Codex acknowledgement hooks now persist lifecycle tracking before audit I/O,
   only durably written hook acknowledgements may override a racing transport
   error, and idempotent release retries re-persist accepted terminal state.
+- Delegated and coordinator-follow-up turns retain their pre-submit event
+  boundary, and delayed Codex prompt hooks cannot restart a completed turn or
+  retag lifecycle tracking after a newer work generation begins.
 - Legacy tasks retain their historical 32-reply capacity, while a saturated
   cancellation journal rejects reuse of its terminal request ID with a changed
   payload.

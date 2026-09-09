@@ -1032,9 +1032,16 @@ function startCodexPoller(session) {
   tick().catch(e => log('Codex status poller error', String(e)))
 }
 
-function beginCodexTurn(session) {
+function beginCodexTurn(session, startedAt = Date.now()) {
+  const observedStart = Number(startedAt)
+  const normalizedStart = Number.isSafeInteger(observedStart) && observedStart > 0
+    ? observedStart
+    : Date.now()
+  const previousStart = Number(session.codexTurnStartedAt)
   stopPoller(session)
-  session.codexTurnStartedAt = Date.now()
+  session.codexTurnStartedAt = Number.isSafeInteger(previousStart) && previousStart > 0
+    ? Math.min(previousStart, normalizedStart)
+    : normalizedStart
   delete session.codexUsageBaseline
   saveState(state)
   startCodexPoller(session)
@@ -1044,10 +1051,18 @@ function beginCodexTurn(session) {
 // Mark bridge-injected input at the transport boundary so the status poller
 // cannot depend on a provider hook that may never arrive. A later hook remains
 // authoritative and may refresh the timestamp in the normal path.
-function ensureCodexTurnStarted(session) {
+function ensureCodexTurnStarted(session, startedAt = Date.now()) {
   if (providerOf(session) !== 'codex' || session.codexTurnStartedAt) return false
-  beginCodexTurn(session)
+  beginCodexTurn(session, startedAt)
   return true
+}
+
+function codexFinalAlreadyClaimed(session, turnId) {
+  const nativeId = String(turnId || '')
+  if (!nativeId) return false
+  return session?.lastMirroredTurn === nativeId ||
+    session?.codexFinalTurns?.includes(nativeId) ||
+    codexFinalDeliveries.has(`${session.id}\u0000${nativeId}`)
 }
 
 const piPollers = new Map()
@@ -2144,10 +2159,19 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
         now: activation.startedAt,
       })
       refreshTeamTaskPoller(session, activeTurn)
+      const acknowledgedTurnStillCurrent = Boolean(activeTurn &&
+        activeTurn.taskId === acknowledgedTurn.taskId &&
+        activeTurn.providerWorkGeneration === acknowledgedTurn.providerWorkGeneration &&
+        teamTaskTurnOwnsCurrentLifecycle(session, acknowledgedTurn))
       // Codex Stop/App Server completion can race the Slack audit below. Start
       // and persist its lifecycle now so that finalization may clear this exact
-      // turn; the post-audit path must never recreate a turn that already ended.
-      if (provider === 'codex') beginCodexTurn(session)
+      // turn. A delayed prompt hook must not recreate a final already claimed,
+      // retag a newer generation, or use handler wall-clock time as its start.
+      if (provider === 'codex' && acknowledgedTurnStillCurrent &&
+          ['dispatching', 'running'].includes(task.status) &&
+          !codexFinalAlreadyClaimed(session, body.turn_id)) {
+        beginCodexTurn(session, activation.startedAt)
+      }
       saveStateNow(state)
       if (acknowledgedCoordinatorMessage?.message) {
         // This in-memory proof is deliberately recorded only after the atomic
@@ -2188,7 +2212,10 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
-    else if (provider === 'codex' && !acknowledgedTurn) beginCodexTurn(session)
+    else if (provider === 'codex' && !acknowledgedTurn &&
+        !codexFinalAlreadyClaimed(session, body.turn_id)) {
+      beginCodexTurn(session, body.observed_at || Date.now())
+    }
     return
   }
   if (ev === 'PreToolUse') {
@@ -3571,13 +3598,19 @@ async function injectText(session, text, options = {}) {
           teamTaskProviderWorkGeneration(expectedTask),
       }
     : null
+  const expectedTeamTurnStartedAt = Date.now()
   if (expectedTeamTurn) {
-    stageTeamProviderTurn(session, expectedTeamTurn)
+    stageTeamProviderTurn(session, expectedTeamTurn, { now: expectedTeamTurnStartedAt })
     saveStateNow(state)
   }
   const acceptExpectedTeamTurn = () => {
     if (!expectedTeamTurn) return
-    const activeTurn = activateTeamProviderTurn(session, { turn: expectedTeamTurn })
+    // The prompt may finish before an async tmux transport unwinds. Promote the
+    // pre-submit boundary, while retaining a hook-promoted turn if it won first.
+    const activeTurn = activatePendingTeamProviderTurn(session, expectedTeamTurn) ||
+      activateTeamProviderTurn(session, {
+        turn: expectedTeamTurn, startedAt: expectedTeamTurnStartedAt,
+      })
     refreshTeamTaskPoller(session, activeTurn)
     try { saveStateNow(state) }
     catch (cause) {
@@ -3637,7 +3670,7 @@ async function injectText(session, text, options = {}) {
     // submit the same prompt again.
     if (tmuxAccepted) {
       acceptExpectedTeamTurn()
-      if (provider === 'codex') ensureCodexTurnStarted(session)
+      if (provider === 'codex') ensureCodexTurnStarted(session, expectedTeamTurnStartedAt)
       log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
       return
     }
@@ -3647,7 +3680,7 @@ async function injectText(session, text, options = {}) {
     rememberInjected(session.id, delivered)
     if (injectToSession(session.pid, delivered)) {
       acceptExpectedTeamTurn()
-      if (provider === 'codex') ensureCodexTurnStarted(session)
+      if (provider === 'codex') ensureCodexTurnStarted(session, expectedTeamTurnStartedAt)
       log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
       return
     }
@@ -4447,7 +4480,8 @@ async function validateCoordinatorTaskMessageTarget(task, target, expected) {
   return coordinatorTaskMessageTargetMatches(task, target, expected)
 }
 
-async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, providerTurn) {
+async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, providerTurn,
+  providerTurnStartedAt) {
   if (!coordinatorTaskMessageTargetMatches(task, target, expected)) {
     throw new TeamError('target_authority_lost', 'The exact active worker changed before provider delivery.', 409)
   }
@@ -4456,14 +4490,19 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
       target.teamProviderTurn?.taskId === providerTurn.taskId
     ? target.teamProviderTurn.providerTurnId || null
     : null
+  const activateSubmittedTurn = () => activatePendingTeamProviderTurn(target, providerTurn, {
+    providerTurnId: steeredNativeTurnId,
+  }) || activateTeamProviderTurn(target, {
+    turn: providerTurn,
+    providerTurnId: steeredNativeTurnId,
+    startedAt: providerTurnStartedAt,
+  })
   if (expected.provider === 'pi') {
     if (!injectQueuedPiPrompt(expected.pid, piPromptQueueItem(prompt))) {
       forgetInjected(expected.sid, prompt)
       throw knownUndeliveredTeamMessage('The exact Pi input stream did not accept the coordinator message.')
     }
-    const activeTurn = activateTeamProviderTurn(target, {
-      turn: providerTurn, providerTurnId: steeredNativeTurnId,
-    })
+    const activeTurn = activateSubmittedTurn()
     refreshTeamTaskPoller(target, activeTurn)
     return
   }
@@ -4475,12 +4514,10 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
     throw new TeamError('target_authority_lost',
       'The worker changed while the coordinator message was being submitted; delivery is uncertain.', 409)
   }
-  const activeTurn = activateTeamProviderTurn(target, {
-    turn: providerTurn, providerTurnId: steeredNativeTurnId,
-  })
+  const activeTurn = activateSubmittedTurn()
   refreshTeamTaskPoller(target, activeTurn)
   if (expected.provider === 'claude') startPoller(target)
-  else if (expected.provider === 'codex') ensureCodexTurnStarted(target)
+  else if (expected.provider === 'codex') ensureCodexTurnStarted(target, providerTurnStartedAt)
 }
 
 async function performCoordinatorTaskMessageDelivery(task, message) {
@@ -4553,7 +4590,8 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       providerWorkGeneration: Math.max(1, Number(message.workGeneration) || 1),
       inheritProviderTurnId: !message.resumesTask,
     }
-    stageTeamProviderTurn(target, providerTurn)
+    const providerTurnStartedAt = Date.now()
+    stageTeamProviderTurn(target, providerTurn, { now: providerTurnStartedAt })
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_submitting')
     saveStateNow(state)
     providerAttempted = true
@@ -4562,7 +4600,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       '[Slack Agent Bridge coordinator message for your active delegated task]',
       message.text,
       '</sab-team-message>',
-    ].join('\n'), providerTurn)
+    ].join('\n'), providerTurn, providerTurnStartedAt)
     recordTeamWorkerProof(target, task)
     completeCoordinatorTaskMessageDelivery(state, task.id, message.id)
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_delivered')
