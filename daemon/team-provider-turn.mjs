@@ -21,6 +21,33 @@ function publicTurn(value) {
   } : null
 }
 
+// A tmux poller observation spans asynchronous pane, process, and Slack checks.
+// Keep the task generation it began with immutable, and invalidate it whenever
+// accepted coordinator input advances the poller's generation. An old idle
+// pane must never be re-labelled as proof for work accepted while the tick was
+// awaiting I/O.
+export function beginTeamProviderPollerObservation(poller) {
+  if (!poller) return null
+  const turn = publicTurn(poller.teamTaskTurn)
+  return Object.freeze({
+    revision: Number(poller.teamTaskRevision) || 0,
+    teamTaskTurn: turn ? Object.freeze(turn) : null,
+  })
+}
+
+export function refreshTeamProviderPollerTurn(poller, turn) {
+  const snapshot = publicTurn(turn)
+  if (!poller || !snapshot) return null
+  poller.teamTaskTurn = Object.freeze(snapshot)
+  poller.teamTaskRevision = (Number(poller.teamTaskRevision) || 0) + 1
+  return poller.teamTaskTurn
+}
+
+export function teamProviderPollerObservationCurrent(poller, observation) {
+  return Boolean(poller && observation && !poller.stopped &&
+    (Number(poller.teamTaskRevision) || 0) === observation.revision)
+}
+
 function sameLogicalTurn(left, right) {
   return left?.taskId === right?.taskId &&
     left?.providerWorkGeneration === right?.providerWorkGeneration &&

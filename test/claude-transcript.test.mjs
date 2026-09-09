@@ -29,3 +29,17 @@ test('a discarded Claude final consumes every complete line when no newer genera
     taskId: 'task_one', providerWorkGeneration: 1,
   }), Buffer.byteLength(record('assistant', 'Generation one final.')))
 })
+
+test('a newly assigned task is also a stale transcript boundary', () => {
+  const oldFinal = record('assistant', 'First task final.')
+  const nextPrompt = record('user', [
+    '<sab-team-task id="task_two" generation="1" source="coordinator">',
+    'Start the next assignment.',
+    '</sab-team-task>',
+  ].join('\n'))
+  const transcript = oldFinal + nextPrompt + record('assistant', 'Second task final.')
+
+  assert.equal(staleTeamTurnTranscriptPrefixBytes(transcript, {
+    taskId: 'task_one', providerWorkGeneration: 3,
+  }), Buffer.byteLength(oldFinal))
+})

@@ -29,9 +29,9 @@ export function staleTeamTurnTranscriptPrefixBytes(text, expected) {
     try { record = JSON.parse(completeLine) } catch {}
     if (record?.type === 'user') {
       const marker = providerPromptTurnMarker(transcriptMessageText(record))
-      if (marker?.taskId === taskId &&
-          Number.isSafeInteger(marker.providerWorkGeneration) &&
-          marker.providerWorkGeneration > generation) {
+      if (marker && (marker.taskId !== taskId ||
+          (Number.isSafeInteger(marker.providerWorkGeneration) &&
+            marker.providerWorkGeneration > generation))) {
         return Buffer.byteLength(input.slice(0, cursor), 'utf8')
       }
     }

@@ -2,9 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  activateTeamProviderTurn, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
+  activateTeamProviderTurn, beginTeamProviderPollerObservation,
+  discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
   pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
-  retireTeamProviderTurn, stageTeamProviderTurn,
+  refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
+  teamProviderPollerObservationCurrent,
 } from '../daemon/team-provider-turn.mjs'
 
 test('provider finals resolve the immutable task generation of their native turn', () => {
@@ -169,4 +171,27 @@ test('known-undelivered staging is discarded and ordinary turns retire task owne
   assert.deepEqual(providerTurnForCompletion(session, { providerTurnId: 'turn-one' }), {
     taskId: 'task_one', providerWorkGeneration: 1,
   })
+})
+
+test('an in-flight poller observation cannot be retagged to a newer task generation', () => {
+  const poller = {
+    stopped: false,
+    teamTaskTurn: Object.freeze({ taskId: 'task_one', providerWorkGeneration: 1 }),
+    teamTaskRevision: 0,
+  }
+  const observation = beginTeamProviderPollerObservation(poller)
+
+  refreshTeamProviderPollerTurn(poller, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  })
+
+  assert.deepEqual(observation.teamTaskTurn, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  })
+  assert.deepEqual(poller.teamTaskTurn, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  })
+  assert.equal(teamProviderPollerObservationCurrent(poller, observation), false)
+  assert.equal(teamProviderPollerObservationCurrent(poller,
+    beginTeamProviderPollerObservation(poller)), true)
 })

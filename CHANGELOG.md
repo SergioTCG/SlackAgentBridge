@@ -38,6 +38,9 @@ Notable changes to this project. Format based on
 - Discarded stale Claude finals preserve the next generation's transcript
   boundary, while authenticated completion declarations establish live worker
   proof and heal a missed initial provider acknowledgement.
+- In-flight Claude and Codex poller observations retain their starting work
+  generation, recovered prompt identities become durable before audit I/O, and
+  stale provider finals cannot stop or consume state belonging to a follow-up.
 - Bound provider prompt acknowledgements and finals to immutable task
   generations across audit waits, serialized coordinator follow-ups, preserved
   reported workers that become dormant during Slack audit delivery, and kept

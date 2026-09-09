@@ -81,9 +81,11 @@ import {
   teamReportLifecycleNotice, undeliveredTeamMessagePredecessor,
 } from './team-message-delivery.mjs'
 import {
-  activateTeamProviderTurn, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
+  activateTeamProviderTurn, beginTeamProviderPollerObservation,
+  discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
   pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
-  retireTeamProviderTurn, stageTeamProviderTurn,
+  refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
+  teamProviderPollerObservationCurrent,
 } from './team-provider-turn.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
@@ -706,12 +708,14 @@ function startPoller(session) {
   const p = {
     timer: null, last: '', stopped: false, sawSpinner: false, idle: 0,
     teamTaskTurn: currentTeamTaskProviderTurn(session),
+    teamTaskRevision: 0,
   }
   p.timer = setInterval(async () => {
     if (p.stopped || !session.tmux || !(session.pid && pidAlive(session.pid))) return
+    const observation = beginTeamProviderPollerObservation(p)
     const pane = await tmuxCapture(session.tmux)
     const line = extractSpinner(pane)
-    if (p.stopped) return // Stop fired during the capture — don't re-post
+    if (!teamProviderPollerObservationCurrent(p, observation)) return
     const paneForm = line ? null : questionFormFromPane(pane)
     const openForm = qforms.get(session.id)
     let form = paneForm
@@ -748,10 +752,12 @@ function startPoller(session) {
       sawSpinner: p.sawSpinner, idleTicks: p.idle,
       pendingPermission: hasPendingPerm(session),
     })
+    if (!teamProviderPollerObservationCurrent(p, observation)) return
     p.idle = decision.idleTicks
     if (decision.action === 'working') {
       p.sawSpinner = true
       if (qforms.has(session.id)) await clearQuestionForm(session) // answered (Slack or terminal) — turn resumed
+      if (!teamProviderPollerObservationCurrent(p, observation)) return
       if (line !== p.last) { p.last = line; await setStatus(session, line) }
       return
     }
@@ -760,18 +766,20 @@ function startPoller(session) {
       return // waiting on the user, not finished
     }
     if (decision.action === 'failure') {
+      if (!teamProviderPollerObservationCurrent(p, observation)) return
       p.stopped = true
       log('poller failure finalize (Stop hook missing)', session.id.slice(0, 8), decision.failure.key)
-      await finalizeTurn(session, { terminalFailure: decision.failure, teamTaskTurn: p.teamTaskTurn })
+      await finalizeTurn(session, { terminalFailure: decision.failure, teamTaskTurn: observation.teamTaskTurn })
       return
     }
     if (decision.action === 'finalize') {
       // The spinner vanished for ~12s after a turn was running: the turn ended.
       // Normally the Stop hook finalizes; if it never arrives (a missed hook, or a
       // long/compacted turn), do it here so the response is never silently lost.
+      if (!teamProviderPollerObservationCurrent(p, observation)) return
       p.stopped = true
       log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
-      await finalizeTurn(session, { teamTaskTurn: p.teamTaskTurn })
+      await finalizeTurn(session, { teamTaskTurn: observation.teamTaskTurn })
     }
   }, 3000)
   pollers.set(session.id, p)
@@ -793,12 +801,12 @@ function refreshTeamTaskPoller(session, teamTaskTurn) {
   })
   const claude = pollers.get(session.id)
   if (claude) {
-    claude.teamTaskTurn = snapshot
+    refreshTeamProviderPollerTurn(claude, snapshot)
     claude.idle = 0
   }
   const codex = codexPollers.get(session.id)
   if (codex) {
-    codex.teamTaskTurn = snapshot
+    refreshTeamProviderPollerTurn(codex, snapshot)
     codex.idleObservation = null
   }
 }
@@ -855,15 +863,18 @@ function startCodexPoller(session) {
     idleObservation: null,
     turnStartedAt: session.codexTurnStartedAt,
     teamTaskTurn: currentTeamTaskProviderTurn(session),
+    teamTaskRevision: 0,
   }
   const tick = async () => {
     if (p.stopped || p.running || !(session.pid && pidAlive(session.pid))) return
     p.running = true
     try {
+      const observation = beginTeamProviderPollerObservation(p)
       const now = Date.now()
       const pane = session.tmux ? await tmuxCapture(session.tmux) : ''
-      if (p.stopped) return
+      if (!teamProviderPollerObservationCurrent(p, observation)) return
       await reconcileCodexFooter(session, pane)
+      if (!teamProviderPollerObservationCurrent(p, observation)) return
       const failureDecision = codexTerminalFailureDecision({
         pane,
         ready: targetStartupState('codex', pane) === 'ready',
@@ -873,9 +884,10 @@ function startCodexPoller(session) {
       p.failureKey = failureDecision.key
       p.failureConfirmations = failureDecision.confirmations
       if (failureDecision.action === 'failure') {
+        if (!teamProviderPollerObservationCurrent(p, observation)) return
         p.stopped = true
         log('Codex terminal failure finalize (Stop hook missing)', session.id.slice(0, 8), failureDecision.failure.key)
-        await finalizeCodexTerminalFailure(session, failureDecision.failure, p.turnStartedAt, p.teamTaskTurn)
+        await finalizeCodexTerminalFailure(session, failureDecision.failure, p.turnStartedAt, observation.teamTaskTurn)
         return
       }
       const idleDecision = observeIdleCodexTurn(session, {
@@ -887,6 +899,7 @@ function startCodexPoller(session) {
         allowProviderTurn: true,
         allowDelegatedTask: true,
       })
+      if (!teamProviderPollerObservationCurrent(p, observation)) return
       p.idleObservation = idleDecision.observation
       if (idleDecision.action === 'release' && session.teamActiveTaskId) {
         // A worker can return to the Codex input surface without Stop. Keep the
@@ -909,13 +922,13 @@ function startCodexPoller(session) {
           p.idleObservation = null
           return
         }
-        if (p.stopped) return
+        if (!teamProviderPollerObservationCurrent(p, observation)) return
         p.stopped = true
         stopPoller(session)
         await finishTeamTaskWithWarningForSession(session, task.status === 'running'
           ? 'Codex returned to idle without its lifecycle completion hook. The accepted worker turn completed, but SAB could not authenticate a stable final response.'
           : 'Codex returned to idle after the injected worker turn, but omitted its acknowledgement and completion hooks. SAB recorded a warning-bearing turn report and did not replay the work; the task remains reserved until explicit release.',
-        p.teamTaskTurn)
+        observation.teamTaskTurn)
         clearTeamInputReservation(session)
         saveStateNow(state)
         await clearStatus(session)
@@ -938,7 +951,7 @@ function startCodexPoller(session) {
           p.idleObservation = null
           return
         }
-        if (p.stopped) return
+        if (!teamProviderPollerObservationCurrent(p, observation)) return
         p.stopped = true
         stopPoller(session)
         saveStateNow(state)
@@ -977,6 +990,7 @@ function startCodexPoller(session) {
           p.idleObservation = null
           return
         }
+        if (!teamProviderPollerObservationCurrent(p, observation)) return
         p.stopped = true
         stopPoller(session)
         clearTeamTurn(session)
@@ -991,7 +1005,7 @@ function startCodexPoller(session) {
         p.nextUsageAt = now + CODEX_USAGE_REFRESH_MS
         try {
           p.current = await codexUsageForSession(session)
-          if (p.stopped) return
+          if (!teamProviderPollerObservationCurrent(p, observation)) return
           if (!p.baseline) {
             // A brand-new session has no ccusage row yet. Zero is the correct
             // baseline there, so its first completed model call still appears
@@ -1002,7 +1016,7 @@ function startCodexPoller(session) {
           }
         } catch (e) { log('Codex live usage unavailable', String(e?.message || e)) }
       }
-      if (p.stopped) return
+      if (!teamProviderPollerObservationCurrent(p, observation)) return
       const text = formatCodexWorkingStatus({
         startedAt: session.codexTurnStartedAt,
         baseline: p.baseline,
@@ -1124,6 +1138,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
   const finalization = (async () => {
     if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
       log('ignored stale Claude final before lifecycle mutation', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
+      if (teamTaskTurn && discardStaleClaudeTeamTurnTranscript(session, teamTaskTurn)) saveStateNow(state)
       return false
     }
     // Claim this exact lifecycle before transcript settling. Otherwise the Stop
@@ -1201,7 +1216,8 @@ async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
     // newer turn. Its proxy observation timestamp proves whether this final
     // completed before the currently tracked turn began. Never let an older
     // final stop the newer poller or clear its lifecycle authority.
-    const ownsLifecycle = codexFinalLifecycleStillCurrent(session, expected, { beforeStop: true })
+    const ownsLifecycle = teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn) &&
+      codexFinalLifecycleStillCurrent(session, expected, { beforeStop: true })
     if (ownsLifecycle) {
       stopPoller(session)
       clearStatusDeferred(session)
@@ -1215,7 +1231,8 @@ async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
       saveStateNow(state)
       throw error
     }
-    if (ownsLifecycle && codexFinalLifecycleStillCurrent(session, expected)) {
+    if (ownsLifecycle && teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn) &&
+        codexFinalLifecycleStillCurrent(session, expected)) {
       await finishTeamTaskForSession(session, text, null, { expectedTeamTaskTurn: teamTaskTurn })
       clearTeamInputReservation(session)
     } else {
@@ -2100,9 +2117,31 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       ? pendingTeamProviderTurn(session, promptTeamTurn)
       : null) ||
       currentTeamTaskProviderTurn(session, body)
+    const injected = consumeInjected(sid, p)
+    const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
+    const acknowledgesTask = teamTaskId === task?.id ||
+      (injected && promptTeamTurn?.taskId === task?.id)
+    const acknowledgedTurn = task && task.targetSessionId === session.id &&
+      task.targetChannel === session.channel && acknowledgesTask &&
+      submittedTeamTaskTurn?.taskId === task.id
+      ? submittedTeamTaskTurn
+      : null
+    if (acknowledgedTurn) {
+      // An uncertain tmux delivery may leave only the pending generation for
+      // this hook to recover. Promote and persist it before channel/audit I/O:
+      // a fast Stop during either await must see the accepted exact turn.
+      const activeTurn = activateTeamProviderTurn(session, {
+        turn: acknowledgedTurn,
+        providerTurnId: body.turn_id || null,
+        startedAt: body.observed_at || Date.now(),
+      })
+      refreshTeamTaskPoller(session, activeTurn)
+      saveStateNow(state)
+    } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
+      saveStateNow(state)
+    }
     if (p && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
     const ch = session.channel || (await ensureChannel(session))
-    const injected = consumeInjected(sid, p)
     if (teamTaskId && session.teamActiveTaskId === teamTaskId) {
       try {
         const task = markTeamTaskRunning(state, teamTaskId)
@@ -2119,25 +2158,6 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       // Local terminal input and uncorrelated provider prompts do not inherit a
       // prior Slack owner's lateral team authority.
       clearTeamTurn(session)
-      saveStateNow(state)
-    }
-    const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
-    const acknowledgesTask = teamTaskId === task?.id ||
-      (injected && promptTeamTurn?.taskId === task?.id)
-    const acknowledgedTurn = task && task.targetSessionId === session.id &&
-      task.targetChannel === session.channel && acknowledgesTask &&
-      submittedTeamTaskTurn?.taskId === task.id
-      ? submittedTeamTaskTurn
-      : null
-    if (acknowledgedTurn) {
-      const activeTurn = activateTeamProviderTurn(session, {
-        turn: acknowledgedTurn,
-        providerTurnId: body.turn_id || null,
-        startedAt: body.observed_at || Date.now(),
-      })
-      refreshTeamTaskPoller(session, activeTurn)
-      saveStateNow(state)
-    } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
       saveStateNow(state)
     }
     // Mirror only genuine typing: skip Slack-injected prompts (already shown) and

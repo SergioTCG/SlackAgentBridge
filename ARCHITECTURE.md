@@ -325,12 +325,16 @@ event observation time rather than sampling mutable task state, so a delayed
 earlier final cannot be mistaken for the follow-up result. An active provider
 poller's fallback fingerprint advances at the same acceptance boundary, and a
 delayed prompt acknowledgement may enter bounded history but cannot replace a
-newer generation. Initial and follow-up envelopes both bind their exact
+newer generation. Each asynchronous poller observation retains the immutable
+generation with which it began and is invalidated when accepted follow-up input
+advances that generation. Initial and follow-up envelopes both bind their exact
 generation; an inherited native turn identity remains provisional until a hook
-confirms it. A discarded stale Claude final advances its transcript offset only
-to the next generation marker, while an authenticated completion declaration
-supplies the same live worker proof as a reply. Once provider input succeeds,
-failure to persist that
+confirms it, and a recovered prompt acknowledgement is persisted before any
+Slack audit await. Codex checks generation ownership before stopping a poller or
+clearing live turn state. A discarded stale Claude final advances its transcript
+offset only to the next generation marker whether it became stale before or
+during finalization, while an authenticated completion declaration supplies the
+same live worker proof as a reply. Once provider input succeeds, failure to persist that
 activation is an uncertain delivery: SAB retains the task reservation and
 never attempts a second transport. Pre-upgrade tasks without an explicit
 completion policy retain provider-final semantics so an upgrade cannot

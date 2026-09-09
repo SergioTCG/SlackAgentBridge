@@ -88,7 +88,7 @@ test('hookless successful workers report with warning and cannot race an authent
   const start = daemon.indexOf('function startCodexPoller(')
   const end = daemon.indexOf('function startPiPoller(', start)
   const poller = daemon.slice(start, end)
-  assert.match(poller, /await validProviderRootClaim[\s\S]*if \(p\.stopped\) return[\s\S]*finishTeamTaskWithWarningForSession/)
+  assert.match(poller, /await validProviderRootClaim[\s\S]*teamProviderPollerObservationCurrent\(p, observation\)[\s\S]*finishTeamTaskWithWarningForSession/)
   assert.match(poller, /finishTeamTaskWithWarningForSession\(session, task\.status === 'running'/)
   assert.match(poller, /omitted its acknowledgement and completion hooks/)
   assert.match(poller, /warning-bearing turn report[\s\S]*task remains reserved until explicit release/)
@@ -274,9 +274,12 @@ test('provider turn reporting preserves task and process ownership until explici
     daemon.indexOf("if (ev === 'PreToolUse')"),
   )
   const submittedTurnSnapshot = promptHook.indexOf('const submittedTeamTaskTurn =')
+  const recoveredTurnActivation = promptHook.indexOf('activateTeamProviderTurn(session')
   const auditAwait = promptHook.indexOf('await updateTeamTaskAudit(task)')
   assert.ok(submittedTurnSnapshot >= 0 && auditAwait > submittedTurnSnapshot,
     'prompt generation must be captured before an audit await can admit a follow-up')
+  assert.ok(recoveredTurnActivation > submittedTurnSnapshot && recoveredTurnActivation < auditAwait,
+    'a recovered prompt turn must become durable before Slack audit delivery yields')
   assert.match(promptHook, /acknowledgedTurn[\s\S]*submittedTeamTaskTurn/)
   assert.match(promptHook, /providerPromptTurnMarker\(p\)[\s\S]*pendingTeamProviderTurn/)
   assert.match(claudeHook, /UserPromptSubmit[\s\S]*observed_at[\s\S]*--argjson observed_at/)
@@ -285,8 +288,15 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(claudeFinal, /claudeFinalDeliveries\.has\(deliveryKey\)[\s\S]*stopPoller\(session\)[\s\S]*waitTranscriptSettle/)
   assert.match(claudeFinal,
     /teamTaskTurnOwnsCurrentLifecycle[\s\S]*stopPoller[\s\S]*waitTranscriptSettle[\s\S]*teamTaskTurnOwnsCurrentLifecycle[\s\S]*readNewAssistantText/)
+  assert.match(claudeFinal,
+    /!teamTaskTurnOwnsCurrentLifecycle[\s\S]*discardStaleClaudeTeamTurnTranscript[\s\S]*return false/)
   assert.ok(claudeFinal.indexOf('teamTaskTurnOwnsCurrentLifecycle') < claudeFinal.indexOf('readNewAssistantText'),
     'a stale Claude final must be rejected before transcript consumption')
+  const codexFinal = /async function finalizeCodexTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(codexFinal,
+    /teamTaskTurnOwnsCurrentLifecycle\(session, teamTaskTurn\)[\s\S]*if \(ownsLifecycle\)[\s\S]*stopPoller/)
+  assert.match(daemon,
+    /beginTeamProviderPollerObservation[\s\S]*teamProviderPollerObservationCurrent/)
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
   assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('session.teamActiveTaskId !== task.id'),
@@ -338,7 +348,7 @@ test('coordinator follow-ups serialize and coordinator release does not mint wor
   const release = /async release\(caller, request\) \{[\s\S]*?\n  },\n  async cancel/.exec(daemon)?.[0] || ''
   assert.match(release, /persistTeamLifecycle\(task, \{ enqueueContinuation: false \}\)/)
   assert.doesNotMatch(release, /stageTeamContinuation/)
-  assert.match(daemon, /function refreshTeamTaskPoller[\s\S]*claude\.teamTaskTurn = snapshot[\s\S]*codex\.teamTaskTurn = snapshot/)
+  assert.match(daemon, /function refreshTeamTaskPoller[\s\S]*refreshTeamProviderPollerTurn\(claude, snapshot\)[\s\S]*refreshTeamProviderPollerTurn\(codex, snapshot\)/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*refreshTeamTaskPoller\(target, activeTurn\)/)
 })
 
