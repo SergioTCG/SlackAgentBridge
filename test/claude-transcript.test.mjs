@@ -121,3 +121,19 @@ test('generation selection exposes the native transcript prompt timestamp', () =
     promptObservedAt: Date.parse(timestamp),
   })
 })
+
+test('a new Claude generation does not inherit an earlier terminal failure', () => {
+  const oldFailure = record('assistant', 'Login expired · Please run /login')
+  const nextPrompt = record('user', [
+    '<sab-team-message task="task_one" generation="2" source="coordinator">',
+    'Retry the task after authentication recovers.',
+    '</sab-team-message>',
+  ].join('\n'))
+
+  assert.deepEqual(teamTurnAssistantTranscript(oldFailure + nextPrompt, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }), {
+    text: '',
+    consumedBytes: Buffer.byteLength(oldFailure + nextPrompt),
+  })
+})

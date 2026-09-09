@@ -579,8 +579,29 @@ test('restored durable task bindings refresh poller lifecycle snapshots', () => 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {
   assert.match(daemon, /function acceptedTeamMutation\([\s\S]*teamMutationForRequest/)
   assert.match(daemon, /mutation: acceptedTeamMutation\(session, result\.task, request\.requestId\)/)
+  const lookup = daemon.slice(
+    daemon.indexOf('async mutation(caller, requestId, taskId = null)'),
+    daemon.indexOf('async send(caller, request)', daemon.indexOf('async mutation(caller, requestId, taskId = null)')),
+  )
+  assert.match(lookup,
+    /teamMutationForRequest\([\s\S]*saveStateNow\(state\)[\s\S]*return mutation/,
+    'a recovery lookup must durably re-persist the accepted mutation before confirming it')
   assert.match(cli, /verify acceptance with sab team mutation --request-id/)
   assert.match(teamModules, /result\?\.mutation \|\| await service\.mutation/)
+})
+
+test('Claude fallback polling cannot leak evidence or retain a revoked task poller', () => {
+  const start = daemon.indexOf('function startPoller(session)')
+  const end = daemon.indexOf('// Codex does not expose', start)
+  const poller = daemon.slice(start, end)
+  assert.match(poller, /peekNewAssistantText\(session, observation\.teamTaskTurn\)/,
+    'terminal failures must be selected from the exact observed task generation')
+  assert.match(poller,
+    /const finalized = await finalizeTurn\([\s\S]*if \(!finalized\) retireClaudePollerIfCurrent\(session, p\)/,
+    'a rejected stale fallback must remove its exact stopped poller entry')
+  assert.match(daemon,
+    /function retireClaudePollerIfCurrent\(session, expected\)[\s\S]*pollers\.get\(session\.id\) !== expected[\s\S]*pollers\.delete\(session\.id\)/,
+    'stale cleanup must never remove a replacement poller')
 })
 
 test('nested provider utilities are not registered as SAB sessions', () => {

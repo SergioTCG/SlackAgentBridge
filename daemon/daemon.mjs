@@ -630,6 +630,13 @@ async function bumpStatusForChannel(channel, afterTs = null) {
 const pollers = new Map() // sid → { timer, last }
 const claudeFinalDeliveries = new Map() // exact lifecycle → one Stop/poller finalization
 const claudeTerminalFailures = new Map() // sid → { key, at }; bounded duplicate suppression
+function retireClaudePollerIfCurrent(session, expected) {
+  if (!session || !expected || pollers.get(session.id) !== expected) return false
+  expected.stopped = true
+  clearInterval(expected.timer)
+  pollers.delete(session.id)
+  return true
+}
 function rememberClaudeTerminalFailure(sid, failure) {
   claudeTerminalFailures.set(sid, failure)
   const timer = setTimeout(() => {
@@ -755,7 +762,7 @@ function startPoller(session) {
     // ever observes a spinner, and Claude emits no Stop for either. Inspect only
     // NEW transcript records so stale errors in terminal scrollback cannot end a
     // later healthy turn.
-    const newAssistantText = line ? '' : peekNewAssistantText(session)
+    const newAssistantText = line ? '' : peekNewAssistantText(session, observation.teamTaskTurn)
     const decision = claudePollerDecision({
       spinner: Boolean(line), newAssistantText, hasForm: Boolean(form) || holdAnsweredForm,
       sawSpinner: p.sawSpinner, idleTicks: p.idle,
@@ -778,7 +785,10 @@ function startPoller(session) {
       if (!teamProviderPollerObservationCurrent(p, observation)) return
       p.stopped = true
       log('poller failure finalize (Stop hook missing)', session.id.slice(0, 8), decision.failure.key)
-      await finalizeTurn(session, { terminalFailure: decision.failure, teamTaskTurn: observation.teamTaskTurn })
+      const finalized = await finalizeTurn(session, {
+        terminalFailure: decision.failure, teamTaskTurn: observation.teamTaskTurn,
+      })
+      if (!finalized) retireClaudePollerIfCurrent(session, p)
       return
     }
     if (decision.action === 'finalize') {
@@ -788,7 +798,8 @@ function startPoller(session) {
       if (!teamProviderPollerObservationCurrent(p, observation)) return
       p.stopped = true
       log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
-      await finalizeTurn(session, { teamTaskTurn: observation.teamTaskTurn })
+      const finalized = await finalizeTurn(session, { teamTaskTurn: observation.teamTaskTurn })
+      if (!finalized) retireClaudePollerIfCurrent(session, p)
     }
   }, 3000)
   pollers.set(session.id, p)
@@ -1672,7 +1683,8 @@ function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = n
   return out.join('\n\n')
 }
 
-const peekNewAssistantText = session => assistantTextSinceOffset(session, false)
+const peekNewAssistantText = (session, expectedTeamTurn = null) =>
+  assistantTextSinceOffset(session, false, expectedTeamTurn)
 const readNewAssistantText = (session, expectedTeamTurn = null) =>
   assistantTextSinceOffset(session, true, expectedTeamTurn)
 
@@ -5530,7 +5542,12 @@ const teamService = {
   async mutation(caller, requestId, taskId = null) {
     const session = await resolveTeamCaller(caller)
     requireTeamCallerContext(session)
-    return teamMutationForRequest(state, session.channel, requestId, { taskId })
+    const mutation = teamMutationForRequest(state, session.channel, requestId, { taskId })
+    // A prior mutation can have changed this process's in-memory journal and
+    // then failed its synchronous atomic write. A recovery lookup must not call
+    // that volatile record accepted until it has made the state durable again.
+    saveStateNow(state)
+    return mutation
   },
   async send(caller, request) {
     const session = await resolveTeamCaller(caller)

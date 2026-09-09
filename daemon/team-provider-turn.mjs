@@ -146,6 +146,16 @@ export function deferPendingTeamProviderFinal(session, {
     afterPendingBoundary && pendingPromptObserved === true
   if (identified && !hooklessClaudePending) return null
   if (!afterPendingBoundary) return null
+  // State created before provider-turn generations existed can already be on a
+  // later task generation without any accepted-turn history. A native final in
+  // that upgrade window is ambiguous: its ID/timestamp alone does not prove the
+  // newly staged prompt reached the provider. Fail closed unless the caller has
+  // positive prompt correlation. Generation one remains the compatible initial
+  // boundary for a newly dispatched task.
+  const hasAcceptedTracking = Boolean(session.teamProviderTurn ||
+    (Array.isArray(session.teamProviderTurnHistory) && session.teamProviderTurnHistory.length))
+  if (pending.providerWorkGeneration > 1 && !hasAcceptedTracking &&
+      pendingPromptObserved !== true) return null
   const existing = session.teamProviderTurnDeferredFinal
   if (existing && (existing.taskId !== pending.taskId ||
       Number(existing.providerWorkGeneration) !== pending.providerWorkGeneration)) return null

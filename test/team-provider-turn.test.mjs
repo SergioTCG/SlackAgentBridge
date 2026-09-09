@@ -226,6 +226,12 @@ test('bounded history preserves distinct generations that share one native turn 
 test('a provider final crossing an unresolved submission boundary is retained durably', () => {
   const session = {}
   stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1000 })
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { providerTurnId: 'old-turn' })
+  stageTeamProviderTurn(session, {
     taskId: 'task_one', providerWorkGeneration: 2,
   }, { now: 2000 })
 
@@ -311,6 +317,28 @@ test('a hookless Claude final after the staged boundary belongs to the pending g
     provider: 'claude', observedAt: 2001, pendingPromptObserved: true,
   }), { taskId: 'task_one', providerWorkGeneration: 2 })
   assert.equal(deferredTeamProviderFinal(session)?.providerWorkGeneration, 2)
+})
+
+test('an upgraded untracked continuation cannot borrow a preceding native final', () => {
+  const session = {}
+  // A pre-upgrade running task has no accepted provider-turn journal. Its first
+  // coordinator follow-up nevertheless advances the durable work generation.
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { now: 2000 })
+
+  assert.equal(deferPendingTeamProviderFinal(session, {
+    provider: 'codex', providerTurnId: 'preceding-turn', observedAt: 2100,
+    lastAssistantMessage: 'The earlier turn finished.',
+  }), null)
+  assert.equal(deferredTeamProviderFinal(session), null)
+
+  // Positive prompt correlation remains sufficient for providers which can
+  // prove that the pending generation actually reached their input surface.
+  assert.deepEqual(deferPendingTeamProviderFinal(session, {
+    provider: 'codex', providerTurnId: 'follow-up-turn', observedAt: 2200,
+    lastAssistantMessage: 'The follow-up finished.', pendingPromptObserved: true,
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
 })
 
 test('an inherited native turn id remains provisional for a distinct follow-up turn', () => {

@@ -98,6 +98,10 @@ Notable changes to this project. Format based on
   sampling mutable task state. Continuation timeout guidance no longer filters
   mutation lookup by the unknowable child task, and saturated cancelled-task
   retries fail explicitly instead of acknowledging an unqueryable receipt.
+- Untracked post-upgrade follow-ups now require positive prompt evidence before
+  accepting an overtaking final; Claude failure peeks are generation-scoped,
+  revoked-task fallback pollers cannot wedge later turns, and mutation recovery
+  re-persists the journal before confirming acceptance.
 - Delegated input no longer falls through to a second transport after the
   provider accepted it but lifecycle persistence failed. Active fallback
   pollers advance with coordinator follow-ups, shared native turn IDs resolve
