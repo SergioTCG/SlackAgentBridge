@@ -398,20 +398,42 @@ test('authenticated coordinator-message acknowledgement wins a late uncertain tr
   )
   assert.match(promptHook,
     /acknowledgeCoordinatorTaskMessageDelivery\(state, task\.id,[\s\S]*providerWorkGeneration: acknowledgedTurn\.providerWorkGeneration/)
+  const acknowledgedCodexStart = promptHook.indexOf("if (provider === 'codex') beginCodexTurn(session)")
+  const acknowledgedPersist = promptHook.indexOf('saveStateNow(state)', acknowledgedCodexStart)
+  const acknowledgementAudit = promptHook.indexOf('await updateTeamTaskAudit(task)')
+  assert.ok(acknowledgedCodexStart >= 0 && acknowledgedPersist > acknowledgedCodexStart &&
+    acknowledgementAudit > acknowledgedPersist,
+  'Codex lifecycle tracking must begin and persist before acknowledgement audit I/O can admit Stop')
+  assert.match(promptHook,
+    /else if \(provider === 'codex' && !acknowledgedTurn\) beginCodexTurn\(session\)/,
+  'the post-audit path must not recreate a Codex turn already tracked before the audit')
 
   const delivery = daemon.slice(
     daemon.indexOf('async function performCoordinatorTaskMessageDelivery('),
     daemon.indexOf('function ensureCoordinatorTaskMessageDelivery('),
   )
   const catchStart = delivery.indexOf('catch (error)')
-  const acceptedGuard = delivery.indexOf("message.providerDeliveryStatus === 'delivered'", catchStart)
+  const persistedGuard = delivery.indexOf('persistedCoordinatorMessageAcks.has(message)', catchStart)
+  const acceptedGuard = delivery.indexOf("message.providerDeliveryStatus === 'delivered'", persistedGuard)
   const failureDisposition = delivery.indexOf('teamMessageFailureDisposition', catchStart)
   const pendingDiscard = delivery.indexOf('discardPendingTeamProviderTurn', catchStart)
-  assert.ok(catchStart >= 0 && acceptedGuard > catchStart && failureDisposition > acceptedGuard,
-    'an authenticated acknowledgement must win a racing transport error')
+  assert.ok(catchStart >= 0 && persistedGuard > catchStart && acceptedGuard > persistedGuard &&
+    failureDisposition > acceptedGuard,
+  'only a separately persisted authenticated acknowledgement may win a racing transport error')
   assert.ok(pendingDiscard > failureDisposition,
     'only a classified known-undelivered result may discard the recovery marker')
   assert.match(delivery, /if \(failure\.retryable\)[\s\S]*discardPendingTeamProviderTurn/)
+  assert.match(daemon, /const persistedCoordinatorMessageAcks = new WeakSet\(\)/)
+  assert.ok(promptHook.indexOf('saveStateNow(state)') <
+    promptHook.indexOf('persistedCoordinatorMessageAcks.add(acknowledgedCoordinatorMessage.message)'),
+  'hook acknowledgement proof must be recorded only after its state write succeeds')
+
+  const release = /async release\(caller, request\) \{[\s\S]*?\n  \},\n  async cancel/.exec(daemon)?.[0] || ''
+  const acceptedRetry = release.indexOf("if (accepted.kind !== 'release')")
+  const retryPersist = release.indexOf('saveStateNow(state)', acceptedRetry)
+  const retryReturn = release.indexOf('return { task: publicTeamTask', acceptedRetry)
+  assert.ok(acceptedRetry >= 0 && retryPersist > acceptedRetry && retryReturn > retryPersist,
+  'an accepted release retry must persist the already-mutated journal before confirming success')
 })
 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {

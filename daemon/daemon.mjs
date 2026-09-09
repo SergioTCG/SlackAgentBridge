@@ -2144,7 +2144,17 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
         now: activation.startedAt,
       })
       refreshTeamTaskPoller(session, activeTurn)
+      // Codex Stop/App Server completion can race the Slack audit below. Start
+      // and persist its lifecycle now so that finalization may clear this exact
+      // turn; the post-audit path must never recreate a turn that already ended.
+      if (provider === 'codex') beginCodexTurn(session)
       saveStateNow(state)
+      if (acknowledgedCoordinatorMessage?.message) {
+        // This in-memory proof is deliberately recorded only after the atomic
+        // state write. A racing transport error may trust it; locally mutated
+        // `delivered` fields whose persistence failed are not sufficient.
+        persistedCoordinatorMessageAcks.add(acknowledgedCoordinatorMessage.message)
+      }
     } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
       saveStateNow(state)
     }
@@ -2178,7 +2188,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
-    else if (provider === 'codex') beginCodexTurn(session)
+    else if (provider === 'codex' && !acknowledgedTurn) beginCodexTurn(session)
     return
   }
   if (ev === 'PreToolUse') {
@@ -3762,6 +3772,10 @@ const teamReportDeliveries = new Map()
 const teamMessageDeliveries = new Map()
 const teamMessageDeliveryTails = new Map()
 const teamCompletionDeliveries = new Map()
+// Hook and direct transport handlers can interleave while tmux input is in
+// flight. Weak object identity proves that this exact journal mutation passed
+// a synchronous atomic write in the authenticated hook path.
+const persistedCoordinatorMessageAcks = new WeakSet()
 const teamPayloadAuditTails = new Map()
 const teamTurnProof = new Set()
 const teamContinuationTimers = new Map()
@@ -4560,7 +4574,8 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     // The provider hook may have authenticated this exact prompt while the
     // multi-step tmux call was still unwinding. That durable acknowledgement
     // wins: never let a later transport error reopen or poison the message.
-    if (message.providerDeliveryStatus === 'delivered' && message.deliveryStatus === 'delivered') {
+    if (persistedCoordinatorMessageAcks.has(message) &&
+        message.providerDeliveryStatus === 'delivered' && message.deliveryStatus === 'delivered') {
       return true
     }
     const failure = teamMessageFailureDisposition({ providerAttempted, error })
@@ -5514,6 +5529,9 @@ const teamService = {
       if (accepted.kind !== 'release') {
         throw new TeamError('request_conflict', 'That request ID was already used for another team operation.', 409)
       }
+      // The original release may have mutated memory and then failed its atomic
+      // state write. Persist again before an idempotent retry confirms success.
+      saveStateNow(state)
       return { task: publicTeamTask(task, session.channel), created: false, mutation: accepted }
     } catch (error) {
       if (error?.code !== 'mutation_not_found') throw error

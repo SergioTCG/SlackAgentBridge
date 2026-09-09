@@ -66,6 +66,9 @@ Notable changes to this project. Format based on
 - Accepted coordinator messages now fence completion and release before Slack
   mirroring begins, and provider reports bind to a monotonic task-local work
   generation so a delayed earlier final cannot satisfy a delivered follow-up.
+- Codex acknowledgement hooks now persist lifecycle tracking before audit I/O,
+  only durably written hook acknowledgements may override a racing transport
+  error, and idempotent release retries re-persist accepted terminal state.
 - Legacy tasks retain their historical 32-reply capacity, while a saturated
   cancellation journal rejects reuse of its terminal request ID with a changed
   payload.
