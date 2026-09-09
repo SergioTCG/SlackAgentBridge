@@ -621,6 +621,39 @@ test('worker turn reports deduplicate by provider work generation', () => {
   assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, true)
 })
 
+test('completion declarations reject a provider generation that advanced during authentication', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Verify both phases.', requestId: 'completion-generation-task',
+    id: 'task_completion_generation', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  const observedGeneration = task.providerWorkGeneration
+
+  const followUp = appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'Also verify the second phase.',
+    requestId: 'completion-generation-message', now: 5000,
+  }).message
+  beginCoordinatorTaskMessageDelivery(state, task.id, followUp.id, { now: 5100 })
+  completeCoordinatorTaskMessageDelivery(state, task.id, followUp.id, { now: 5200 })
+  assert.ok(task.providerWorkGeneration > observedGeneration)
+
+  assert.throws(() => requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id,
+    fromChannel: worker.channel,
+    summary: 'Ready based on the earlier generation.',
+    requestId: 'completion-generation-stale',
+    expectedProviderWorkGeneration: observedGeneration,
+    now: 5300,
+  }), error => error.code === 'task_revision_changed')
+  assert.equal(task.completionRequest, null)
+})
+
 test('the bounded reply journal reserves capacity to clear the final gate', () => {
   const { state, team } = fixture()
   const { task } = createTeamTask(state, {
@@ -630,6 +663,18 @@ test('the bounded reply journal reserves capacity to clear the final gate', () =
   })
   claimTeamTask(state, task.id, { targetSessionId: 'worker', targetProvider: 'codex', now: 3000 })
   markTeamTaskRunning(state, task.id, { now: 4000 })
+  assert.throws(() => appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Malformed missing-gate checkpoint.',
+    requestId: 'gate-checkpoint-missing', now: 4500,
+  }), error => error.code === 'pending_gates_required')
+  assert.throws(() => appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Malformed null-gate checkpoint.', pendingGates: null,
+    requestId: 'gate-checkpoint-null', now: 4600,
+  }), error => error.code === 'pending_gates_required')
+  assert.throws(() => appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Malformed undefined-gate checkpoint.', pendingGates: undefined,
+    requestId: 'gate-checkpoint-undefined', now: 4700,
+  }), error => error.code === 'pending_gates_required')
   appendTeamTaskCheckpoint(state, task.id, {
     fromChannel: 'C-WORKER-1', text: 'CI is pending.', pendingGates: ['ci'],
     requestId: 'gate-checkpoint-1', now: 5000,

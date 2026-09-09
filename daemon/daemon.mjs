@@ -1164,7 +1164,8 @@ async function flushDeferredTeamProviderFinal(session, expected = null) {
       // A newer exact generation has superseded this retained final. It must not
       // mutate that lifecycle, and keeping it would fence reconciliation forever.
       const activeTask = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
-      if (!activeTask || teamTaskProviderWorkGeneration(activeTask) > deferred.providerWorkGeneration) {
+      if (!activeTask || activeTask.id !== deferred.taskId ||
+          teamTaskProviderWorkGeneration(activeTask) > deferred.providerWorkGeneration) {
         clearDeferredTeamProviderFinal(session, deferred)
         saveStateNow(state)
       }
@@ -5609,6 +5610,15 @@ const teamService = {
     })
   },
   async complete(caller, request) {
+    // Snapshot before resolveTeamCaller() yields to PID/tmux authentication. A
+    // coordinator follow-up can complete provider delivery during those awaits;
+    // readiness authored before that work must never be credited to its newer
+    // generation. Missing/foreign tasks are still reported only after caller
+    // authentication below.
+    const ingressTask = state.teamTasks?.[String(request.taskId || '')]
+    const expectedProviderWorkGeneration = ingressTask
+      ? teamTaskProviderWorkGeneration(ingressTask)
+      : null
     const session = await resolveTeamCaller(caller)
     requireTeamCallerContext(session)
     const task = teamTask(state, request.taskId)
@@ -5625,6 +5635,7 @@ const teamService = {
       fromChannel: session.channel,
       summary: request.text,
       requestId: request.requestId,
+      expectedProviderWorkGeneration,
     })
     const startCodexStatus = isWorkerBoundTeamTask(task)
       ? recordTeamWorkerProof(session, task)

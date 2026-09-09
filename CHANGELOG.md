@@ -84,6 +84,9 @@ Notable changes to this project. Format based on
 - Follow-up generations sharing one native provider turn retain distinct
   history entries, while coalesced undelivered reports receive fresh Slack
   idempotency identities instead of reusing an earlier accepted request.
+- Completion declarations retain the provider generation observed before
+  caller authentication, deferred finals cannot cross task identities, and
+  malformed checkpoints without an explicit gate array now fail closed.
 - Legacy tasks retain their historical 32-reply capacity, while a saturated
   cancellation journal rejects reuse of its terminal request ID with a changed
   payload.

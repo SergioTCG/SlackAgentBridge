@@ -588,7 +588,7 @@ export function appendTeamTaskReply(state, taskId, {
 }
 
 export function appendTeamTaskCheckpoint(state, taskId, options = {}) {
-  if (!Object.hasOwn(options, 'pendingGates')) {
+  if (!Object.hasOwn(options, 'pendingGates') || !Array.isArray(options.pendingGates)) {
     throw new TeamError('pending_gates_required', 'A checkpoint must declare its complete pending-gate list.')
   }
   return appendTeamTaskReply(state, taskId, options)
@@ -599,6 +599,7 @@ export function requestTeamTaskCompletion(state, taskId, {
   fromChannel,
   summary,
   requestId,
+  expectedProviderWorkGeneration = null,
   now = Date.now(),
 } = {}) {
   const task = teamTask(state, taskId)
@@ -626,6 +627,12 @@ export function requestTeamTaskCompletion(state, taskId, {
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
   }
+  const currentProviderWorkGeneration = teamTaskProviderWorkGeneration(task)
+  if (expectedProviderWorkGeneration !== null &&
+      currentProviderWorkGeneration !== Number(expectedProviderWorkGeneration)) {
+    throw new TeamError('task_revision_changed',
+      'The task received newer coordinator work while this completion declaration was being authenticated. Review that work before declaring completion again.', 409)
+  }
   if (unresolvedCoordinatorMessages(task).length) {
     throw new TeamError('task_message_in_flight',
       'A coordinator follow-up has not completed exact provider delivery; declare completion only after receiving it.', 409)
@@ -647,7 +654,7 @@ export function requestTeamTaskCompletion(state, taskId, {
     payloadHash,
     summary: text,
     requestedAt: nowIso(now),
-    workGeneration: teamTaskProviderWorkGeneration(task),
+    workGeneration: currentProviderWorkGeneration,
   }
   bumpTask(task, now)
   task.completionRequest.lifecycleVersion = task.lifecycleVersion

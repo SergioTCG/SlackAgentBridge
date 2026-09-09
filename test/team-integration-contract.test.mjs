@@ -302,6 +302,12 @@ test('provider turn reporting preserves task and process ownership until explici
     /beginTeamProviderPollerObservation[\s\S]*teamProviderPollerObservationCurrent/)
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
+  const completionGenerationSnapshot = completionDeclaration.indexOf('const expectedProviderWorkGeneration')
+  const completionCallerResolution = completionDeclaration.indexOf('await resolveTeamCaller(caller)')
+  assert.ok(completionGenerationSnapshot >= 0 && completionCallerResolution > completionGenerationSnapshot,
+    'completion must snapshot its provider generation before asynchronous caller authentication')
+  assert.match(completionDeclaration,
+    /requestTeamTaskCompletion\(state[\s\S]*expectedProviderWorkGeneration/)
   assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('session.teamActiveTaskId !== task.id'),
     'an exact completion retry must be recovered before the released session binding is rejected')
   assert.match(completionDeclaration,
@@ -309,6 +315,10 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon,
     /function recordTeamWorkerProof[\s\S]*activatePendingTeamProviderTurn\(session[\s\S]*refreshTeamTaskPoller/,
     'authenticated worker proof must promote uncertain accepted provider input')
+  const deferredFinalFlush = /async function flushDeferredTeamProviderFinal\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(deferredFinalFlush,
+    /!activeTask \|\| activeTask\.id !== deferred\.taskId \|\|[\s\S]*teamTaskProviderWorkGeneration\(activeTask\) > deferred\.providerWorkGeneration/,
+    'a deferred final from another task must not contaminate the next task at the same local generation')
 
   const continuation = /async continue\(caller, request\) \{[\s\S]*?\n  },\n  async reply/.exec(daemon)?.[0] || ''
   assert.match(continuation, /to: previous\.targetChannel/)
