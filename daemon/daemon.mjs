@@ -2474,6 +2474,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       const activation = {
         providerTurnId: body.turn_id || null,
         startedAt: body.observed_at || Date.now(),
+        acceptedAt: body.observed_at || Date.now(),
       }
       const activeTurn = pendingPromptTeamTurn
         ? activatePendingTeamProviderTurn(session, pendingPromptTeamTurn, activation)
@@ -3957,9 +3958,11 @@ async function injectText(session, text, options = {}) {
     if (!expectedTeamTurn) return
     // The prompt may finish before an async tmux transport unwinds. Promote the
     // pre-submit boundary, while retaining a hook-promoted turn if it won first.
-    const activeTurn = activatePendingTeamProviderTurn(session, expectedTeamTurn) ||
+    const acceptedAt = Date.now()
+    const activeTurn = activatePendingTeamProviderTurn(session, expectedTeamTurn, { acceptedAt }) ||
       activateTeamProviderTurn(session, {
         turn: expectedTeamTurn, startedAt: expectedTeamTurnStartedAt,
+        acceptedAt,
       })
     refreshTeamTaskPoller(session, activeTurn)
     try { saveStateNow(state) }
@@ -4178,7 +4181,12 @@ function recordTeamWorkerProof(session, task) {
     ? activatePendingTeamProviderTurn(session, {
         taskId: task.id,
         providerWorkGeneration: generation,
-      }, { startedAt: Number.isFinite(claimedAt) ? claimedAt : Date.now() })
+      }, {
+        startedAt: Number.isFinite(claimedAt) ? claimedAt : Date.now(),
+        // The authenticated reply is the first positive proof available here;
+        // a dispatch reservation timestamp is not provider acceptance evidence.
+        acceptedAt: Date.now(),
+      })
     : null
   if (activeTurn) refreshTeamTaskPoller(session, activeTurn)
   if (activeTurn) scheduleDeferredTeamProviderFinal(session, activeTurn)
@@ -4843,13 +4851,18 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
       target.teamProviderTurn?.taskId === providerTurn.taskId
     ? target.teamProviderTurn.providerTurnId || null
     : null
-  const activateSubmittedTurn = () => activatePendingTeamProviderTurn(target, providerTurn, {
-    providerTurnId: steeredNativeTurnId,
-  }) || activateTeamProviderTurn(target, {
-    turn: providerTurn,
-    providerTurnId: steeredNativeTurnId,
-    startedAt: providerTurnStartedAt,
-  })
+  const activateSubmittedTurn = () => {
+    const acceptedAt = Date.now()
+    return activatePendingTeamProviderTurn(target, providerTurn, {
+      providerTurnId: steeredNativeTurnId,
+      acceptedAt,
+    }) || activateTeamProviderTurn(target, {
+      turn: providerTurn,
+      providerTurnId: steeredNativeTurnId,
+      startedAt: providerTurnStartedAt,
+      acceptedAt,
+    })
+  }
   if (expected.provider === 'pi') {
     if (!injectQueuedPiPrompt(expected.pid, piPromptQueueItem(prompt))) {
       forgetInjected(expected.sid, prompt)
@@ -5836,11 +5849,12 @@ const teamService = {
             lifecycleVersion: appended.reply.lifecycleVersion || task.lifecycleVersion,
           })
         : null
-      if (appended.accepted || startCodexStatus || continuationTeamId) {
-        saveStateNow(state)
-        if (startCodexStatus) startCodexPoller(session)
-        if (continuationTeamId) scheduleTeamContinuation(continuationTeamId)
-      }
+      // The first attempt may have mutated this process's journal before its
+      // synchronous write failed. Re-persist every idempotent recovery before
+      // any Slack delivery, even when no new acceptance or wake was created.
+      saveStateNow(state)
+      if (startCodexStatus) startCodexPoller(session)
+      if (continuationTeamId) scheduleTeamContinuation(continuationTeamId)
       if (appended.accepted || request.pendingGates !== undefined) {
         await updateTeamTaskAudit(task).catch(error =>
           log('team reply acceptance audit deferred', task.id, String(error?.message || error)))

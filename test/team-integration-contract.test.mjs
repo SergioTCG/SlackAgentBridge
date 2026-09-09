@@ -504,7 +504,7 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
   assert.match(injection,
     /const expectedTeamTurnStartedAt = Date\.now\(\)[\s\S]*stageTeamProviderTurn\(session, expectedTeamTurn, \{ now: expectedTeamTurnStartedAt \}\)/)
   assert.match(injection,
-    /activatePendingTeamProviderTurn\(session, expectedTeamTurn\)[\s\S]*startedAt: expectedTeamTurnStartedAt/)
+    /activatePendingTeamProviderTurn\(session, expectedTeamTurn, \{ acceptedAt \}\)[\s\S]*startedAt: expectedTeamTurnStartedAt[\s\S]*acceptedAt/)
 
   const messageInjection = daemon.slice(
     daemon.indexOf('async function injectCoordinatorTaskMessageOnce('),
@@ -634,6 +634,22 @@ test('team mutation responses carry the journaled receipt from the original auth
     'a recovery lookup must durably re-persist the accepted mutation before confirming it')
   assert.match(cli, /verify acceptance with sab team mutation --request-id/)
   assert.match(teamModules, /result\?\.mutation \|\| await service\.mutation/)
+})
+
+test('idempotent checkpoint recovery is persisted before Slack side effects', () => {
+  const reply = /async reply\(caller, request\) \{[\s\S]*?\n  },\n  async checkpoint/.exec(daemon)?.[0] || ''
+  const retry = reply.slice(reply.indexOf('if (priorReply)'), reply.indexOf('if (session.teamActiveTaskId'))
+  const append = retry.indexOf('const appended = append(')
+  const persist = retry.indexOf('saveStateNow(state)', append)
+  const audit = retry.indexOf('await updateTeamTaskAudit', append)
+  const delivery = retry.indexOf('await ensureTeamReplyDelivery', append)
+  assert.ok(append >= 0 && persist > append,
+    'a recovered reply/checkpoint must be synchronously journaled')
+  assert.ok(audit > persist && delivery > persist,
+    'the recovered journal must precede every Slack audit or reply delivery side effect')
+  assert.match(retry,
+    /const continuationTeamId = [\s\S]*?: null\s+(?:\/\/[^\n]*\n\s*)*saveStateNow\(state\)\s+if \(startCodexStatus\)/,
+    'retry recovery must persist unconditionally, even when no new acceptance or wake was staged')
 })
 
 test('completion and default cancellation receipts use the caller-observed request identity', () => {

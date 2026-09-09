@@ -96,6 +96,10 @@ Notable changes to this project. Format based on
 - Deferred provider finals now journal an in-flight settlement claim and clear
   it atomically with the recovered task lifecycle, so a daemon crash cannot
   leave a claimed Codex or Pi final permanently fencing its worker task.
+- Provider generations now retain a distinct acceptance boundary, preventing a
+  pre-submit Claude final from being attributed to a follow-up whose transport
+  promoted later; recovered checkpoint retries are re-journaled before Slack
+  audit or reply delivery.
 - Completion declarations retain the provider generation observed before
   caller authentication, deferred finals cannot cross task identities, and
   malformed checkpoints without an explicit gate array now fail closed.

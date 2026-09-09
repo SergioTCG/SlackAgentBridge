@@ -325,6 +325,32 @@ test('a previous accepted turn keeps its final when a follow-up is only staged',
   assert.equal(deferredTeamProviderFinal(session), null)
 })
 
+test('a pre-acceptance final stays on the prior generation after follow-up promotion', () => {
+  const session = {}
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1000 })
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { acceptedAt: 1100 })
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2, inheritProviderTurnId: true,
+  }, { now: 2000 })
+
+  // The old Stop was observed while the follow-up was only staged, but its
+  // asynchronous handler did not resolve the generation until after transport
+  // promotion. The acceptance boundary must keep it on generation one.
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { acceptedAt: 2200 })
+  assert.deepEqual(providerTurnForCompletion(session, {
+    observedAt: 2100,
+  }), { taskId: 'task_one', providerWorkGeneration: 1 })
+  assert.deepEqual(providerTurnForCompletion(session, {
+    observedAt: 2300,
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
+})
+
 test('a hookless Claude final after the staged boundary belongs to the pending generation', () => {
   const session = {}
   stageTeamProviderTurn(session, {

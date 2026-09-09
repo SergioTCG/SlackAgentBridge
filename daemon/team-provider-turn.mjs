@@ -5,12 +5,14 @@ function normalizedTurn(value, startedAt = Date.now(), providerTurnId = null) {
   const providerWorkGeneration = Number(value?.providerWorkGeneration)
   if (!taskId || !Number.isSafeInteger(providerWorkGeneration) || providerWorkGeneration < 1) return null
   const start = Number(startedAt)
+  const accepted = Number(value?.acceptedAt)
   return {
     taskId,
     providerWorkGeneration,
     startedAt: Number.isSafeInteger(start) && start > 0 ? start : Date.now(),
     providerTurnId: providerTurnId ? String(providerTurnId) : null,
     inheritProviderTurnId: value?.inheritProviderTurnId === true,
+    acceptedAt: Number.isSafeInteger(accepted) && accepted > 0 ? accepted : null,
   }
 }
 
@@ -234,6 +236,7 @@ export function clearDeferredTeamProviderFinal(session, expected = null) {
 export function activatePendingTeamProviderTurn(session, expected, {
   providerTurnId = null,
   startedAt = null,
+  acceptedAt = null,
 } = {}) {
   const pending = normalizedTurn(session?.teamProviderTurnPending,
     session?.teamProviderTurnPending?.stagedAt)
@@ -242,7 +245,11 @@ export function activatePendingTeamProviderTurn(session, expected, {
   // event. Keep the boundary journaled before submission so event ordering does
   // not depend on when this promotion callback happened to run.
   const boundary = startedAt == null ? pending.startedAt : startedAt
-  return activateTeamProviderTurn(session, { providerTurnId, startedAt: boundary })
+  return activateTeamProviderTurn(session, {
+    providerTurnId,
+    startedAt: boundary,
+    acceptedAt: acceptedAt == null ? boundary : acceptedAt,
+  })
 }
 
 // Both delegated-task envelopes and coordinator follow-ups carry a private,
@@ -282,11 +289,16 @@ export function activateTeamProviderTurn(session, {
   turn = null,
   providerTurnId = null,
   startedAt = Date.now(),
+  acceptedAt = null,
 } = {}) {
   if (!session) return null
   const source = turn || session.teamProviderTurnPending
   let next = normalizedTurn(source, startedAt, providerTurnId)
   if (!next) return null
+  const accepted = Number(acceptedAt)
+  next.acceptedAt = Number.isSafeInteger(accepted) && accepted > 0
+    ? accepted
+    : next.acceptedAt || next.startedAt
   const current = normalizedTurn(session.teamProviderTurn,
     session.teamProviderTurn?.startedAt, session.teamProviderTurn?.providerTurnId)
   if (current && next.inheritProviderTurnId && !next.providerTurnId &&
@@ -310,6 +322,8 @@ export function activateTeamProviderTurn(session, {
       ...current,
       providerTurnId: current.providerTurnId || next.providerTurnId,
       startedAt: Math.min(current.startedAt, next.startedAt),
+      acceptedAt: Math.min(current.acceptedAt || current.startedAt,
+        next.acceptedAt || next.startedAt),
     }
   } else {
     rememberPrevious(session, current)
@@ -345,7 +359,8 @@ export function providerTurnForCompletion(session, {
   const observed = Number(observedAt)
   const hasObservedAt = Number.isSafeInteger(observed) && observed > 0
   const latest = values => values
-    .filter(item => !hasObservedAt || item.startedAt <= observed)
+    .filter(item => !hasObservedAt ||
+      (item.startedAt <= observed && (item.acceptedAt || item.startedAt) <= observed))
     .sort((left, right) => right.startedAt - left.startedAt ||
       right.providerWorkGeneration - left.providerWorkGeneration)[0]
   const nativeId = providerTurnId ? String(providerTurnId) : null
