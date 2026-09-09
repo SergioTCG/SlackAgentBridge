@@ -462,7 +462,7 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
   assert.match(promptHook,
     /const acknowledgedTurnStillCurrent[\s\S]*activeTurn\.taskId === acknowledgedTurn\.taskId[\s\S]*activeTurn\.providerWorkGeneration === acknowledgedTurn\.providerWorkGeneration/)
   assert.match(promptHook,
-    /provider === 'codex' && acknowledgedTurnStillCurrent[\s\S]*!codexFinalAlreadyClaimed\(session, body\.turn_id\)[\s\S]*beginCodexTurn\(session, activation\.startedAt\)/)
+    /provider === 'codex' && acknowledgedTurnStillCurrent[\s\S]*!codexFinalAlreadyClaimed\(session, body\.turn_id\)[\s\S]*beginCodexTurn\(session, activation\.startedAt, body\.turn_id \|\| null\)/)
 })
 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {

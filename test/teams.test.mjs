@@ -118,6 +118,26 @@ test('coordinator task creation is idempotent and directed only to workers', () 
   }), error => error.code === 'request_conflict')
 })
 
+test('accepted continuation retries survive later worker removal', () => {
+  const { state, team } = fixture()
+  const task = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'sid-master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Continue the accepted work.', parentTaskId: 'task-parent',
+    requestId: 'continuation-retry', id: 'task-continuation', now: 2000,
+  }).task
+
+  removeTeamWorker(state, team.id, 'parallel-1', { now: 3000 })
+  assert.equal(task.status, 'cancelled')
+  assert.equal(assertTeamTaskRetry(state, task, {
+    teamId: team.id, target: 'C-WORKER-1', text: 'Continue the accepted work.', files: [],
+    parentTaskId: 'task-parent',
+  }), task)
+  assert.throws(() => assertTeamTaskRetry(state, task, {
+    teamId: team.id, target: 'C-WORKER-1', text: 'Different continuation.', files: [],
+    parentTaskId: 'task-parent',
+  }), error => error.code === 'request_conflict')
+})
+
 test('active worker queues are bounded and fail visibly before mutation', () => {
   const { state, team } = fixture()
   for (let index = 0; index < 8; index++) {

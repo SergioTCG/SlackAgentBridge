@@ -64,3 +64,46 @@ export function resetCodexPollerEvidence(poller) {
   poller.idleObservation = null
   return poller
 }
+
+const normalizedTurnStart = value => {
+  const timestamp = Number(value)
+  return Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : Date.now()
+}
+
+// Transport acceptance precedes Codex's prompt hook. Keep that earlier boundary
+// only until the first matching native prompt can identify the same turn.
+export function recordCodexTransportTurnStart(session, startedAt = Date.now()) {
+  if (!session || session.codexTurnStartedAt) return false
+  session.codexTurnStartedAt = normalizedTurnStart(startedAt)
+  session.codexTurnAwaitingPromptHook = true
+  delete session.codexTurnId
+  return true
+}
+
+// A prompt hook for another, newer native turn must replace the old lifecycle
+// timestamp. Otherwise a delayed final observed before this prompt could still
+// appear current. Duplicate hooks and the first hook after transport acceptance
+// retain the earlier boundary; an older delayed hook cannot roll time backward.
+export function recordCodexPromptTurnStart(session, { startedAt = Date.now(), turnId = null } = {}) {
+  if (!session) return false
+  const nextStart = normalizedTurnStart(startedAt)
+  const previousStart = Number(session.codexTurnStartedAt)
+  const hasPrevious = Number.isSafeInteger(previousStart) && previousStart > 0
+  const nativeTurnId = typeof turnId === 'string' && turnId ? turnId : null
+  const awaitingHook = session.codexTurnAwaitingPromptHook === true
+  const duplicateHook = Boolean(nativeTurnId && session.codexTurnId === nativeTurnId)
+
+  if (hasPrevious && !duplicateHook && nextStart < previousStart) return false
+
+  const resolvedStart = hasPrevious && (awaitingHook || duplicateHook)
+    ? Math.min(previousStart, nextStart)
+    : nextStart
+  const changed = session.codexTurnStartedAt !== resolvedStart ||
+    session.codexTurnAwaitingPromptHook === true ||
+    (session.codexTurnId || null) !== nativeTurnId
+  session.codexTurnStartedAt = resolvedStart
+  if (nativeTurnId) session.codexTurnId = nativeTurnId
+  else delete session.codexTurnId
+  delete session.codexTurnAwaitingPromptHook
+  return changed
+}

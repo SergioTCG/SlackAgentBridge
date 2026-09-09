@@ -36,7 +36,8 @@ import {
 } from './codex-commentary.mjs'
 import { handleCodexFinalHttp } from './codex-final-http.mjs'
 import {
-  codexTerminalFailure, codexTerminalFailureDecision, resetCodexPollerEvidence,
+  codexTerminalFailure, codexTerminalFailureDecision, recordCodexPromptTurnStart,
+  recordCodexTransportTurnStart, resetCodexPollerEvidence,
 } from './codex-terminal.mjs'
 import { codexFooterSettings, shouldPromoteCodexFooter } from './codex-footer.mjs'
 import {
@@ -1035,19 +1036,13 @@ function startCodexPoller(session) {
   tick().catch(e => log('Codex status poller error', String(e)))
 }
 
-function beginCodexTurn(session, startedAt = Date.now()) {
-  const observedStart = Number(startedAt)
-  const normalizedStart = Number.isSafeInteger(observedStart) && observedStart > 0
-    ? observedStart
-    : Date.now()
-  const previousStart = Number(session.codexTurnStartedAt)
-  stopPoller(session)
-  session.codexTurnStartedAt = Number.isSafeInteger(previousStart) && previousStart > 0
-    ? Math.min(previousStart, normalizedStart)
-    : normalizedStart
+function beginCodexTurn(session, startedAt = Date.now(), turnId = null) {
+  if (!recordCodexPromptTurnStart(session, { startedAt, turnId })) return false
+  stopPoller(session, { preserveCodexTurn: true })
   delete session.codexUsageBaseline
   saveState(state)
   startCodexPoller(session)
+  return true
 }
 
 // Codex occasionally accepts tmux input without emitting UserPromptSubmit.
@@ -1055,8 +1050,11 @@ function beginCodexTurn(session, startedAt = Date.now()) {
 // cannot depend on a provider hook that may never arrive. A later hook remains
 // authoritative and may refresh the timestamp in the normal path.
 function ensureCodexTurnStarted(session, startedAt = Date.now()) {
-  if (providerOf(session) !== 'codex' || session.codexTurnStartedAt) return false
-  beginCodexTurn(session, startedAt)
+  if (providerOf(session) !== 'codex' || !recordCodexTransportTurnStart(session, startedAt)) return false
+  stopPoller(session, { preserveCodexTurn: true })
+  delete session.codexUsageBaseline
+  saveState(state)
+  startCodexPoller(session)
   return true
 }
 
@@ -1097,16 +1095,19 @@ function beginPiTurn(session) {
   startPiPoller(session)
 }
 
-function stopPoller(session) {
+function stopPoller(session, { preserveCodexTurn = false } = {}) {
   const p = pollers.get(session.id)
   if (p) { p.stopped = true; clearInterval(p.timer); pollers.delete(session.id) }
   const codex = codexPollers.get(session.id)
   if (codex) { codex.stopped = true; clearInterval(codex.timer); codexPollers.delete(session.id) }
   const pi = piPollers.get(session.id)
   if (pi) { pi.stopped = true; clearInterval(pi.timer); piPollers.delete(session.id) }
-  if (session.codexTurnStartedAt || session.codexUsageBaseline) {
+  if (!preserveCodexTurn && (session.codexTurnStartedAt || session.codexUsageBaseline ||
+      session.codexTurnId || session.codexTurnAwaitingPromptHook)) {
     delete session.codexTurnStartedAt
     delete session.codexUsageBaseline
+    delete session.codexTurnId
+    delete session.codexTurnAwaitingPromptHook
     saveState(state)
   }
   if (session.piTurnStartedAt) {
@@ -2173,7 +2174,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       if (provider === 'codex' && acknowledgedTurnStillCurrent &&
           ['dispatching', 'running'].includes(task.status) &&
           !codexFinalAlreadyClaimed(session, body.turn_id)) {
-        beginCodexTurn(session, activation.startedAt)
+        beginCodexTurn(session, activation.startedAt, body.turn_id || null)
       }
       saveStateNow(state)
       if (acknowledgedCoordinatorMessage?.message) {
@@ -2217,7 +2218,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
     else if (provider === 'codex' && !acknowledgedTurn &&
         !codexFinalAlreadyClaimed(session, body.turn_id)) {
-      beginCodexTurn(session, body.observed_at || Date.now())
+      beginCodexTurn(session, body.observed_at || Date.now(), body.turn_id || null)
     }
     return
   }

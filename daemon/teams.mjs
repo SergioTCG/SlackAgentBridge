@@ -428,9 +428,15 @@ export function teamTaskForRequest(state, sourceChannel, requestId) {
 }
 
 export function assertTeamTaskRetry(state, task, { teamId, target, text, files = [], parentTaskId = null } = {}) {
-  const { channel } = resolveTeamPeer(state, teamId, target)
+  // The accepted task is the idempotency authority. Team membership may be
+  // removed after the first response is lost, so a retry must not depend on a
+  // currently resolvable edge. Compare the immutable destination captured at
+  // acceptance instead.
+  const destination = String(target || '').trim().toLowerCase()
+  const targetMatches = destination === String(task.targetChannel || '').toLowerCase() ||
+    destination === String(task.targetAlias || '').toLowerCase()
   const payloadHash = taskRequestHash({ text: String(text || '').trim(), files, parentTaskId })
-  if (task.teamId !== teamId || task.targetChannel !== channel || task.payloadHash !== payloadHash) {
+  if (task.teamId !== teamId || !targetMatches || task.payloadHash !== payloadHash) {
     throw new TeamError('request_conflict', 'That request ID was already used for different team work.', 409)
   }
   return task

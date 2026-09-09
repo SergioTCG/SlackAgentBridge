@@ -4,6 +4,8 @@ import fs from 'node:fs'
 import {
   codexTerminalFailure,
   codexTerminalFailureDecision,
+  recordCodexPromptTurnStart,
+  recordCodexTransportTurnStart,
   resetCodexPollerEvidence,
 } from '../daemon/codex-terminal.mjs'
 
@@ -80,6 +82,36 @@ test('Codex follow-up generations cannot inherit failure or idle evidence', () =
     pane: idlePane(CAPACITY), ready: true,
     previousKey: poller.failureKey, confirmations: poller.failureConfirmations,
   }).action, 'wait')
+})
+
+test('each native Codex prompt gets an exact start without losing its transport boundary', () => {
+  const session = {}
+  assert.equal(recordCodexTransportTurnStart(session, 100), true)
+  assert.equal(session.codexTurnStartedAt, 100)
+
+  assert.equal(recordCodexPromptTurnStart(session, { startedAt: 110, turnId: 'turn-1' }), true)
+  assert.equal(session.codexTurnStartedAt, 100)
+  assert.equal(session.codexTurnId, 'turn-1')
+
+  assert.equal(recordCodexPromptTurnStart(session, { startedAt: 120, turnId: 'turn-1' }), false)
+  assert.equal(session.codexTurnStartedAt, 100)
+
+  assert.equal(recordCodexPromptTurnStart(session, { startedAt: 200, turnId: 'turn-2' }), true)
+  assert.equal(session.codexTurnStartedAt, 200)
+  assert.equal(session.codexTurnId, 'turn-2')
+
+  assert.equal(recordCodexPromptTurnStart(session, { startedAt: 150, turnId: 'turn-1' }), false)
+  assert.equal(session.codexTurnStartedAt, 200)
+  assert.equal(session.codexTurnId, 'turn-2')
+
+  const awaiting = {}
+  recordCodexTransportTurnStart(awaiting, 300)
+  assert.equal(recordCodexPromptTurnStart(awaiting, { startedAt: 250, turnId: 'stale-turn' }), false)
+  assert.equal(awaiting.codexTurnStartedAt, 300)
+  assert.equal(awaiting.codexTurnAwaitingPromptHook, true)
+  assert.equal(recordCodexPromptTurnStart(awaiting, { startedAt: 310, turnId: 'current-turn' }), true)
+  assert.equal(awaiting.codexTurnStartedAt, 300)
+  assert.equal(awaiting.codexTurnId, 'current-turn')
 })
 
 test('Codex live and restart paths finalize capacity failures visibly', () => {
