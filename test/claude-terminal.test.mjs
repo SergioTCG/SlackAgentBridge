@@ -5,6 +5,7 @@ import {
   claudePollerDecision,
   claudeTerminalFailureBatch,
   prepareClaudeTerminalDelivery,
+  resetClaudePollerEvidence,
 } from '../daemon/claude-terminal.mjs'
 
 const LOGIN = 'Login expired · Please run /login'
@@ -60,6 +61,17 @@ test('Claude poller preserves spinner, form, and missing-Stop fallback behavior'
   assert.deepEqual(claudePollerDecision({ sawSpinner: true, idleTicks: 3, pendingPermission: true }), {
     action: 'wait', idleTicks: 3,
   })
+})
+
+test('Claude follow-up generations cannot inherit spinner completion evidence', () => {
+  const poller = { sawSpinner: true, idle: 3, last: 'Flibbergibbiting' }
+
+  resetClaudePollerEvidence(poller)
+
+  assert.deepEqual(poller, { sawSpinner: false, idle: 0, last: 'Flibbergibbiting' })
+  assert.deepEqual(claudePollerDecision({
+    sawSpinner: poller.sawSpinner, idleTicks: poller.idle,
+  }), { action: 'wait', idleTicks: 0 })
 })
 
 test('Claude terminal failure delivery is deduplicated for a bounded interval', () => {

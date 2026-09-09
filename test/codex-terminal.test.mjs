@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import {
   codexTerminalFailure,
   codexTerminalFailureDecision,
+  resetCodexPollerEvidence,
 } from '../daemon/codex-terminal.mjs'
 
 const CAPACITY = '⚠️ Selected model is at capacity. Please try a different model.'
@@ -60,6 +61,25 @@ test('Codex terminal failure requires a stable idle observation', () => {
   }), {
     action: 'none', key: null, confirmations: 0, failure: null,
   })
+})
+
+test('Codex follow-up generations cannot inherit failure or idle evidence', () => {
+  const poller = {
+    failureKey: 'model_capacity', failureConfirmations: 1,
+    idleObservation: { pane: 'old idle surface', confirmations: 1 },
+    last: 'Codex is working',
+  }
+
+  resetCodexPollerEvidence(poller)
+
+  assert.deepEqual(poller, {
+    failureKey: null, failureConfirmations: 0, idleObservation: null,
+    last: 'Codex is working',
+  })
+  assert.equal(codexTerminalFailureDecision({
+    pane: idlePane(CAPACITY), ready: true,
+    previousKey: poller.failureKey, confirmations: poller.failureConfirmations,
+  }).action, 'wait')
 })
 
 test('Codex live and restart paths finalize capacity failures visibly', () => {

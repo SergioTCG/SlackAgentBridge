@@ -62,6 +62,16 @@ export function claudePollerDecision({
   return { action: 'wait', idleTicks }
 }
 
+// A coordinator follow-up starts a distinct durable work generation even when
+// Claude keeps the same native session and poller. Spinner disappearance from
+// the preceding generation is not evidence that the follow-up completed.
+export function resetClaudePollerEvidence(poller) {
+  if (!poller) return null
+  poller.sawSpinner = false
+  poller.idle = 0
+  return poller
+}
+
 export function prepareClaudeTerminalDelivery(text, previousFailure = null, now = Date.now()) {
   const raw = String(text || '').trim()
   const batch = claudeTerminalFailureBatch(raw)

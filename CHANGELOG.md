@@ -72,6 +72,9 @@ Notable changes to this project. Format based on
 - Delegated and coordinator-follow-up turns retain their pre-submit event
   boundary, and delayed Codex prompt hooks cannot restart a completed turn or
   retag lifecycle tracking after a newer work generation begins.
+- Coordinator follow-up generations reset Claude spinner and Codex terminal
+  failure/idle evidence, while successful `sab team` mutations retain their
+  durable request receipts in CLI output.
 - Legacy tasks retain their historical 32-reply capacity, while a saturated
   cancellation journal rejects reuse of its terminal request ID with a changed
   payload.

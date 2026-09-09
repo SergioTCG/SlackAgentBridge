@@ -129,6 +129,15 @@ function output(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`)
 }
 
+function outputMutation(result, resource) {
+  // Preserve the historical top-level task/reply/message shape while exposing
+  // the durable request receipt returned by newer daemons. This stays
+  // compatible with an older daemon that does not yet return `mutation`.
+  output(result.mutation && resource && typeof resource === 'object'
+    ? { ...resource, mutation: result.mutation }
+    : resource)
+}
+
 async function mutate(pathname, body, { timeout = 30_000 } = {}) {
   const requestId = body.requestId || crypto.randomUUID()
   try {
@@ -220,7 +229,7 @@ try {
     const result = await mutate('/team/send', {
       to: parsed.to, text: parsed.text, paths: [], requestId: parsed.requestId,
     })
-    output(result.task)
+    outputMutation(result, result.task)
   } else if (command === 'send-file') {
     const parsed = commonMessageArgs(args, { files: true })
     if (Boolean(parsed.to) === Boolean(parsed.taskId)) usage('send-file requires exactly one of --to or --task')
@@ -230,7 +239,7 @@ try {
       const result = parsed.to
         ? await mutate('/team/send', { ...body, to: parsed.to }, { timeout: 10 * 60_000 })
         : await mutate('/team/reply', { ...body, taskId: parsed.taskId }, { timeout: 10 * 60_000 })
-      output(result.task || result.reply)
+      outputMutation(result, result.task || result.reply)
     } catch (error) {
       throw error
     }
@@ -240,7 +249,7 @@ try {
     const result = await mutate('/team/reply', {
       taskId: parsed.taskId, text: parsed.text, paths: [], requestId: parsed.requestId,
     })
-    output(result.reply)
+    outputMutation(result, result.reply)
   } else if (command === 'checkpoint') {
     const parsed = taskRequestArgs(args, { text: true, pending: true })
     if (!parsed.taskId || !parsed.text || parsed.pendingGates === null) {
@@ -250,35 +259,35 @@ try {
       taskId: parsed.taskId, text: parsed.text, pendingGates: parsed.pendingGates,
       requestId: parsed.requestId,
     })
-    output(result.reply)
+    outputMutation(result, result.reply)
   } else if (command === 'complete') {
     const parsed = taskRequestArgs(args, { text: true })
     if (!parsed.taskId || !parsed.text) usage('complete requires --task and either --stdin or --message')
     const result = await mutate('/team/complete', {
       taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId,
     })
-    output(result.task)
+    outputMutation(result, result.task)
   } else if (command === 'release') {
     const parsed = taskRequestArgs(args)
     if (!parsed.taskId) usage('release requires --task')
     const result = await mutate('/team/release', {
       taskId: parsed.taskId, requestId: parsed.requestId,
     })
-    output(result.task)
+    outputMutation(result, result.task)
   } else if (command === 'continue') {
     const parsed = taskRequestArgs(args, { text: true })
     if (!parsed.taskId || !parsed.text) usage('continue requires --task and either --stdin or --message')
     const result = await mutate('/team/continue', {
       taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId,
     })
-    output(result.task)
+    outputMutation(result, result.task)
   } else if (command === 'message' || command === 'replace') {
     const parsed = commonMessageArgs(args)
     if (!parsed.taskId || !parsed.text) usage(`${command} requires --task and either --stdin or --message`)
     const result = await mutate(`/team/${command}`, {
       taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId,
     })
-    output(result.message || result.task)
+    outputMutation(result, result.message || result.task)
   } else if (command === 'cancel') {
     let taskId = null
     let reason = 'Cancelled by the coordinator.'
@@ -291,7 +300,7 @@ try {
     }
     if (!taskId) usage('cancel requires --task')
     const result = await mutate('/team/cancel', { taskId, reason, requestId })
-    output(result.task)
+    outputMutation(result, result.task)
   } else if (command === 'mutation') {
     const parsed = taskRequestArgs(args)
     if (!parsed.requestId) usage('mutation requires --request-id')

@@ -53,3 +53,14 @@ export function codexTerminalFailureDecision({
     action: 'failure', key: failure.key, confirmations: nextConfirmations, failure,
   }
 }
+
+// A coordinator follow-up may reuse the same native Codex process and poller,
+// but terminal failure and idle observations belong to one exact work
+// generation. Never let the preceding generation finalize the next one.
+export function resetCodexPollerEvidence(poller) {
+  if (!poller) return null
+  poller.failureKey = null
+  poller.failureConfirmations = 0
+  poller.idleObservation = null
+  return poller
+}

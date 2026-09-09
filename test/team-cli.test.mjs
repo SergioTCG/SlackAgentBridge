@@ -29,6 +29,14 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
     for await (const chunk of req) body += chunk
     requests.push({ method: req.method, url: req.url, headers: req.headers, body: body ? JSON.parse(body) : null })
     res.setHeader('content-type', 'application/json')
+    const accepted = resource => JSON.stringify({
+      ok: true,
+      ...resource,
+      mutation: body ? {
+        requestId: JSON.parse(body).requestId,
+        status: 'accepted',
+      } : undefined,
+    })
     if (req.url.startsWith('/team/context')) return res.end(JSON.stringify({ ok: true, context: { role: 'coordinator' } }))
     if (req.url.startsWith('/team/peers')) return res.end(JSON.stringify({ ok: true, peers: [{ alias: 'parallel-1' }] }))
     if (req.url.startsWith('/team/inbox')) return res.end(JSON.stringify({ ok: true, tasks: [{ id: 'task_one' }], nextCursor: 'cursor-two' }))
@@ -42,27 +50,27 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
     if (req.url.startsWith('/team/mutations/')) return res.end(JSON.stringify({
       ok: true, mutation: { requestId: decodeURIComponent(req.url.split('/').at(-1).split('?')[0]), status: 'accepted' },
     }))
-    if (req.url.startsWith('/team/send')) return res.end(JSON.stringify({ ok: true, created: true, task: { id: 'task_one', status: 'queued' } }))
+    if (req.url.startsWith('/team/send')) return res.end(accepted({ created: true, task: { id: 'task_one', status: 'queued' } }))
     if (req.url.startsWith('/team/reply') && JSON.parse(body).text === 'Uncertain reply.') {
       res.writeHead(503)
       return res.end(JSON.stringify({ ok: false, error: 'temporary bridge failure' }))
     }
-    if (req.url.startsWith('/team/reply')) return res.end(JSON.stringify({ ok: true, reply: { id: 'reply_one', text: body ? JSON.parse(body).text : '' } }))
-    if (req.url.startsWith('/team/checkpoint')) return res.end(JSON.stringify({ ok: true, reply: { id: 'reply_checkpoint' } }))
-    if (req.url.startsWith('/team/complete')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', completionRequestedAt: 'now' } }))
-    if (req.url.startsWith('/team/release')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'completed' } }))
+    if (req.url.startsWith('/team/reply')) return res.end(accepted({ reply: { id: 'reply_one', text: body ? JSON.parse(body).text : '' } }))
+    if (req.url.startsWith('/team/checkpoint')) return res.end(accepted({ reply: { id: 'reply_checkpoint' } }))
+    if (req.url.startsWith('/team/complete')) return res.end(accepted({ task: { id: 'task_one', completionRequestedAt: 'now' } }))
+    if (req.url.startsWith('/team/release')) return res.end(accepted({ task: { id: 'task_one', status: 'completed' } }))
     if (req.url.startsWith('/team/continue') && JSON.parse(body).text === 'Uncertain continuation.') {
       res.writeHead(503)
       return res.end(JSON.stringify({ ok: false, error: 'temporary bridge failure' }))
     }
-    if (req.url.startsWith('/team/continue')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_two', parentTaskId: 'task_one' } }))
-    if (req.url.startsWith('/team/cancel')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'cancelled' } }))
-    if (req.url.startsWith('/team/replace')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', instruction: JSON.parse(body).text } }))
+    if (req.url.startsWith('/team/continue')) return res.end(accepted({ task: { id: 'task_two', parentTaskId: 'task_one' } }))
+    if (req.url.startsWith('/team/cancel')) return res.end(accepted({ task: { id: 'task_one', status: 'cancelled' } }))
+    if (req.url.startsWith('/team/replace')) return res.end(accepted({ task: { id: 'task_one', instruction: JSON.parse(body).text } }))
     if (req.url.startsWith('/team/message') && JSON.parse(body).text === 'Uncertain delivery.') {
       res.writeHead(503)
       return res.end(JSON.stringify({ ok: false, error: 'provider unavailable' }))
     }
-    if (req.url.startsWith('/team/message')) return res.end(JSON.stringify({ ok: true, message: { id: 'message_one', text: JSON.parse(body).text } }))
+    if (req.url.startsWith('/team/message')) return res.end(accepted({ message: { id: 'message_one', text: JSON.parse(body).text } }))
     if (req.url.startsWith('/team/mode')) return res.end(JSON.stringify({ ok: true, mode: JSON.parse(body).mode }))
     res.writeHead(404); res.end(JSON.stringify({ ok: false }))
   })
@@ -81,13 +89,20 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   const sent = await run(['send', '--to', 'parallel-1', '--stdin', '--request-id', 'stable-request-1'], env, 'Line one\n"quoted"; $(not shell)\n')
   assert.equal(sent.status, 0, sent.stderr)
   assert.equal(JSON.parse(sent.stdout).id, 'task_one')
+  assert.equal(JSON.parse(sent.stdout).mutation.requestId, 'stable-request-1')
   const replied = await run(['reply', '--task', 'task_one', '--message', 'Progress.'], env)
   assert.equal(replied.status, 0, replied.stderr)
+  assert.match(JSON.parse(replied.stdout).mutation.requestId, /^[0-9a-f-]{36}$/)
   const checkpoint = await run(['checkpoint', '--task', 'task_one', '--pending', 'ci,merge', '--message', 'Still running.'], env)
   assert.equal(checkpoint.status, 0, checkpoint.stderr)
-  assert.equal((await run(['complete', '--task', 'task_one', '--message', 'Everything passed.'], env)).status, 0)
-  assert.equal((await run(['release', '--task', 'task_one'], env)).status, 0)
-  assert.equal((await run(['continue', '--task', 'task_one', '--message', 'Follow up.'], env)).status, 0)
+  assert.match(JSON.parse(checkpoint.stdout).mutation.requestId, /^[0-9a-f-]{36}$/)
+  const completed = await run(['complete', '--task', 'task_one', '--message', 'Everything passed.'], env)
+  const released = await run(['release', '--task', 'task_one'], env)
+  const continued = await run(['continue', '--task', 'task_one', '--message', 'Follow up.'], env)
+  for (const result of [completed, released, continued]) {
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(JSON.parse(result.stdout).mutation.requestId, /^[0-9a-f-]{36}$/)
+  }
   const uncertainContinuation = await run([
     'continue', '--task', 'task_one', '--message', 'Uncertain continuation.',
   ], env)
@@ -100,14 +115,19 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   assert.equal((await run(['mutation', '--request-id', 'stable-request-1', '--task', 'task_one'], env)).status, 0)
   const file = await run(['send-file', '--task', 'task_one', '--message', 'Report.', '--', 'report final.pdf'], env)
   assert.equal(file.status, 0, file.stderr)
+  assert.match(JSON.parse(file.stdout).mutation.requestId, /^[0-9a-f-]{36}$/)
   const inbox = await run(['inbox', '--limit', '5', '--active', '--target', 'parallel-1', '--status', 'queued,running', '--since', '2026-01-01T00:00:00.000Z', '--json'], env)
   assert.deepEqual(JSON.parse(inbox.stdout), [{ id: 'task_one' }])
   assert.equal((await run(['inbox', '--after', 'task_old', '--limit', '5', '--json'], env)).status, 0)
   const page = await run(['inbox', '--limit', '5', '--page', '--cursor', 'cursor-one', '--json'], env)
   assert.deepEqual(JSON.parse(page.stdout), { tasks: [{ id: 'task_one' }], nextCursor: 'cursor-two' })
-  assert.equal((await run(['cancel', '--task', 'task_one', '--reason', 'Done elsewhere.'], env)).status, 0)
-  assert.equal((await run(['replace', '--task', 'task_one', '--stdin'], env, 'New work.')).status, 0)
-  assert.equal((await run(['message', '--task', 'task_one', '--message', 'Proceed.'], env)).status, 0)
+  const cancelled = await run(['cancel', '--task', 'task_one', '--reason', 'Done elsewhere.'], env)
+  const replaced = await run(['replace', '--task', 'task_one', '--stdin'], env, 'New work.')
+  const messaged = await run(['message', '--task', 'task_one', '--message', 'Proceed.'], env)
+  for (const result of [cancelled, replaced, messaged]) {
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(JSON.parse(result.stdout).mutation.requestId, /^[0-9a-f-]{36}$/)
+  }
   const uncertainMessage = await run(['message', '--task', 'task_one', '--message', 'Uncertain delivery.'], env)
   assert.equal(uncertainMessage.status, 1)
   const uncertainRequest = requests.find(request =>

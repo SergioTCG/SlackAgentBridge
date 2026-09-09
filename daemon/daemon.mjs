@@ -35,7 +35,9 @@ import {
   commentaryFromAppServerMessage, releaseCodexCommentary, releaseCodexFinal,
 } from './codex-commentary.mjs'
 import { handleCodexFinalHttp } from './codex-final-http.mjs'
-import { codexTerminalFailure, codexTerminalFailureDecision } from './codex-terminal.mjs'
+import {
+  codexTerminalFailure, codexTerminalFailureDecision, resetCodexPollerEvidence,
+} from './codex-terminal.mjs'
 import { codexFooterSettings, shouldPromoteCodexFooter } from './codex-footer.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, artifactGrantTokensFromPrompts,
@@ -58,6 +60,7 @@ import {
 } from '../pi/managed-core.mjs'
 import {
   CLAUDE_FAILURE_DEDUPE_MS, claudePollerDecision, prepareClaudeTerminalDelivery,
+  resetClaudePollerEvidence,
 } from './claude-terminal.mjs'
 import { staleTeamTurnTranscriptPrefixBytes } from './claude-transcript.mjs'
 import {
@@ -803,12 +806,12 @@ function refreshTeamTaskPoller(session, teamTaskTurn) {
   const claude = pollers.get(session.id)
   if (claude) {
     refreshTeamProviderPollerTurn(claude, snapshot)
-    claude.idle = 0
+    resetClaudePollerEvidence(claude)
   }
   const codex = codexPollers.get(session.id)
   if (codex) {
     refreshTeamProviderPollerTurn(codex, snapshot)
-    codex.idleObservation = null
+    resetCodexPollerEvidence(codex)
   }
 }
 
