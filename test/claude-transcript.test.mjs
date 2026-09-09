@@ -89,3 +89,35 @@ test('generation-bound transcript reads stop before a later task marker', () => 
     consumedBytes: Buffer.byteLength(firstSegment),
   })
 })
+
+test('a streamed newer generation boundary protects its later output from an older Stop', () => {
+  const unread = record('assistant', 'Generation two post-tool final.')
+  const older = { taskId: 'task_one', providerWorkGeneration: 1 }
+  const streamed = { taskId: 'task_one', providerWorkGeneration: 2 }
+
+  assert.equal(staleTeamTurnTranscriptPrefixBytes(unread, older, streamed), 0)
+  assert.deepEqual(teamTurnAssistantTranscript(unread, streamed, streamed), {
+    text: 'Generation two post-tool final.',
+    consumedBytes: Buffer.byteLength(unread),
+  })
+})
+
+test('generation selection exposes the native transcript prompt timestamp', () => {
+  const timestamp = '2026-09-09T11:30:00.000Z'
+  const prompt = JSON.stringify({
+    type: 'user', timestamp,
+    message: { content: [{
+      type: 'text',
+      text: '<sab-team-message task="task_one" generation="2" source="coordinator">',
+    }] },
+  }) + '\n'
+  const final = record('assistant', 'Finished after the prompt.')
+
+  assert.deepEqual(teamTurnAssistantTranscript(prompt + final, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }), {
+    text: 'Finished after the prompt.',
+    consumedBytes: Buffer.byteLength(prompt + final),
+    promptObservedAt: Date.parse(timestamp),
+  })
+})

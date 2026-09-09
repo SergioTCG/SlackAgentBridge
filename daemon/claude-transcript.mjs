@@ -24,11 +24,13 @@ function sameTeamTurn(marker, expected) {
 // includes any stale complete-line prefix before that generation, but stops at
 // the next task marker. This lets the current finalizer retire older output
 // without ever attributing it to the current task report.
-export function teamTurnAssistantTranscript(text, expected) {
+export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
   const input = String(text || '')
   let cursor = 0
-  let collecting = false
-  let matched = false
+  let collecting = sameTeamTurn(offsetTurn, expected)
+  let matched = collecting
+  let promptObservedAt = Number.isSafeInteger(Number(offsetTurn?.observedAt))
+    ? Number(offsetTurn.observedAt) : null
   const output = []
   while (cursor < input.length) {
     const newline = input.indexOf('\n', cursor)
@@ -43,10 +45,15 @@ export function teamTurnAssistantTranscript(text, expected) {
           return {
             text: output.join('\n\n'),
             consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
+            ...(promptObservedAt ? { promptObservedAt } : {}),
           }
         }
         collecting = sameTeamTurn(marker, expected)
         matched ||= collecting
+        if (collecting) {
+          const timestamp = Date.parse(String(record.timestamp || ''))
+          if (Number.isFinite(timestamp)) promptObservedAt = timestamp
+        }
       }
     } else if (collecting && record?.type === 'assistant') {
       const assistant = transcriptMessageText(record).trim()
@@ -58,6 +65,7 @@ export function teamTurnAssistantTranscript(text, expected) {
   return {
     text: output.join('\n\n'),
     consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
+    ...(promptObservedAt ? { promptObservedAt } : {}),
   }
 }
 
@@ -65,11 +73,15 @@ export function teamTurnAssistantTranscript(text, expected) {
 // A newer coordinator generation is an immutable boundary: its prompt and all
 // subsequent assistant records must remain available to that generation's
 // finalizer even when the older Stop hook finishes settling later.
-export function staleTeamTurnTranscriptPrefixBytes(text, expected) {
+export function staleTeamTurnTranscriptPrefixBytes(text, expected, offsetTurn = null) {
   const input = String(text || '')
   const taskId = String(expected?.taskId || '')
   const generation = Number(expected?.providerWorkGeneration)
   if (!taskId || !Number.isSafeInteger(generation) || generation < 1) return 0
+  // A generation-bound streaming read may already have consumed the newer
+  // prompt marker. The durable offset fingerprint is then stronger than the
+  // marker-less unread suffix: an older Stop must leave those bytes untouched.
+  if (offsetTurn && !sameTeamTurn(offsetTurn, expected)) return 0
   let cursor = 0
   while (cursor < input.length) {
     const newline = input.indexOf('\n', cursor)

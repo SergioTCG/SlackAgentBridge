@@ -128,6 +128,10 @@ Notable changes to this project. Format based on
 - Claude task reports now select assistant output from the exact embedded work
   generation, and delayed team prompt hooks can no longer create a stale owner
   input reservation after newer work or coordinator release.
+- Hookless Claude finals now follow their immutable pre-submit timestamp into a
+  staged generation, streamed tool output persists its transcript-generation
+  boundary, and boot repairs exact task bindings before recovering deferred
+  finals or provider turns.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

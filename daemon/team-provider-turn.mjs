@@ -124,18 +124,28 @@ export function deferPendingTeamProviderFinal(session, {
   lastAssistantMessage = '',
   usage = null,
   contextUsage = null,
+  pendingPromptObserved = false,
 } = {}) {
   const pending = normalizedTurn(session?.teamProviderTurnPending,
     session?.teamProviderTurnPending?.stagedAt)
   if (!session || !pending || !['claude', 'codex', 'pi'].includes(provider)) return null
+  const observed = Number(observedAt)
+  const afterPendingBoundary = Number.isSafeInteger(observed) && observed > 0 &&
+    observed >= pending.startedAt
   // Staging records intent before the provider input surface accepts Enter. A
   // final from the preceding accepted turn can therefore arrive after stagedAt
   // while the new prompt is still only painted in the input box. Resolve an
   // exact accepted/history turn first; only an otherwise-unowned final may be
-  // retained behind the pending generation for prompt-hook recovery.
-  if (providerTurnForCompletion(session, { providerTurnId, observedAt })) return null
-  const observed = Number(observedAt)
-  if (Number.isSafeInteger(observed) && observed > 0 && observed < pending.startedAt) return null
+  // retained behind the pending generation for prompt-hook recovery. Claude
+  // has no native turn id, however: its hook timestamp plus transcript evidence
+  // form the immutable boundary. A Stop emitted after and proven to contain the
+  // staged input must follow that generation; otherwise the preceding accepted
+  // turn would always win this lookup.
+  const identified = providerTurnForCompletion(session, { providerTurnId, observedAt })
+  const hooklessClaudePending = provider === 'claude' && !providerTurnId &&
+    afterPendingBoundary && pendingPromptObserved === true
+  if (identified && !hooklessClaudePending) return null
+  if (!afterPendingBoundary) return null
   const existing = session.teamProviderTurnDeferredFinal
   if (existing && (existing.taskId !== pending.taskId ||
       Number(existing.providerWorkGeneration) !== pending.providerWorkGeneration)) return null

@@ -521,16 +521,17 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
     /if \(p && !acknowledgedTurn && !promptTeamTurn[\s\S]*\) reserveTeamInput/,
   'recognized stale or released team prompt markers must never create an owner input reservation')
   assert.match(daemon,
-    /deferPendingTeamProviderFinal[\s\S]*flushDeferredTeamProviderFinal/,
+    /claudePendingTeamTurnEvidence[\s\S]*deferPendingTeamProviderFinal[\s\S]*flushDeferredTeamProviderFinal/,
   'a final racing staged provider submission must be retained until promotion settles')
 })
 
 test('restart flushes settled deferred finals before idle re-adoption can fail their tasks', () => {
   const boot = daemon.slice(daemon.lastIndexOf(";(async () => {"))
+  const bindingRepair = boot.indexOf('repairDurableTeamBindings(')
   const flush = boot.indexOf('await flushSettledDeferredTeamProviderFinals()')
   const readopt = boot.indexOf('await readoptStatus()')
-  assert.ok(flush >= 0 && readopt > flush,
-    'durably settled provider finals must be consumed before boot-time idle failure handling')
+  assert.ok(bindingRepair >= 0 && flush > bindingRepair && readopt > flush,
+    'exact task bindings must be repaired before deferred finals and boot-time idle handling')
 
   const helper = daemon.slice(
     daemon.indexOf('async function flushSettledDeferredTeamProviderFinals('),
@@ -552,9 +553,22 @@ test('restart flushes settled deferred finals before idle re-adoption can fail t
   'authority-loss reconciliation must not discard a durably captured final after a transient flush failure')
 })
 
+test('Claude interim streaming persists and reuses its exact transcript generation boundary', () => {
+  const preTool = daemon.slice(
+    daemon.indexOf("if (ev === 'PreToolUse')"),
+    daemon.indexOf("if (ev === 'Stop')"),
+  )
+  assert.match(preTool,
+    /currentTeamTaskProviderTurn\(session, body\)[\s\S]*readNewAssistantText\(session, teamTaskTurn\)/,
+  'PreToolUse must stream only the exact provider work generation')
+  assert.match(preTool,
+    /claudeTranscriptOffsetTurn[\s\S]*saveStateNow\(state\)/,
+  'the transcript generation at the advanced offset must survive daemon restart')
+})
+
 test('restored durable task bindings refresh poller lifecycle snapshots', () => {
   const reconcile = daemon.slice(
-    daemon.indexOf('async function reconcileTeamTasks('),
+    daemon.indexOf('function repairDurableTeamBindings('),
     daemon.indexOf('function providerTurnTracked(', daemon.indexOf('async function reconcileTeamTasks(')),
   )
   assert.match(reconcile,

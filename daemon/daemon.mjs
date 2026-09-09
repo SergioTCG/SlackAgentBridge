@@ -1134,7 +1134,46 @@ function currentTeamTaskProviderTurn(session, body = null) {
   return tracked ? Object.freeze(tracked) : null
 }
 
+function claudePendingTeamTurnEvidence(session, expected, observedAt) {
+  if (!expected) return false
+  const offsetTurn = session.claudeTranscriptOffsetTurn
+  if (offsetTurn?.taskId === expected.taskId &&
+      Number(offsetTurn.providerWorkGeneration) === expected.providerWorkGeneration) {
+    const boundaryObservedAt = Number(offsetTurn.observedAt)
+    const finalObservedAt = Number(observedAt)
+    return !Number.isSafeInteger(boundaryObservedAt) || boundaryObservedAt <= 0 ||
+      (Number.isSafeInteger(finalObservedAt) && finalObservedAt >= boundaryObservedAt)
+  }
+  const transcript = session.transcript
+  if (!transcript || !fs.existsSync(transcript)) return false
+  const from = Number(session.offset) || 0
+  let buffer
+  try {
+    const size = fs.statSync(transcript).size
+    if (size <= from) return false
+    const fd = fs.openSync(transcript, 'r')
+    buffer = Buffer.alloc(size - from)
+    try { fs.readSync(fd, buffer, 0, buffer.length, from) }
+    finally { fs.closeSync(fd) }
+  } catch { return false }
+  const text = buffer.toString('utf8')
+  const lastNewline = text.lastIndexOf('\n')
+  if (lastNewline < 0) return false
+  const selected = teamTurnAssistantTranscript(
+    text.slice(0, lastNewline + 1), expected, offsetTurn,
+  )
+  // A Stop for this pending turn must have produced stable assistant output.
+  // Seeing only the staged prompt is insufficient: the preceding turn could
+  // have ended during tmuxPaste's journaled pre-submit window.
+  const promptObservedAt = Number(selected?.promptObservedAt)
+  const finalObservedAt = Number(observedAt)
+  if (Number.isSafeInteger(promptObservedAt) && promptObservedAt > 0 &&
+      (!Number.isSafeInteger(finalObservedAt) || finalObservedAt < promptObservedAt)) return false
+  return Boolean(selected?.text)
+}
+
 function deferFinalAcrossPendingTeamSubmission(session, provider, body) {
+  const pending = pendingTeamProviderTurn(session)
   const turn = deferPendingTeamProviderFinal(session, {
     provider,
     providerTurnId: body?.turn_id || null,
@@ -1142,6 +1181,9 @@ function deferFinalAcrossPendingTeamSubmission(session, provider, body) {
     lastAssistantMessage: body?.last_assistant_message || '',
     usage: body?.usage || null,
     contextUsage: body?.context_usage || null,
+    pendingPromptObserved: provider === 'claude' && pending
+      ? claudePendingTeamTurnEvidence(session, pending, body?.observed_at)
+      : false,
   })
   if (!turn) return null
   saveStateNow(state)
@@ -1598,11 +1640,23 @@ function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = n
   if (lastNl < 0) return '' // no complete line yet; wait for more
   const complete = str.slice(0, lastNl + 1)
   if (expectedTeamTurn) {
-    const selected = teamTurnAssistantTranscript(complete, expectedTeamTurn)
+    const selected = teamTurnAssistantTranscript(
+      complete, expectedTeamTurn, session.claudeTranscriptOffsetTurn,
+    )
     if (selected) {
-      if (advance) session.offset = from + selected.consumedBytes
+      if (advance) {
+        session.offset = from + selected.consumedBytes
+        session.claudeTranscriptOffsetTurn = {
+          taskId: expectedTeamTurn.taskId,
+          providerWorkGeneration: expectedTeamTurn.providerWorkGeneration,
+        }
+      }
       return selected.text
     }
+    // A persisted different-generation boundary means the exact marker for
+    // this final has not entered the unread suffix yet. Do not fall back to an
+    // unbounded read which could attribute another generation's output.
+    if (session.claudeTranscriptOffsetTurn) return ''
   }
   if (advance) session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
   const out = []
@@ -1631,9 +1685,15 @@ function discardStaleClaudeTeamTurnTranscript(session, expected) {
   const buffer = Buffer.alloc(size - from)
   try { fs.readSync(fd, buffer, 0, buffer.length, from) }
   finally { fs.closeSync(fd) }
-  const consumed = staleTeamTurnTranscriptPrefixBytes(buffer.toString('utf8'), expected)
+  const consumed = staleTeamTurnTranscriptPrefixBytes(
+    buffer.toString('utf8'), expected, session.claudeTranscriptOffsetTurn,
+  )
   if (consumed <= 0) return false
   session.offset = from + consumed
+  session.claudeTranscriptOffsetTurn = {
+    taskId: expected.taskId,
+    providerWorkGeneration: expected.providerWorkGeneration,
+  }
   return true
 }
 
@@ -2007,6 +2067,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     })
     session.id = sid
     session.offset = 0
+    delete session.claudeTranscriptOffsetTurn
     state.sessions[sid] = session
   }
   session.pid = pid
@@ -2368,7 +2429,19 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     // live spinner below the new prose on its next tick.
     if (provider !== 'claude') return
     if (targetClaim || internalTurns.has(session.id)) return
-    const text = readNewAssistantText(session)
+    const previousOffset = Number(session.offset) || 0
+    const previousTranscriptTurn = JSON.stringify(session.claudeTranscriptOffsetTurn || null)
+    const teamTaskTurn = currentTeamTaskProviderTurn(session, body)
+    const text = readNewAssistantText(session, teamTaskTurn)
+    if (teamTaskTurn && session.claudeTranscriptOffsetTurn?.taskId === teamTaskTurn.taskId &&
+        Number(session.claudeTranscriptOffsetTurn.providerWorkGeneration) ===
+          teamTaskTurn.providerWorkGeneration) {
+      session.claudeTranscriptOffsetTurn.observedAt = Number(body.observed_at) || Date.now()
+    }
+    if ((Number(session.offset) || 0) !== previousOffset ||
+        JSON.stringify(session.claudeTranscriptOffsetTurn || null) !== previousTranscriptTurn) {
+      saveStateNow(state)
+    }
     if (text) { clearStatusDeferred(session); await postProviderOutput(session.channel, text) }
     const structuredForms = questionFormsFromHook(body)
     if (structuredForms.length) {
@@ -4967,38 +5040,43 @@ async function dispatchTeamTask(task) {
   }
 }
 
+function repairDurableTeamBindings({ now = Date.now() } = {}) {
+  const bindingRepair = reconcileTeamSessionBindings(state, { now })
+  if (bindingRepair.changed) {
+    saveStateNow(state)
+    for (const repair of bindingRepair.repairs) {
+      log('reconciled team/session binding', repair.sessionId.slice(0, 8), repair.taskId, repair.reason)
+      if (repair.reason === 'restored_durable_task_binding' &&
+          (pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId) || piPollers.has(repair.sessionId))) {
+        const session = state.sessions?.[repair.sessionId]
+        const taskTurn = currentTeamTaskProviderTurn(session)
+        const snapshotRequired = pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId)
+        if (snapshotRequired && !taskTurn) {
+          // A poller created before the redundant binding was repaired cannot
+          // prove an unknown task generation. Leave proof absent so restart
+          // recovery fails closed instead of reserving this worker forever.
+          log('restored team binding lacks an exact provider-turn snapshot',
+            repair.sessionId.slice(0, 8), repair.taskId)
+          continue
+        }
+        if (snapshotRequired) refreshTeamTaskPoller(session, taskTurn)
+        teamTurnProof.add(repair.sessionId)
+      }
+    }
+  }
+  for (const anomaly of bindingRepair.anomalies) {
+    log('team/session binding conflict retained fail-closed', anomaly.sessionId.slice(0, 8),
+      anomaly.activeTaskId, anomaly.taskIds?.join(',') || anomaly.taskId)
+  }
+  return bindingRepair
+}
+
 async function reconcileTeamTasks() {
   if (teamReconcileRunning) return
   teamReconcileRunning = true
   try {
     const now = Date.now()
-    const bindingRepair = reconcileTeamSessionBindings(state, { now })
-    if (bindingRepair.changed) {
-      saveStateNow(state)
-      for (const repair of bindingRepair.repairs) {
-        log('reconciled team/session binding', repair.sessionId.slice(0, 8), repair.taskId, repair.reason)
-        if (repair.reason === 'restored_durable_task_binding' &&
-            (pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId) || piPollers.has(repair.sessionId))) {
-          const session = state.sessions?.[repair.sessionId]
-          const taskTurn = currentTeamTaskProviderTurn(session)
-          const snapshotRequired = pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId)
-          if (snapshotRequired && !taskTurn) {
-            // A poller created before the redundant binding was repaired cannot
-            // prove an unknown task generation. Leave proof absent so restart
-            // recovery fails closed instead of reserving this worker forever.
-            log('restored team binding lacks an exact provider-turn snapshot',
-              repair.sessionId.slice(0, 8), repair.taskId)
-            continue
-          }
-          if (snapshotRequired) refreshTeamTaskPoller(session, taskTurn)
-          teamTurnProof.add(repair.sessionId)
-        }
-      }
-    }
-    for (const anomaly of bindingRepair.anomalies) {
-      log('team/session binding conflict retained fail-closed', anomaly.sessionId.slice(0, 8),
-        anomaly.activeTaskId, anomaly.taskIds?.join(',') || anomaly.taskId)
-    }
+    repairDurableTeamBindings({ now })
     // A daemon crash can occur after provider submission was promoted but
     // before its overtaking final was flushed. Consume settled exact boundaries
     // synchronously before authority-loss checks. A transient Slack/state error
@@ -8368,6 +8446,10 @@ setInterval(async () => {
   await recoverProviderSwitches()
   automationLifecycle.recover()
   startAutomationReconciler()
+  // Restore redundant exact task/session projections before any provider or
+  // deferred-final recovery interprets their absence as owner work or loss of
+  // authority. Conflicts remain untouched and fail closed.
+  repairDurableTeamBindings()
   await recoverHooklessCodexResumes()
   await flushSettledDeferredTeamProviderFinals()
   await readoptStatus() // recover live status for turns that were mid-flight on restart

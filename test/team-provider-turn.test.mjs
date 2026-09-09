@@ -289,6 +289,30 @@ test('a previous accepted turn keeps its final when a follow-up is only staged',
   assert.equal(deferredTeamProviderFinal(session), null)
 })
 
+test('a hookless Claude final after the staged boundary belongs to the pending generation', () => {
+  const session = {}
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1000 })
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  })
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { now: 2000 })
+
+  assert.equal(deferPendingTeamProviderFinal(session, {
+    provider: 'claude', observedAt: 1999,
+  }), null)
+  assert.equal(deferPendingTeamProviderFinal(session, {
+    provider: 'claude', observedAt: 2001,
+  }), null)
+  assert.deepEqual(deferPendingTeamProviderFinal(session, {
+    provider: 'claude', observedAt: 2001, pendingPromptObserved: true,
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
+  assert.equal(deferredTeamProviderFinal(session)?.providerWorkGeneration, 2)
+})
+
 test('an inherited native turn id remains provisional for a distinct follow-up turn', () => {
   const session = {}
   stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 1 })
