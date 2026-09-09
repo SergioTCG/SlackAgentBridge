@@ -175,7 +175,10 @@ monotonic task-local work generation, preventing a delayed final from the
 preceding turn from satisfying the new instruction. SAB stages that generation
 before provider input and promotes it to a bounded durable native-turn record
 when the input is accepted; final hooks resolve the record by turn identity or
-event observation time. If a terminal task needs
+event observation time. Multiple follow-ups are delivered in their durable
+acceptance order; an unsettled earlier message fences every later one. Releasing
+a task persists its terminal result without generating a new worker event or
+renewing coordinator dispatch authority. If a terminal task needs
 more work, `continue`
 creates a new task linked through `parentTaskId`; terminal history is immutable.
 

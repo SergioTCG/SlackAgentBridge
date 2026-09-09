@@ -424,7 +424,9 @@ Task delivery is journal-first:
    path, Codex's Stop hook or matching successful App Server turn, or Pi's
    extension final event may report only the same task/session binding. A
    provider final changes a new task to `awaiting_release`, posts its report,
-   and leaves `session.teamActiveTaskId` intact.
+   and leaves `session.teamActiveTaskId` intact. Coordinator follow-ups are
+   serialized in durable acceptance order; a coordinator release is persisted
+   without being reclassified as an authenticated worker continuation event.
 6. A worker checkpoint atomically replaces the complete bounded pending-gate
    set. A completion declaration is rejected while any gate remains. Once the
    worker declares readiness and a turn report exists, an authorized

@@ -5,6 +5,7 @@ import {
   recoverInterruptedTeamMessage,
   teamReportLifecycleNotice,
   teamMessageFailureDisposition,
+  undeliveredTeamMessagePredecessor,
 } from '../daemon/team-message-delivery.mjs'
 
 test('a disconnected Pi stream remains retryable when no provider write occurred', () => {
@@ -40,6 +41,17 @@ test('restart recovery makes an interrupted provider write durably uncertain exa
     deliveryError: 'Provider delivery outcome became uncertain during daemon restart; SAB did not replay this task message.',
   })
   assert.equal(recoverInterruptedTeamMessage(message), false)
+})
+
+test('coordinator messages remain ordered behind every unsettled predecessor', () => {
+  const first = { id: 'message-1', deliveryStatus: 'pending', providerDeliveryStatus: null }
+  const second = { id: 'message-2', deliveryStatus: 'pending', providerDeliveryStatus: null }
+  const task = { messages: [first, second] }
+  assert.equal(undeliveredTeamMessagePredecessor(task, first), null)
+  assert.equal(undeliveredTeamMessagePredecessor(task, second), first)
+  first.deliveryStatus = 'delivered'
+  first.providerDeliveryStatus = 'delivered'
+  assert.equal(undeliveredTeamMessagePredecessor(task, second), null)
 })
 
 test('delayed worker reports describe the current lifecycle without stale release advice', () => {

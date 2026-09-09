@@ -26,6 +26,10 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Bound provider prompt acknowledgements and finals to immutable task
+  generations across audit waits, serialized coordinator follow-ups, preserved
+  reported workers that become dormant during Slack audit delivery, and kept
+  coordinator release from generating spurious worker continuation authority.
 - Restart reconciliation repairs only exact redundant session/task bindings,
   preserves reported tasks and their worker reservations across daemon or
   provider downtime, and refuses conflicting bindings instead of guessing.

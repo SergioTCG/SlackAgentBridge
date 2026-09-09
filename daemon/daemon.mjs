@@ -77,7 +77,7 @@ import { handleTerminalHttp } from './terminal-http.mjs'
 import { handleTeamHttp } from './team-http.mjs'
 import {
   knownUndeliveredTeamMessage, recoverInterruptedTeamMessage, teamMessageFailureDisposition,
-  teamReportLifecycleNotice,
+  teamReportLifecycleNotice, undeliveredTeamMessagePredecessor,
 } from './team-message-delivery.mjs'
 import {
   activateTeamProviderTurn, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
@@ -1992,6 +1992,10 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       return
     }
     const teamTaskId = taskMarker(p)
+    // Snapshot the exact task generation represented by this native prompt
+    // before any Slack audit await can let a coordinator follow-up advance the
+    // mutable task journal underneath this hook.
+    const submittedTeamTaskTurn = currentTeamTaskProviderTurn(session, body)
     if (p && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
     const ch = session.channel || (await ensureChannel(session))
     const injected = consumeInjected(sid, p)
@@ -2014,14 +2018,11 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       saveStateNow(state)
     }
     const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
-    const pendingTurn = session.teamProviderTurnPending
     const acknowledgedTurn = task && task.targetSessionId === session.id && task.targetChannel === session.channel
       ? teamTaskId === task.id
-        ? { taskId: task.id, providerWorkGeneration: teamTaskProviderWorkGeneration(task) }
-        : injected && pendingTurn?.taskId === task.id
-          ? pendingTurn
-          : injected && session.teamProviderTurn?.taskId === task.id
-            ? session.teamProviderTurn
+        ? submittedTeamTaskTurn
+        : injected && submittedTeamTaskTurn?.taskId === task.id
+          ? submittedTeamTaskTurn
           : null
       : null
     if (acknowledgedTurn) {
@@ -3592,6 +3593,7 @@ const teamTaskFileDeliveries = new Map()
 const teamReplyDeliveries = new Map()
 const teamReportDeliveries = new Map()
 const teamMessageDeliveries = new Map()
+const teamMessageDeliveryTails = new Map()
 const teamCompletionDeliveries = new Map()
 const teamPayloadAuditTails = new Map()
 const teamTurnProof = new Set()
@@ -3667,8 +3669,8 @@ function stageTeamContinuation(task, {
   }
 }
 
-function persistTeamLifecycle(task, options = {}) {
-  const continuationTeamId = stageTeamContinuation(task, options)
+function persistTeamLifecycle(task, { enqueueContinuation = true, ...options } = {}) {
+  const continuationTeamId = enqueueContinuation ? stageTeamContinuation(task, options) : null
   saveStateNow(state)
   if (continuationTeamId) scheduleTeamContinuation(continuationTeamId)
 }
@@ -4298,7 +4300,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     nodeId: nodeIdForSession(target),
     taskId: task.id,
   }) : null
-  const durableAwaitingTarget = task.status === 'awaiting_release' && target &&
+  const durableAwaitingTarget = () => task.status === 'awaiting_release' && target &&
     state.sessions?.[target.id] === target && target.channel === task.targetChannel &&
     state.channels?.[task.targetChannel] === target.id && target.teamActiveTaskId === task.id
   if (!message.sourceSlackTs) {
@@ -4319,11 +4321,14 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     message.targetSlackTs = posted?.ts || null
     saveStateNow(state)
   }
-  if (durableAwaitingTarget && (!(target.pid && pidAlive(target.pid)) || !target.tmux)) {
-    throw new TeamError('worker_dormant',
-      'The coordinator message is durable, visible in both channels, and will be delivered after the reserved worker session resumes.', 409)
-  }
   if (!(await validateCoordinatorTaskMessageTarget(task, target, expected))) {
+    // The worker can report and become dormant while the two Slack audit posts
+    // above are awaiting delivery. Re-read the journal now: a still-reserved
+    // reported task is recoverable and must retain its pending message.
+    if (durableAwaitingTarget()) {
+      throw new TeamError('worker_dormant',
+        'The coordinator message is durable, visible in both channels, and will be delivered after the reserved worker session resumes.', 409)
+    }
     message.deliveryStatus = 'failed'
     message.deliveryError = 'The exact active worker session is no longer authoritative.'
     saveStateNow(state)
@@ -4332,6 +4337,10 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
   let providerAttempted = false
   try {
     if (!(await validateCoordinatorTaskMessageTarget(task, target, expected))) {
+      if (durableAwaitingTarget()) {
+        throw knownUndeliveredTeamMessage(
+          'The reserved worker changed or became dormant before accepting the coordinator message.')
+      }
       throw new TeamError('target_authority_lost', 'The exact active worker changed or entered maintenance before provider delivery.', 409)
     }
     message.providerDeliveryStatus = 'delivering'
@@ -4379,11 +4388,24 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
 function ensureCoordinatorTaskMessageDelivery(task, message) {
   const existing = teamMessageDeliveries.get(message.id)
   if (existing) return existing
-  const operation = performCoordinatorTaskMessageDelivery(task, message)
+  const prior = teamMessageDeliveryTails.get(task.id)
+  const operation = (async () => {
+    if (prior) await prior.catch(() => {})
+    const predecessor = undeliveredTeamMessagePredecessor(task, message)
+    if (predecessor) {
+      throw new TeamError('task_message_predecessor_pending',
+        `Coordinator message ${message.id} remains queued behind ${predecessor.id}.`, 409)
+    }
+    return performCoordinatorTaskMessageDelivery(task, message)
+  })()
   teamMessageDeliveries.set(message.id, operation)
-  return operation.finally(() => {
+  teamMessageDeliveryTails.set(task.id, operation)
+  const cleanup = () => {
     if (teamMessageDeliveries.get(message.id) === operation) teamMessageDeliveries.delete(message.id)
-  })
+    if (teamMessageDeliveryTails.get(task.id) === operation) teamMessageDeliveryTails.delete(task.id)
+  }
+  void operation.then(cleanup, cleanup)
+  return operation
 }
 
 async function resolveTeamCaller({ ppid, tmux, provider: providerValue }) {
@@ -4763,9 +4785,16 @@ async function recoverInterruptedTeamContinuations() {
 }
 
 async function finishTeamTaskForSession(session, result, error = null, { warning = null, expectedTeamTaskTurn = currentTeamTaskProviderTurn(session) } = {}) {
-  const taskId = expectedTeamTaskTurn?.taskId || session.teamActiveTaskId
+  // `null` is an authenticated non-match, not permission to borrow the latest
+  // mutable task binding. Legacy untracked tasks are synthesized by
+  // currentTeamTaskProviderTurn() before reaching this boundary.
+  const taskId = expectedTeamTaskTurn?.taskId
   const finalText = String(result || '').trim()
   if (!taskId) {
+    if (session.teamActiveTaskId) {
+      log('ignored unmatched team task final', session.teamActiveTaskId)
+      return false
+    }
     const revokedTurn = clearTeamTurn(session)
     if (revokedTurn) saveStateNow(state)
     else saveState(state)
@@ -5269,7 +5298,7 @@ const teamService = {
     })
     if (target.teamActiveTaskId === task.id) delete target.teamActiveTaskId
     noteTeamAvailability(target, 'coordinator_released_task')
-    persistTeamLifecycle(task)
+    persistTeamLifecycle(task, { enqueueContinuation: false })
     await ensureTeamCompletionDelivery(task).catch(error =>
       log('team release delivery deferred', task.id, String(error?.message || error)))
     setImmediate(() => reconcileTeamTasks().catch(error => log('team release follow-up failed', String(error))))
@@ -5332,8 +5361,8 @@ const teamService = {
     saveStateNow(state)
     try { await ensureCoordinatorTaskMessageDelivery(task, result.message) }
     catch (error) {
-      if (error?.code !== 'worker_dormant') throw error
-      log('queued coordinator task message for dormant reserved worker', task.id, result.message.id)
+      if (!['worker_dormant', 'task_message_predecessor_pending'].includes(error?.code)) throw error
+      log('queued coordinator task message for later ordered delivery', task.id, result.message.id, error.code)
     }
     return {
       message: publicTeamTask(task, session.channel).messages.find(message => message.id === result.message.id),

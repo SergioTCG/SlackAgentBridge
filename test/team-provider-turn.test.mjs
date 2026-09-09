@@ -32,6 +32,9 @@ test('provider finals resolve the immutable task generation of their native turn
   assert.deepEqual(providerTurnForCompletion(session, { observedAt: 1500 }), {
     taskId: 'task_one', providerWorkGeneration: 1,
   })
+  assert.equal(providerTurnForCompletion(session, {
+    providerTurnId: 'unknown-newer-turn',
+  }), null)
 })
 
 test('hook acknowledgement promotes a staged generation exactly once and survives JSON persistence', () => {

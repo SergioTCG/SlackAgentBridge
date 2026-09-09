@@ -400,6 +400,9 @@ Coordinator-to-worker messages are journaled before provider delivery. A
 provable pre-write rejection, such as a disconnected Pi input stream, may be
 retried against the same exact task/session authority. Once a provider write is
 attempted and its result is uncertain, SAB fails closed and never replays it.
+Messages for one task are submitted in durable acceptance order, and an
+unsettled predecessor blocks later generations. Delayed provider finals without
+an exact native-turn or event-time match cannot borrow the current task binding.
 
 ## Research-preview dependencies
 

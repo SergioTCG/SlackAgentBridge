@@ -23,6 +23,15 @@ export function recoverInterruptedTeamMessage(message) {
   return true
 }
 
+export function undeliveredTeamMessagePredecessor(task, message) {
+  const messages = Array.isArray(task?.messages) ? task.messages : []
+  const index = messages.findIndex(item => item === message ||
+    (message?.id && item?.id === message.id))
+  if (index <= 0) return null
+  return messages.slice(0, index).find(item =>
+    item?.deliveryStatus !== 'delivered' || item?.providerDeliveryStatus !== 'delivered') || null
+}
+
 export function teamReportLifecycleNotice(task) {
   const status = String(task?.status || 'unknown')
   if (status === 'awaiting_release') {

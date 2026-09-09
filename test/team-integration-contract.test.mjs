@@ -4,6 +4,7 @@ import fs from 'node:fs'
 
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 const cli = fs.readFileSync(new URL('../scripts/sab-team.mjs', import.meta.url), 'utf8')
+const claudeHook = fs.readFileSync(new URL('../hooks/hook.sh', import.meta.url), 'utf8')
 const teamModules = ['teams.mjs', 'team-auth.mjs', 'team-files.mjs', 'team-http.mjs']
   .map(file => fs.readFileSync(new URL(`../daemon/${file}`, import.meta.url), 'utf8'))
   .join('\n')
@@ -237,6 +238,8 @@ test('provider turn reporting preserves task and process ownership until explici
   const completion = /async function finishTeamTaskForSession\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.match(completion, /reportTeamTaskTurn/)
   assert.match(completion, /expectedTeamTaskTurn[\s\S]*teamTaskProviderWorkGeneration\(task\)[\s\S]*ignored stale team task final/)
+  assert.match(completion, /const taskId = expectedTeamTaskTurn\?\.taskId/)
+  assert.doesNotMatch(completion, /expectedTeamTaskTurn\?\.taskId \|\| session\.teamActiveTaskId/)
   assert.match(completion, /reported\.stale[\s\S]*!reported\.created/)
   assert.match(completion, /if \(isTerminalTeamTask\(task\)\) \{[\s\S]*delete session\.teamActiveTaskId/)
   assert.doesNotMatch(completion, /process\.kill|tmuxKill/)
@@ -244,13 +247,22 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon, /providerMissing && task\.status !== 'awaiting_release'/)
   assert.match(daemon, /SessionEnd[\s\S]*failTeamTaskForSession\(session,[\s\S]*preserveReported: true/)
   assert.match(daemon, /preserveReported && existingTask\?\.status === 'awaiting_release'/)
-  assert.match(daemon, /releaseTeamTask\(state[\s\S]*delete target\.teamActiveTaskId[\s\S]*persistTeamLifecycle\(task\)/)
+  assert.match(daemon, /releaseTeamTask\(state[\s\S]*delete target\.teamActiveTaskId[\s\S]*persistTeamLifecycle\(task, \{ enqueueContinuation: false \}\)/)
   assert.match(daemon, /beginCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*completeCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)/)
   assert.match(daemon, /const teamTaskTurn = currentTeamTaskProviderTurn\(session, body\)[\s\S]*completePrivateTurn[\s\S]*finalizeTurn\(session, \{ teamTaskTurn \}\)/)
   assert.match(daemon, /stageTeamProviderTurn\(target,[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*activateTeamProviderTurn\(target[\s\S]*ensureCodexTurnStarted\(target/)
   assert.match(daemon, /currentTeamTaskProviderTurn\(session, body\)/)
+  const promptHook = daemon.slice(
+    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
+    daemon.indexOf("if (ev === 'PreToolUse')"),
+  )
+  assert.ok(promptHook.indexOf('const submittedTeamTaskTurn = currentTeamTaskProviderTurn(session, body)') <
+    promptHook.indexOf('await updateTeamTaskAudit(task)'),
+  'prompt generation must be captured before an audit await can admit a follow-up')
+  assert.match(promptHook, /acknowledgedTurn[\s\S]*submittedTeamTaskTurn/)
+  assert.match(claudeHook, /UserPromptSubmit[\s\S]*observed_at[\s\S]*--argjson observed_at/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
@@ -262,6 +274,34 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.doesNotMatch(continuation, /to: previous\.targetAlias/)
   assert.ok(continuation.indexOf('teamTaskForRequest') < continuation.indexOf('teamTask(state, request.taskId)'),
     'an accepted continuation retry must resolve before its bounded parent history is loaded')
+})
+
+test('coordinator follow-ups serialize and coordinator release does not mint worker authority', () => {
+  const delivery = daemon.slice(
+    daemon.indexOf('function ensureCoordinatorTaskMessageDelivery('),
+    daemon.indexOf('async function resolveTeamCaller('),
+  )
+  assert.match(delivery, /teamMessageDeliveryTails\.get\(task\.id\)/)
+  assert.match(delivery, /await prior\.catch/)
+  assert.match(delivery, /undeliveredTeamMessagePredecessor\(task, message\)/)
+  assert.ok(delivery.indexOf('await prior.catch') < delivery.indexOf('performCoordinatorTaskMessageDelivery(task, message)'))
+
+  const release = /async release\(caller, request\) \{[\s\S]*?\n  },\n  async cancel/.exec(daemon)?.[0] || ''
+  assert.match(release, /persistTeamLifecycle\(task, \{ enqueueContinuation: false \}\)/)
+  assert.doesNotMatch(release, /stageTeamContinuation/)
+})
+
+test('reported-worker dormancy is re-evaluated after Slack message audit delivery', () => {
+  const delivery = daemon.slice(
+    daemon.indexOf('async function performCoordinatorTaskMessageDelivery('),
+    daemon.indexOf('function ensureCoordinatorTaskMessageDelivery('),
+  )
+  const targetPost = delivery.indexOf('message.targetSlackTs = posted?.ts || null')
+  const validation = delivery.indexOf('await validateCoordinatorTaskMessageTarget', targetPost)
+  const durableRecheck = delivery.indexOf('durableAwaitingTarget()', validation)
+  assert.ok(targetPost > 0 && validation > targetPost && durableRecheck > validation)
+  assert.match(delivery, /durableAwaitingTarget\(\)[\s\S]*worker_dormant/)
+  assert.match(delivery, /durableAwaitingTarget\(\)[\s\S]*knownUndeliveredTeamMessage/)
 })
 
 test('reported dormant workers can be resumed and deferred follow-ups remain visible and proved', () => {
