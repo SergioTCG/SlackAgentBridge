@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 
 import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
-  clearDeferredTeamProviderFinal, deferPendingTeamProviderFinal,
+  claimDeferredTeamProviderFinal, clearDeferredTeamProviderFinal, deferPendingTeamProviderFinal,
   deferredTeamProviderFinal, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
   pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
   providerPromptAcknowledgesTask, providerTurnForTaskLifecycle,
-  refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
+  refreshTeamProviderPollerTurn, releaseDeferredTeamProviderFinalClaim,
+  retireTeamProviderTurn, stageTeamProviderTurn,
   teamProviderPollerObservationCurrent,
 } from '../daemon/team-provider-turn.mjs'
 
@@ -269,6 +270,35 @@ test('a provider final crossing an unresolved submission boundary is retained du
     taskId: 'task_one', providerWorkGeneration: 2,
   }), true)
   assert.equal(deferredTeamProviderFinal(recovered), null)
+})
+
+test('a deferred-final settlement claim survives restart and is explicitly recoverable', () => {
+  const session = {}
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1000 })
+  assert.deepEqual(deferPendingTeamProviderFinal(session, {
+    provider: 'codex', providerTurnId: 'turn-one', observedAt: 1100,
+    lastAssistantMessage: 'Durable final.',
+  }), { taskId: 'task_one', providerWorkGeneration: 1 })
+
+  const first = claimDeferredTeamProviderFinal(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1200 })
+  assert.equal(first.recovered, false)
+  assert.equal(first.settlementClaimedAt, 1200)
+
+  const recovered = JSON.parse(JSON.stringify(session))
+  const retry = claimDeferredTeamProviderFinal(recovered, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1300 })
+  assert.equal(retry.recovered, true)
+  assert.equal(retry.settlementClaimedAt, 1200)
+  assert.equal(retry.lastAssistantMessage, 'Durable final.')
+
+  assert.equal(releaseDeferredTeamProviderFinalClaim(recovered, retry), true)
+  assert.equal(deferredTeamProviderFinal(recovered).settlementClaimedAt, undefined)
+  assert.equal(clearDeferredTeamProviderFinal(recovered, retry), true)
 })
 
 test('a previous accepted turn keeps its final when a follow-up is only staged', () => {

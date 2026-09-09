@@ -271,7 +271,7 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon, /releaseTeamTask\(state[\s\S]*delete target\.teamActiveTaskId[\s\S]*persistTeamLifecycle\(task, \{ enqueueContinuation: false \}\)/)
   assert.match(daemon, /beginCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*completeCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)/)
-  assert.match(daemon, /const teamTaskTurn = currentTeamTaskProviderTurn\(session, body\)[\s\S]*completePrivateTurn[\s\S]*finalizeTurn\(session, \{ teamTaskTurn \}\)/)
+  assert.match(daemon, /const teamTaskTurn = currentTeamTaskProviderTurn\(session, body\)[\s\S]*completePrivateTurn[\s\S]*finalizeTurn\(session, \{[\s\S]*teamTaskTurn,[\s\S]*deferredFinal: matchingDeferredTeamProviderFinal/)
   assert.match(daemon, /stageTeamProviderTurn\(target,[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*activateTeamProviderTurn\(target[\s\S]*ensureCodexTurnStarted\(target/)
   assert.match(daemon, /currentTeamTaskProviderTurn\(session, body\)/)
@@ -560,6 +560,40 @@ test('restart flushes settled deferred finals before idle re-adoption can fail t
   assert.match(reconcile,
     /const deferredFinalFences = await flushSettledDeferredTeamProviderFinals\(\)[\s\S]*if \(deferredFinalFences\.has\(task\.id\)\) continue/,
   'authority-loss reconciliation must not discard a durably captured final after a transient flush failure')
+})
+
+test('deferred final settlement survives a crash after its durable provider claim', () => {
+  const flush = daemon.slice(
+    daemon.indexOf('async function flushDeferredTeamProviderFinal('),
+    daemon.indexOf('async function flushSettledDeferredTeamProviderFinals('),
+  )
+  assert.match(flush, /deferredFinal: deferred/g,
+    'each provider finalizer must own settlement of the exact retained record')
+  assert.doesNotMatch(flush, /if \(finalized && deferredTeamProviderFinal[\s\S]*clearDeferredTeamProviderFinal/,
+    'deferred cleanup must not live in a crash window after provider finalization returns')
+
+  for (const provider of ['finalizeTurn', 'finalizeCodexTurn', 'finalizePiTurn']) {
+    const finalizer = new RegExp(`async function ${provider}\\([\\s\\S]*?\\n}`, 'm').exec(daemon)?.[0] || ''
+    const claim = finalizer.indexOf('claimDeferredTeamProviderFinal')
+    const post = finalizer.indexOf('await postProviderOutput')
+    const finish = finalizer.indexOf('finishTeamTaskForSession')
+    const clear = finalizer.lastIndexOf('clearDeferredTeamProviderFinal')
+    const persist = finalizer.lastIndexOf('saveStateNow(state)')
+    assert.ok(claim >= 0 && post > claim && finish > post && clear > finish && persist > clear,
+      `${provider} must journal, avoid uncertain replay, finish the task, and atomically clear the fence`)
+    assert.match(finalizer, /recoveringDeferredOutput/)
+    assert.match(finalizer, /!recoveringDeferredOutput[\s\S]*finishTeamTaskForSession/,
+      `${provider} must skip only uncertain Slack output while retaining lifecycle recovery`)
+  }
+
+  const codexFinal = /async function finalizeCodexTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(codexFinal,
+    /finalAlreadyClaimed[\s\S]*deferredFinal[\s\S]*claimDeferredTeamProviderFinal[\s\S]*recoveringDeferredOutput/,
+  'a durable Codex native-turn claim must resume retained task settlement rather than reject it as a duplicate')
+  const piFinal = /async function finalizePiTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(piFinal,
+    /session\.lastMirroredTurn === turnId[\s\S]*clearSettledDeferredTeamProviderFinal/,
+  'a fully persisted Pi final must clear its surviving deferred fence idempotently')
 })
 
 test('Claude interim streaming persists and reuses its exact transcript generation boundary', () => {

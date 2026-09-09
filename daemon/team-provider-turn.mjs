@@ -168,6 +168,9 @@ export function deferPendingTeamProviderFinal(session, {
     lastAssistantMessage: String(lastAssistantMessage || existing?.lastAssistantMessage || ''),
     usage: clonedJsonObject(usage) || existing?.usage || null,
     contextUsage: clonedJsonObject(contextUsage) || existing?.contextUsage || null,
+    // Preserve an in-flight settlement claim if a duplicate native final
+    // refreshes the retained bytes before submission promotion finishes.
+    settlementClaimedAt: Number(existing?.settlementClaimedAt) || null,
   }
   return publicTurn(pending)
 }
@@ -178,6 +181,7 @@ export function deferredTeamProviderFinal(session, expected = null) {
   if (!record || !turn || !['claude', 'codex', 'pi'].includes(record.provider)) return null
   if (expected && (turn.taskId !== expected.taskId ||
       turn.providerWorkGeneration !== Number(expected.providerWorkGeneration))) return null
+  const settlementClaimedAt = Number(record.settlementClaimedAt)
   return {
     ...publicTurn(turn),
     provider: record.provider,
@@ -187,7 +191,34 @@ export function deferredTeamProviderFinal(session, expected = null) {
     lastAssistantMessage: String(record.lastAssistantMessage || ''),
     usage: clonedJsonObject(record.usage),
     contextUsage: clonedJsonObject(record.contextUsage),
+    ...(Number.isSafeInteger(settlementClaimedAt) && settlementClaimedAt > 0
+      ? { settlementClaimedAt } : {}),
   }
+}
+
+// Journal final settlement before any Slack side effect. A retained claim on
+// restart means provider-output delivery is uncertain and must not be replayed;
+// the durable task report can still be completed idempotently from the retained
+// final bytes. The provider finalizer clears the deferred record in the same
+// atomic state write as its completed lifecycle.
+export function claimDeferredTeamProviderFinal(session, expected = null, { now = Date.now() } = {}) {
+  const deferred = deferredTeamProviderFinal(session, expected)
+  const record = session?.teamProviderTurnDeferredFinal
+  if (!deferred || !record) return null
+  const recovered = Boolean(deferred.settlementClaimedAt)
+  if (!recovered) {
+    const claimedAt = Number(now)
+    record.settlementClaimedAt = Number.isSafeInteger(claimedAt) && claimedAt > 0
+      ? claimedAt : Date.now()
+  }
+  return { ...deferredTeamProviderFinal(session, expected), recovered }
+}
+
+export function releaseDeferredTeamProviderFinalClaim(session, expected = null) {
+  const deferred = deferredTeamProviderFinal(session, expected)
+  if (!deferred || !session?.teamProviderTurnDeferredFinal?.settlementClaimedAt) return false
+  delete session.teamProviderTurnDeferredFinal.settlementClaimedAt
+  return true
 }
 
 export function clearDeferredTeamProviderFinal(session, expected = null) {

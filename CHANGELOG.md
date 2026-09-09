@@ -93,6 +93,9 @@ Notable changes to this project. Format based on
 - Follow-up generations sharing one native provider turn retain distinct
   history entries, while coalesced undelivered reports receive fresh Slack
   idempotency identities instead of reusing an earlier accepted request.
+- Deferred provider finals now journal an in-flight settlement claim and clear
+  it atomically with the recovered task lifecycle, so a daemon crash cannot
+  leave a claimed Codex or Pi final permanently fencing its worker task.
 - Completion declarations retain the provider generation observed before
   caller authentication, deferred finals cannot cross task identities, and
   malformed checkpoints without an explicit gate array now fail closed.

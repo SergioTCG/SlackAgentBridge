@@ -88,11 +88,13 @@ import {
 } from './team-message-delivery.mjs'
 import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
-  clearDeferredTeamProviderFinal, deferPendingTeamProviderFinal, deferredTeamProviderFinal,
+  claimDeferredTeamProviderFinal, clearDeferredTeamProviderFinal,
+  deferPendingTeamProviderFinal, deferredTeamProviderFinal,
   discardPendingTeamProviderTurn, pendingTeamProviderTurn, providerPromptAcknowledgesTask,
   providerPromptTurnMarker,
   providerTurnForTaskLifecycle,
-  refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
+  refreshTeamProviderPollerTurn, releaseDeferredTeamProviderFinalClaim,
+  retireTeamProviderTurn, stageTeamProviderTurn,
   teamProviderPollerObservationCurrent,
 } from './team-provider-turn.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
@@ -1203,6 +1205,21 @@ function deferFinalAcrossPendingTeamSubmission(session, provider, body) {
   return turn
 }
 
+function matchingDeferredTeamProviderFinal(session, provider, teamTaskTurn, body = null) {
+  if (!teamTaskTurn) return null
+  const deferred = deferredTeamProviderFinal(session, teamTaskTurn)
+  if (!deferred || deferred.provider !== provider) return null
+  const incomingTurnId = body?.turn_id ? String(body.turn_id) : null
+  if (incomingTurnId && deferred.providerTurnId && incomingTurnId !== deferred.providerTurnId) return null
+  return deferred
+}
+
+function clearSettledDeferredTeamProviderFinal(session, deferred) {
+  if (!deferred || !clearDeferredTeamProviderFinal(session, deferred)) return false
+  saveStateNow(state)
+  return true
+}
+
 async function flushDeferredTeamProviderFinal(session, expected = null) {
   const deferred = deferredTeamProviderFinal(session, expected)
   if (!deferred || pendingTeamProviderTurn(session, deferred)) return false
@@ -1234,12 +1251,14 @@ async function flushDeferredTeamProviderFinal(session, expected = null) {
       context_usage: deferred.contextUsage,
     }
     let finalized = false
-    if (deferred.provider === 'codex') finalized = await finalizeCodexTurn(session, body, taskTurn)
-    else if (deferred.provider === 'pi') finalized = await finalizePiTurn(session, body, taskTurn)
-    else finalized = await finalizeTurn(session, { teamTaskTurn: taskTurn })
-    if (finalized && deferredTeamProviderFinal(session, deferred)) {
-      clearDeferredTeamProviderFinal(session, deferred)
-      saveStateNow(state)
+    if (deferred.provider === 'codex') {
+      finalized = await finalizeCodexTurn(session, body, taskTurn, { deferredFinal: deferred })
+    } else if (deferred.provider === 'pi') {
+      finalized = await finalizePiTurn(session, body, taskTurn, { deferredFinal: deferred })
+    } else {
+      finalized = await finalizeTurn(session, { teamTaskTurn: taskTurn, deferredFinal: deferred })
+    }
+    if (finalized && !deferredTeamProviderFinal(session, deferred)) {
       log('flushed deferred provider final', session.id.slice(0, 8), deferred.taskId,
         deferred.providerWorkGeneration)
     }
@@ -1289,7 +1308,7 @@ function teamTaskTurnOwnsCurrentLifecycle(session, expected) {
 // Stop hook and, as a fallback, by the poller when a turn ends without a Stop.
 // Idempotent: readNewAssistantText advances the read offset, so a second caller
 // (whichever of Stop / poller runs later) reads nothing and posts nothing.
-async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = currentTeamTaskProviderTurn(session) } = {}) {
+async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = currentTeamTaskProviderTurn(session), deferredFinal = null } = {}) {
   const deliveryKey = teamTaskTurn
     ? `${session.id}\u0000${teamTaskTurn.taskId}\u0000${teamTaskTurn.providerWorkGeneration}`
     : `${session.id}\u0000${session.transcript || ''}\u0000${Number(session.offset) || 0}`
@@ -1303,8 +1322,14 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
       // consume and report both generations together.
       if (session.transcript) await waitTranscriptSettle(session.transcript)
       if (teamTaskTurn && discardStaleClaudeTeamTurnTranscript(session, teamTaskTurn)) saveStateNow(state)
+      clearSettledDeferredTeamProviderFinal(session, deferredFinal)
       return false
     }
+    const deferredSettlement = deferredFinal
+      ? claimDeferredTeamProviderFinal(session, deferredFinal)
+      : null
+    if (deferredSettlement && !deferredSettlement.recovered) saveStateNow(state)
+    const recoveringDeferredOutput = Boolean(deferredSettlement?.recovered)
     // Claim this exact lifecycle before transcript settling. Otherwise the Stop
     // hook and missing-Stop poller can both consume/report one native final.
     stopPoller(session)
@@ -1315,6 +1340,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
       log('ignored stale Claude final after transcript settle', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
       if (teamTaskTurn && discardStaleClaudeTeamTurnTranscript(session, teamTaskTurn)) saveStateNow(state)
+      clearSettledDeferredTeamProviderFinal(session, deferredFinal)
       return false
     }
     clearStatusDeferred(session)
@@ -1324,10 +1350,21 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
       rawText || terminalFailure?.text || '',
       claudeTerminalFailures.get(session.id),
     )
+    const finalText = delivery.text || String(deferredSettlement?.lastAssistantMessage || '').trim()
     if (delivery.failure) rememberClaudeTerminalFailure(session.id, delivery.failure)
-    else if (delivery.text) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
-    if (delivery.text && !delivery.suppress) await postProviderOutput(session.channel, delivery.text)
-    else if (delivery.suppress) log('suppressed duplicate Claude terminal failure', session.id.slice(0, 8), delivery.failure?.key)
+    else if (finalText) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
+    try {
+      if (finalText && !delivery.suppress && !recoveringDeferredOutput) {
+        await postProviderOutput(session.channel, finalText)
+      }
+    } catch (error) {
+      if (deferredSettlement && !deferredSettlement.recovered) {
+        releaseDeferredTeamProviderFinalClaim(session, deferredFinal)
+        saveStateNow(state)
+      }
+      throw error
+    }
+    if (delivery.suppress) log('suppressed duplicate Claude terminal failure', session.id.slice(0, 8), delivery.failure?.key)
     const taskFailure = terminalFailure
       ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
       : delivery.failure?.text || null
@@ -1336,7 +1373,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
           session.transcript || '', Number(session.offset) || 0,
         ])).digest('base64url')}`
       : null
-    const finalizedTask = await finishTeamTaskForSession(session, delivery.text, taskFailure, {
+    const finalizedTask = await finishTeamTaskForSession(session, finalText, taskFailure, {
       expectedTeamTaskTurn: teamTaskTurn, reportKey,
     })
     // Slack delivery above can yield while a coordinator follow-up enters the
@@ -1345,7 +1382,15 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
         teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)))) {
       clearTeamInputReservation(session)
     }
-    saveState(state)
+    if (deferredFinal && teamTaskTurn && !finalizedTask &&
+        teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
+      // The final bytes and their uncertain-output claim remain the recovery
+      // source until the exact task report is durably accepted.
+      saveStateNow(state)
+      return false
+    }
+    if (deferredFinal) clearDeferredTeamProviderFinal(session, deferredFinal)
+    saveStateNow(state)
     // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
     // poller is watching — check once, shortly after, and hand off to a poller.
     setTimeout(async () => {
@@ -1367,23 +1412,41 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
 
 // Codex exposes stable final text on Stop and on the supported App Server's
 // successful turn completion. Both enter here; JSONL and terminal output never do.
-async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
+async function finalizeCodexTurn(session, body, teamTaskTurn = null, { deferredFinal = null } = {}) {
   // The App Server fallback enters here directly rather than through the Stop
   // hook. A final can therefore overtake the async transport that is promoting
   // a staged team generation. Retain it behind that exact durable intent and
   // let the normal post-promotion flush own finalization.
   if (!teamTaskTurn && deferFinalAcrossPendingTeamSubmission(session, 'codex', body)) return true
   teamTaskTurn ||= currentTeamTaskProviderTurn(session, body)
+  deferredFinal ||= matchingDeferredTeamProviderFinal(session, 'codex', teamTaskTurn, body)
   const turnId = body.turn_id || null
   const deliveryKey = turnId ? `${session.id}\u0000${turnId}` : null
   if (deliveryKey && codexFinalDeliveries.has(deliveryKey)) return codexFinalDeliveries.get(deliveryKey)
   const delivery = (async () => {
-    if (turnId && !claimCodexFinal(session, turnId)) return false
+    const finalAlreadyClaimed = Boolean(turnId && codexFinalAlreadyClaimed(session, turnId))
+    let claimedFinalNow = false
+    if (turnId && !finalAlreadyClaimed) {
+      if (!claimCodexFinal(session, turnId)) return false
+      claimedFinalNow = true
+    } else if (turnId && !deferredFinal) {
+      return false
+    }
+    const deferredSettlement = deferredFinal
+      ? claimDeferredTeamProviderFinal(session, deferredFinal)
+      : null
+    const recoveringDeferredOutput = Boolean(deferredSettlement?.recovered || finalAlreadyClaimed)
     // Claim before Slack or team side effects. App Server completion and a late
     // Stop hook can race; only one may own this exact native turn.
-    if (turnId) {
+    if (turnId || (deferredSettlement && !deferredSettlement.recovered)) {
       try { saveStateNow(state) }
-      catch (error) { releaseCodexFinal(session, turnId); throw error }
+      catch (error) {
+        if (claimedFinalNow) releaseCodexFinal(session, turnId)
+        if (deferredSettlement && !deferredSettlement.recovered) {
+          releaseDeferredTeamProviderFinalClaim(session, deferredFinal)
+        }
+        throw error
+      }
     }
     const expected = codexFinalLifecycleFingerprint(session, { observedAt: body.observed_at })
     // App Server delivery can sit behind Slack backoff while the user starts a
@@ -1398,16 +1461,22 @@ async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
     }
     const text = String(body.last_assistant_message || '').trim()
     try {
-      if (text && session.channel) await postProviderOutput(session.channel, text, { keepStatus: !ownsLifecycle })
+      if (text && session.channel && !recoveringDeferredOutput) {
+        await postProviderOutput(session.channel, text, { keepStatus: !ownsLifecycle })
+      }
     } catch (error) {
       // A known Slack failure remains retryable by the App Server proxy.
-      if (turnId) releaseCodexFinal(session, turnId)
+      if (claimedFinalNow) releaseCodexFinal(session, turnId)
+      if (deferredSettlement && !deferredSettlement.recovered) {
+        releaseDeferredTeamProviderFinalClaim(session, deferredFinal)
+      }
       saveStateNow(state)
       throw error
     }
+    let finalizedTask = true
     if (ownsLifecycle && teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn) &&
         codexFinalLifecycleStillCurrent(session, expected)) {
-      await finishTeamTaskForSession(session, text, null, {
+      finalizedTask = await finishTeamTaskForSession(session, text, null, {
         expectedTeamTaskTurn: teamTaskTurn,
         reportKey: turnId
           ? `codex:${turnId}`
@@ -1417,7 +1486,13 @@ async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
     } else {
       log('Codex final arrived after a newer turn started; preserved newer lifecycle state', session.id.slice(0, 8), turnId)
     }
-    saveState(state)
+    if (deferredFinal && teamTaskTurn && !finalizedTask &&
+        teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
+      saveStateNow(state)
+      return false
+    }
+    if (deferredFinal) clearDeferredTeamProviderFinal(session, deferredFinal)
+    saveStateNow(state)
     return true
   })()
   if (deliveryKey) codexFinalDeliveries.set(deliveryKey, delivery)
@@ -1446,9 +1521,12 @@ async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt,
   return true
 }
 
-async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProviderTurn(session)) {
+async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProviderTurn(session), { deferredFinal = matchingDeferredTeamProviderFinal(session, 'pi', teamTaskTurn, body) } = {}) {
   const turnId = body.turn_id || null
-  if (turnId && session.lastMirroredTurn === turnId) return
+  if (turnId && session.lastMirroredTurn === turnId) {
+    if (deferredFinal) clearSettledDeferredTeamProviderFinal(session, deferredFinal)
+    return Boolean(deferredFinal)
+  }
   const expectedStartedAt = session.piTurnStartedAt || null
   const observedAt = Number(body.observed_at) || null
   const stillCurrent = ({ afterStop = false } = {}) =>
@@ -1459,26 +1537,49 @@ async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProvi
     log('ignored stale Pi final before lifecycle mutation', session.id.slice(0, 8), turnId)
     return false
   }
+  const deferredSettlement = deferredFinal
+    ? claimDeferredTeamProviderFinal(session, deferredFinal)
+    : null
+  if (deferredSettlement && !deferredSettlement.recovered) saveStateNow(state)
+  const recoveringDeferredOutput = Boolean(deferredSettlement?.recovered)
   stopPoller(session)
   clearStatusDeferred(session)
   const text = String(body.last_assistant_message || '').trim()
-  if (text && session.channel) await postProviderOutput(session.channel, text)
+  try {
+    if (text && session.channel && !recoveringDeferredOutput) {
+      await postProviderOutput(session.channel, text)
+    }
+  } catch (error) {
+    if (deferredSettlement && !deferredSettlement.recovered) {
+      releaseDeferredTeamProviderFinalClaim(session, deferredFinal)
+      saveStateNow(state)
+    }
+    throw error
+  }
   // Slack delivery yields. A follow-up may have started a newer Pi turn; its
   // poller, timestamps, usage, and task generation must survive the older final.
   if (!stillCurrent({ afterStop: true })) {
     log('ignored stale Pi final after Slack delivery', session.id.slice(0, 8), turnId)
+    clearSettledDeferredTeamProviderFinal(session, deferredFinal)
     return false
   }
   const finalizedTask = await finishTeamTaskForSession(session, text, null, {
     expectedTeamTaskTurn: teamTaskTurn,
     reportKey: turnId ? `pi:${turnId}` : `pi-start:${expectedStartedAt || observedAt}`,
   })
-  if (session.piTurnStartedAt || (teamTaskTurn && !finalizedTask &&
-      !teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn))) return false
+  if (session.piTurnStartedAt || (teamTaskTurn && !finalizedTask)) {
+    if (session.piTurnStartedAt || !teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
+      clearSettledDeferredTeamProviderFinal(session, deferredFinal)
+    } else {
+      saveStateNow(state)
+    }
+    return false
+  }
   clearTeamInputReservation(session)
   recordPiUsage(session, body)
   if (turnId) session.lastMirroredTurn = turnId
-  saveState(state)
+  if (deferredFinal) clearDeferredTeamProviderFinal(session, deferredFinal)
+  saveStateNow(state)
   return true
 }
 
@@ -2492,7 +2593,10 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     if (await completePrivateTurn(session, body, targetClaim)) return
     if (provider === 'codex') await finalizeCodexTurn(session, body, teamTaskTurn)
     else if (provider === 'pi') await finalizePiTurn(session, body, teamTaskTurn)
-    else await finalizeTurn(session, { teamTaskTurn })
+    else await finalizeTurn(session, {
+      teamTaskTurn,
+      deferredFinal: matchingDeferredTeamProviderFinal(session, 'claude', teamTaskTurn, body),
+    })
     return
   }
   if (ev === 'SessionEnd') {
