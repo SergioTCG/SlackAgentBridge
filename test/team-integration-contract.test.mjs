@@ -517,6 +517,32 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
   'a final racing staged provider submission must be retained until promotion settles')
 })
 
+test('restart flushes settled deferred finals before idle re-adoption can fail their tasks', () => {
+  const boot = daemon.slice(daemon.lastIndexOf(";(async () => {"))
+  const flush = boot.indexOf('await flushSettledDeferredTeamProviderFinals()')
+  const readopt = boot.indexOf('await readoptStatus()')
+  assert.ok(flush >= 0 && readopt > flush,
+    'durably settled provider finals must be consumed before boot-time idle failure handling')
+
+  const helper = daemon.slice(
+    daemon.indexOf('async function flushSettledDeferredTeamProviderFinals('),
+    daemon.indexOf('function scheduleDeferredTeamProviderFinal('),
+  )
+  assert.match(helper, /deferredTeamProviderFinal\(session\)[\s\S]*pendingTeamProviderTurn\(session, deferred\)[\s\S]*continue/)
+  assert.match(helper, /await flushDeferredTeamProviderFinal\(session, deferred\)/,
+    'boot must await the durable final rather than scheduling it behind re-adoption')
+})
+
+test('restored durable task bindings refresh poller lifecycle snapshots', () => {
+  const reconcile = daemon.slice(
+    daemon.indexOf('async function reconcileTeamTasks('),
+    daemon.indexOf('function providerTurnTracked(', daemon.indexOf('async function reconcileTeamTasks(')),
+  )
+  assert.match(reconcile,
+    /repair\.reason === 'restored_durable_task_binding'[\s\S]*const taskTurn = currentTeamTaskProviderTurn\(session\)[\s\S]*refreshTeamTaskPoller\(session, taskTurn\)/,
+  'a poller created before binding repair must adopt the restored task generation')
+})
+
 test('team mutation responses carry the journaled receipt from the original authority check', () => {
   assert.match(daemon, /function acceptedTeamMutation\([\s\S]*teamMutationForRequest/)
   assert.match(daemon, /mutation: acceptedTeamMutation\(session, result\.task, request\.requestId\)/)

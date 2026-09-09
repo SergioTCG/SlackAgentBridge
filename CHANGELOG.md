@@ -119,6 +119,9 @@ Notable changes to this project. Format based on
 - App Server finals now defer behind unresolved Codex team input just like Stop
   hooks, delayed older-generation prompt hooks cannot fail newer same-task work,
   and accepted continuation retries re-persist recovered state before success.
+- Restart recovery now flushes settled durable provider finals before idle
+  re-adoption, preserves any final whose side effects still need retrying, and
+  refreshes pre-existing Claude/Codex pollers after repairing task bindings.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

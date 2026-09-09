@@ -1194,6 +1194,22 @@ async function flushDeferredTeamProviderFinal(session, expected = null) {
   }
 }
 
+async function flushSettledDeferredTeamProviderFinals() {
+  for (const session of Object.values(state.sessions || {})) {
+    const deferred = deferredTeamProviderFinal(session)
+    if (!deferred || pendingTeamProviderTurn(session, deferred)) continue
+    try {
+      await flushDeferredTeamProviderFinal(session, deferred)
+    } catch (error) {
+      // Keep the durable final intact and let reconciliation retry it. Most
+      // importantly, readoptStatus() also sees this record and will not fail or
+      // re-anchor the task while its exact native final remains recoverable.
+      log('settled deferred team final flush failed', session.id.slice(0, 8),
+        deferred.taskId, String(error?.message || error))
+    }
+  }
+}
+
 function scheduleDeferredTeamProviderFinal(session, expected = null) {
   if (!deferredTeamProviderFinal(session, expected)) return
   setImmediate(() => flushDeferredTeamProviderFinal(session, expected).catch(error =>
@@ -1427,6 +1443,16 @@ async function readoptStatus() {
         await post(s.channel,
           '⚠️ The bridge restarted before a queued input reached this dormant provider. It was not retried; please resend it.').catch(() => {})
       }
+      continue
+    }
+    const deferred = deferredTeamProviderFinal(s)
+    if (deferred && !pendingTeamProviderTurn(s, deferred)) {
+      // Boot flush runs before re-adoption. If a transient side effect prevented
+      // it from settling, preserve the exact final and task boundary for the
+      // reconciler instead of declaring the worker's idle surface a failure (or
+      // advancing Claude's transcript offset past the retained response).
+      log('deferred team final retained across status re-adoption', s.id.slice(0, 8),
+        deferred.taskId, deferred.providerWorkGeneration)
       continue
     }
     if (providerOf(s) === 'pi') {
@@ -4932,6 +4958,18 @@ async function reconcileTeamTasks() {
         log('reconciled team/session binding', repair.sessionId.slice(0, 8), repair.taskId, repair.reason)
         if (repair.reason === 'restored_durable_task_binding' &&
             (pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId) || piPollers.has(repair.sessionId))) {
+          const session = state.sessions?.[repair.sessionId]
+          const taskTurn = currentTeamTaskProviderTurn(session)
+          const snapshotRequired = pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId)
+          if (snapshotRequired && !taskTurn) {
+            // A poller created before the redundant binding was repaired cannot
+            // prove an unknown task generation. Leave proof absent so restart
+            // recovery fails closed instead of reserving this worker forever.
+            log('restored team binding lacks an exact provider-turn snapshot',
+              repair.sessionId.slice(0, 8), repair.taskId)
+            continue
+          }
+          if (snapshotRequired) refreshTeamTaskPoller(session, taskTurn)
           teamTurnProof.add(repair.sessionId)
         }
       }
@@ -8311,6 +8349,7 @@ setInterval(async () => {
   automationLifecycle.recover()
   startAutomationReconciler()
   await recoverHooklessCodexResumes()
+  await flushSettledDeferredTeamProviderFinals()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   await recoverInterruptedTeamContinuations() // adopt a proven live wake; never replay an uncertain one
   startTeamReconciler() // status adoption must fence workers that were already busy before restart
