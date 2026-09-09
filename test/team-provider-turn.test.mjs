@@ -2,9 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  activateTeamProviderTurn, beginTeamProviderPollerObservation,
+  activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
   discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
   pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
+  providerTurnForTaskLifecycle,
   refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
   teamProviderPollerObservationCurrent,
 } from '../daemon/team-provider-turn.mjs'
@@ -85,6 +86,43 @@ test('prompt acknowledgement can recover the exact pending turn after an uncerta
   assert.equal(session.teamProviderTurnPending, undefined)
   assert.deepEqual(providerTurnForCompletion(session, { providerTurnId: 'turn-three' }), {
     taskId: 'task_one', providerWorkGeneration: 3,
+  })
+})
+
+test('authenticated worker proof promotes an exact pending turn after restart', () => {
+  const staged = {}
+  stageTeamProviderTurn(staged, {
+    taskId: 'task_one', providerWorkGeneration: 1, inheritProviderTurnId: true,
+  }, { now: 3000 })
+  const session = JSON.parse(JSON.stringify(staged))
+
+  assert.deepEqual(activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { startedAt: 3100 }), {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  })
+  assert.equal(session.teamProviderTurnPending, undefined)
+  assert.equal(session.teamProviderTurn.inheritProviderTurnId, true)
+  assert.deepEqual(providerTurnForCompletion(session), {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  })
+  assert.equal(activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }), null)
+})
+
+test('a delayed final retains its historical task identity during a newer task', () => {
+  const session = {}
+  stageTeamProviderTurn(session, { taskId: 'task_old', providerWorkGeneration: 1 })
+  activateTeamProviderTurn(session, { providerTurnId: 'turn-old', startedAt: 1000 })
+  stageTeamProviderTurn(session, { taskId: 'task_new', providerWorkGeneration: 1 })
+  activateTeamProviderTurn(session, { providerTurnId: 'turn-new', startedAt: 2000 })
+
+  assert.deepEqual(providerTurnForTaskLifecycle(session, {
+    taskId: 'task_new', providerWorkGeneration: 1,
+    providerTurnId: 'turn-old', observedAt: 1500,
+  }), {
+    taskId: 'task_old', providerWorkGeneration: 1,
   })
 })
 

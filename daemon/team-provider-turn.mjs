@@ -102,6 +102,17 @@ export function pendingTeamProviderTurn(session, expected = null) {
   return publicTurn(pending)
 }
 
+// Promote only the exact durable generation staged before provider delivery.
+// Calling activateTeamProviderTurn without an explicit turn preserves pending
+// metadata such as inheritProviderTurnId across a daemon restart.
+export function activatePendingTeamProviderTurn(session, expected, {
+  providerTurnId = null,
+  startedAt = Date.now(),
+} = {}) {
+  if (!pendingTeamProviderTurn(session, expected)) return null
+  return activateTeamProviderTurn(session, { providerTurnId, startedAt })
+}
+
 // Both delegated-task envelopes and coordinator follow-ups carry a private,
 // provider-visible task identity. A prompt hook can use this marker to promote
 // a staged generation after a tmux write whose return status was uncertain.
@@ -205,4 +216,23 @@ export function providerTurnForCompletion(session, {
   }
   if (hasObservedAt) return publicTurn(latest(candidates))
   return publicTurn(current)
+}
+
+// Resolve the provider generation represented by a final while an exact task
+// is currently bound to the session. A delayed final may legitimately resolve
+// to a historical task: callers must retain that identity so they can reject
+// its lifecycle mutation and discard only its stale transcript prefix.
+export function providerTurnForTaskLifecycle(session, {
+  taskId,
+  providerWorkGeneration,
+  providerTurnId = null,
+  observedAt = null,
+} = {}) {
+  const activeTaskId = String(taskId || '')
+  const generation = Number(providerWorkGeneration)
+  if (!activeTaskId || !Number.isSafeInteger(generation) || generation < 1) return null
+  const tracked = providerTurnForCompletion(session, { providerTurnId, observedAt })
+  if (tracked) return publicTurn(tracked)
+  if (hasTeamProviderTurnTracking(session)) return null
+  return { taskId: activeTaskId, providerWorkGeneration: generation }
 }

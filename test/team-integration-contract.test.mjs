@@ -281,7 +281,10 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.ok(recoveredTurnActivation > submittedTurnSnapshot && recoveredTurnActivation < auditAwait,
     'a recovered prompt turn must become durable before Slack audit delivery yields')
   assert.match(promptHook, /acknowledgedTurn[\s\S]*submittedTeamTaskTurn/)
-  assert.match(promptHook, /providerPromptTurnMarker\(p\)[\s\S]*pendingTeamProviderTurn/)
+  assert.match(promptHook, /providerPromptTurnMarker\(p\)[\s\S]*pendingPromptTeamTurn[\s\S]*pendingTeamProviderTurn/)
+  assert.match(promptHook,
+    /promptTeamTurn\?\.taskId === task\?\.id[\s\S]*injected \|\| pendingPromptTeamTurn/,
+    'a durable exact pending generation must acknowledge coordinator input after restart')
   assert.match(claudeHook, /UserPromptSubmit[\s\S]*observed_at[\s\S]*--argjson observed_at/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
   const claudeFinal = /async function finalizeTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
@@ -303,6 +306,9 @@ test('provider turn reporting preserves task and process ownership until explici
     'an exact completion retry must be recovered before the released session binding is rejected')
   assert.match(completionDeclaration,
     /requestTeamTaskCompletion\(state[\s\S]*recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)/)
+  assert.match(daemon,
+    /function recordTeamWorkerProof[\s\S]*activatePendingTeamProviderTurn\(session[\s\S]*refreshTeamTaskPoller/,
+    'authenticated worker proof must promote uncertain accepted provider input')
 
   const continuation = /async continue\(caller, request\) \{[\s\S]*?\n  },\n  async reply/.exec(daemon)?.[0] || ''
   assert.match(continuation, /to: previous\.targetChannel/)

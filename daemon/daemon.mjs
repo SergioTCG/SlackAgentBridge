@@ -81,9 +81,9 @@ import {
   teamReportLifecycleNotice, undeliveredTeamMessagePredecessor,
 } from './team-message-delivery.mjs'
 import {
-  activateTeamProviderTurn, beginTeamProviderPollerObservation,
-  discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
-  pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
+  activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
+  discardPendingTeamProviderTurn, pendingTeamProviderTurn, providerPromptTurnMarker,
+  providerTurnForTaskLifecycle,
   refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
   teamProviderPollerObservationCurrent,
 } from './team-provider-turn.mjs'
@@ -1101,19 +1101,13 @@ function currentTeamTaskProviderTurn(session, body = null) {
   const taskId = session?.teamActiveTaskId
   const task = taskId ? state.teamTasks?.[taskId] : null
   if (!task || task.targetSessionId !== session.id || task.targetChannel !== session.channel) return null
-  const tracked = providerTurnForCompletion(session, {
+  const tracked = providerTurnForTaskLifecycle(session, {
+    taskId,
+    providerWorkGeneration: teamTaskProviderWorkGeneration(task),
     providerTurnId: body?.turn_id || null,
     observedAt: body?.observed_at || null,
   })
-  if (tracked) {
-    if (tracked.taskId !== taskId) return null
-    return Object.freeze(tracked)
-  }
-  // Upgrade compatibility: provider-final tasks created before durable turn
-  // snapshots existed have only the exact active task binding to consult. New
-  // turns always stage/activate a snapshot before their provider can complete.
-  if (hasTeamProviderTurnTracking(session)) return null
-  return Object.freeze({ taskId, providerWorkGeneration: teamTaskProviderWorkGeneration(task) })
+  return tracked ? Object.freeze(tracked) : null
 }
 
 function teamTaskTurnOwnsCurrentLifecycle(session, expected) {
@@ -2113,14 +2107,19 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     // Snapshot the exact task generation represented by this native prompt
     // before any Slack audit await can let a coordinator follow-up advance the
     // mutable task journal underneath this hook.
-    const submittedTeamTaskTurn = (promptTeamTurn
+    const pendingPromptTeamTurn = promptTeamTurn
       ? pendingTeamProviderTurn(session, promptTeamTurn)
-      : null) ||
+      : null
+    const submittedTeamTaskTurn = pendingPromptTeamTurn ||
       currentTeamTaskProviderTurn(session, body)
     const injected = consumeInjected(sid, p)
     const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
+    const durablePromptTeamTurn = promptTeamTurn && submittedTeamTaskTurn &&
+      promptTeamTurn.taskId === submittedTeamTaskTurn.taskId &&
+      promptTeamTurn.providerWorkGeneration === submittedTeamTaskTurn.providerWorkGeneration
     const acknowledgesTask = teamTaskId === task?.id ||
-      (injected && promptTeamTurn?.taskId === task?.id)
+      (promptTeamTurn?.taskId === task?.id &&
+        (injected || pendingPromptTeamTurn || durablePromptTeamTurn))
     const acknowledgedTurn = task && task.targetSessionId === session.id &&
       task.targetChannel === session.channel && acknowledgesTask &&
       submittedTeamTaskTurn?.taskId === task.id
@@ -2130,11 +2129,13 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       // An uncertain tmux delivery may leave only the pending generation for
       // this hook to recover. Promote and persist it before channel/audit I/O:
       // a fast Stop during either await must see the accepted exact turn.
-      const activeTurn = activateTeamProviderTurn(session, {
-        turn: acknowledgedTurn,
+      const activation = {
         providerTurnId: body.turn_id || null,
         startedAt: body.observed_at || Date.now(),
-      })
+      }
+      const activeTurn = pendingPromptTeamTurn
+        ? activatePendingTeamProviderTurn(session, pendingPromptTeamTurn, activation)
+        : activateTeamProviderTurn(session, { turn: acknowledgedTurn, ...activation })
       refreshTeamTaskPoller(session, activeTurn)
       saveStateNow(state)
     } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
@@ -3758,8 +3759,19 @@ let teamRecoveryComplete = false
 
 function recordTeamWorkerProof(session, task) {
   teamTurnProof.add(session.id)
-  if (providerOf(session) !== 'codex' || session.codexTurnStartedAt) return false
   const claimedAt = Date.parse(task.dispatchClaimedAt || task.startedAt || '')
+  const generation = teamTaskProviderWorkGeneration(task)
+  // A task-bound reply can prove that an uncertain initial dispatch reached the
+  // provider. It cannot prove receipt of a later coordinator follow-up: that
+  // generation still requires its exact provider prompt acknowledgement.
+  const activeTurn = generation === 1
+    ? activatePendingTeamProviderTurn(session, {
+        taskId: task.id,
+        providerWorkGeneration: generation,
+      }, { startedAt: Number.isFinite(claimedAt) ? claimedAt : Date.now() })
+    : null
+  if (activeTurn) refreshTeamTaskPoller(session, activeTurn)
+  if (providerOf(session) !== 'codex' || session.codexTurnStartedAt) return false
   session.codexTurnStartedAt = Number.isFinite(claimedAt) ? claimedAt : Date.now()
   delete session.codexUsageBaseline
   return true

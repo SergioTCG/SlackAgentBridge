@@ -83,6 +83,11 @@ Notable changes to this project. Format based on
   after an uncertain tmux result. Delayed Claude finals are rejected before
   stopping a newer poller or consuming newer transcript output, and legacy
   empty finals retain their historical failure semantics.
+- Historical Claude turn identities now survive task replacement long enough
+  to discard only their stale transcript bytes. Authenticated worker proof and
+  durable post-restart coordinator-message markers promote the exact pending
+  generation instead of leaving work reserved or misclassifying it as local
+  terminal input.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.
