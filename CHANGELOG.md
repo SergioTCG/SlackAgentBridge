@@ -125,6 +125,9 @@ Notable changes to this project. Format based on
 - Stale Claude Stop events now wait for transcript settlement before advancing
   past their generation, and reconciliation fences a task while a durably
   captured provider final remains pending after a transient flush failure.
+- Claude task reports now select assistant output from the exact embedded work
+  generation, and delayed team prompt hooks can no longer create a stale owner
+  input reservation after newer work or coordinator release.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

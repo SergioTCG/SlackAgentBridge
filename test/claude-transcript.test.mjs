@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { staleTeamTurnTranscriptPrefixBytes } from '../daemon/claude-transcript.mjs'
+import {
+  staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
+} from '../daemon/claude-transcript.mjs'
 
 const record = (type, text) => JSON.stringify({
   type,
@@ -42,4 +44,48 @@ test('a newly assigned task is also a stale transcript boundary', () => {
   assert.equal(staleTeamTurnTranscriptPrefixBytes(transcript, {
     taskId: 'task_one', providerWorkGeneration: 3,
   }), Buffer.byteLength(oldFinal))
+})
+
+test('a current generation reads only its own assistant text when an older final is still pending', () => {
+  const firstPrompt = record('user', [
+    '<sab-team-task id="task_one" generation="1" source="coordinator">',
+    'First instruction.',
+    '</sab-team-task>',
+  ].join('\n'))
+  const secondPrompt = record('user', [
+    '<sab-team-message task="task_one" generation="2" source="coordinator">',
+    'Follow-up instruction.',
+    '</sab-team-message>',
+  ].join('\n'))
+  const transcript = firstPrompt + record('assistant', 'Generation one final.') +
+    secondPrompt + record('assistant', 'Generation two final.')
+
+  assert.deepEqual(teamTurnAssistantTranscript(transcript, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }), {
+    text: 'Generation two final.',
+    consumedBytes: Buffer.byteLength(transcript),
+  })
+})
+
+test('generation-bound transcript reads stop before a later task marker', () => {
+  const firstPrompt = record('user', [
+    '<sab-team-task id="task_one" generation="1" source="coordinator">',
+    'First instruction.',
+    '</sab-team-task>',
+  ].join('\n'))
+  const secondPrompt = record('user', [
+    '<sab-team-message task="task_one" generation="2" source="coordinator">',
+    'Follow-up instruction.',
+    '</sab-team-message>',
+  ].join('\n'))
+  const firstSegment = firstPrompt + record('assistant', 'Generation one final.')
+  const transcript = firstSegment + secondPrompt + record('assistant', 'Generation two final.')
+
+  assert.deepEqual(teamTurnAssistantTranscript(transcript, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }), {
+    text: 'Generation one final.',
+    consumedBytes: Buffer.byteLength(firstSegment),
+  })
 })

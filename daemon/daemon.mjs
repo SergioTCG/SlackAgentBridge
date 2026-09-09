@@ -63,7 +63,9 @@ import {
   CLAUDE_FAILURE_DEDUPE_MS, claudePollerDecision, prepareClaudeTerminalDelivery,
   resetClaudePollerEvidence,
 } from './claude-terminal.mjs'
-import { staleTeamTurnTranscriptPrefixBytes } from './claude-transcript.mjs'
+import {
+  staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
+} from './claude-transcript.mjs'
 import {
   nextStructuredQuestion, questionBlocks, questionFormFromPane, questionFormMatches, questionFormsFromHook,
 } from './claude-question.mjs'
@@ -1264,7 +1266,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     }
     clearStatusDeferred(session)
     void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
-    const rawText = readNewAssistantText(session)
+    const rawText = readNewAssistantText(session, teamTaskTurn)
     const delivery = prepareClaudeTerminalDelivery(
       rawText || terminalFailure?.text || '',
       claudeTerminalFailures.get(session.id),
@@ -1580,7 +1582,7 @@ async function waitTranscriptSettle(file, maxMs = 4000) {
 // Reads assistant text written since session.offset. Only COMPLETE lines are
 // parsed, so a record being flushed is never cut in half. Poller failure
 // detection peeks without advancing; final delivery advances atomically.
-function assistantTextSinceOffset(session, advance = false) {
+function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = null) {
   if (providerOf(session) !== 'claude') return ''
   const f = session.transcript
   if (!f || !fs.existsSync(f)) return ''
@@ -1594,6 +1596,14 @@ function assistantTextSinceOffset(session, advance = false) {
   const str = buf.toString('utf8')
   const lastNl = str.lastIndexOf('\n')
   if (lastNl < 0) return '' // no complete line yet; wait for more
+  const complete = str.slice(0, lastNl + 1)
+  if (expectedTeamTurn) {
+    const selected = teamTurnAssistantTranscript(complete, expectedTeamTurn)
+    if (selected) {
+      if (advance) session.offset = from + selected.consumedBytes
+      return selected.text
+    }
+  }
   if (advance) session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
   const out = []
   for (const line of str.slice(0, lastNl).split('\n')) {
@@ -1609,7 +1619,8 @@ function assistantTextSinceOffset(session, advance = false) {
 }
 
 const peekNewAssistantText = session => assistantTextSinceOffset(session, false)
-const readNewAssistantText = session => assistantTextSinceOffset(session, true)
+const readNewAssistantText = (session, expectedTeamTurn = null) =>
+  assistantTextSinceOffset(session, true, expectedTeamTurn)
 
 function discardStaleClaudeTeamTurnTranscript(session, expected) {
   if (providerOf(session) !== 'claude' || !session.transcript || !fs.existsSync(session.transcript)) return false
@@ -2307,7 +2318,8 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
       saveStateNow(state)
     }
-    if (p && !acknowledgedTurn && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
+    if (p && !acknowledgedTurn && !promptTeamTurn &&
+        !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
     const ch = session.channel || (await ensureChannel(session))
     if (acknowledgedCoordinatorMessage?.created) {
       await updateTeamTaskAudit(task).catch(error =>

@@ -304,6 +304,8 @@ test('provider turn reporting preserves task and process ownership until explici
   'a stale Claude Stop must settle its transcript before advancing past the old generation')
   assert.ok(claudeFinal.indexOf('teamTaskTurnOwnsCurrentLifecycle') < claudeFinal.indexOf('readNewAssistantText'),
     'a stale Claude final must be rejected before transcript consumption')
+  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn\)/,
+    'Claude final output must be selected from the exact task generation')
   const codexFinal = /async function finalizeCodexTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.match(codexFinal,
     /teamTaskTurnOwnsCurrentLifecycle\(session, teamTaskTurn\)[\s\S]*if \(ownsLifecycle\)[\s\S]*stopPoller/)
@@ -516,8 +518,8 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
     /providerPromptAcknowledgesTask\(session,[\s\S]*currentGeneration: pendingPromptTeamTurn\?\.providerWorkGeneration \?\?[\s\S]*teamTaskProviderWorkGeneration\(task\)/,
   'provider prompt acknowledgements must match the exact accepted or pending generation')
   assert.match(promptHook,
-    /if \(p && !acknowledgedTurn && !\(teamTaskId && session\.teamActiveTaskId === teamTaskId\)\) reserveTeamInput/,
-  'a delayed authenticated team acknowledgement must not recreate an input reservation')
+    /if \(p && !acknowledgedTurn && !promptTeamTurn[\s\S]*\) reserveTeamInput/,
+  'recognized stale or released team prompt markers must never create an owner input reservation')
   assert.match(daemon,
     /deferPendingTeamProviderFinal[\s\S]*flushDeferredTeamProviderFinal/,
   'a final racing staged provider submission must be retained until promotion settles')
