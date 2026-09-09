@@ -10,6 +10,7 @@ function normalizedTurn(value, startedAt = Date.now(), providerTurnId = null) {
     providerWorkGeneration,
     startedAt: Number.isSafeInteger(start) && start > 0 ? start : Date.now(),
     providerTurnId: providerTurnId ? String(providerTurnId) : null,
+    inheritProviderTurnId: value?.inheritProviderTurnId === true,
   }
 }
 
@@ -50,6 +51,7 @@ export function stageTeamProviderTurn(session, turn, { now = Date.now() } = {}) 
     taskId: staged.taskId,
     providerWorkGeneration: staged.providerWorkGeneration,
     stagedAt: staged.startedAt,
+    inheritProviderTurnId: staged.inheritProviderTurnId,
   }
   return publicTurn(staged)
 }
@@ -70,10 +72,26 @@ export function activateTeamProviderTurn(session, {
 } = {}) {
   if (!session) return null
   const source = turn || session.teamProviderTurnPending
-  const next = normalizedTurn(source, startedAt, providerTurnId)
+  let next = normalizedTurn(source, startedAt, providerTurnId)
   if (!next) return null
   const current = normalizedTurn(session.teamProviderTurn,
     session.teamProviderTurn?.startedAt, session.teamProviderTurn?.providerTurnId)
+  if (current && next.inheritProviderTurnId && !next.providerTurnId &&
+      current.taskId === next.taskId) {
+    next = { ...next, providerTurnId: current.providerTurnId }
+  }
+  // A delayed UserPromptSubmit hook may resume after a coordinator follow-up
+  // has already advanced this task. Preserve the observed older native turn in
+  // history, but never let it replace the newer accepted work generation.
+  if (current && current.taskId === next.taskId &&
+      current.providerWorkGeneration > next.providerWorkGeneration) {
+    if (current.inheritProviderTurnId && !current.providerTurnId && next.providerTurnId) {
+      session.teamProviderTurn = { ...current, providerTurnId: next.providerTurnId }
+    }
+    rememberPrevious(session, next)
+    discardPendingTeamProviderTurn(session, next)
+    return publicTurn(session.teamProviderTurn || current)
+  }
   if (current && sameLogicalTurn(current, next)) {
     session.teamProviderTurn = {
       ...current,
@@ -110,20 +128,26 @@ export function providerTurnForCompletion(session, {
     .map(item => normalizedTurn(item, item?.startedAt, item?.providerTurnId))
     .filter(Boolean)
   const candidates = [...history, current].filter(Boolean)
+  const observed = Number(observedAt)
+  const hasObservedAt = Number.isSafeInteger(observed) && observed > 0
+  const latest = values => values
+    .filter(item => !hasObservedAt || item.startedAt <= observed)
+    .sort((left, right) => right.startedAt - left.startedAt ||
+      right.providerWorkGeneration - left.providerWorkGeneration)[0]
   const nativeId = providerTurnId ? String(providerTurnId) : null
   if (nativeId) {
-    const exact = candidates.find(item => item.providerTurnId === nativeId)
+    // A coordinator follow-up can steer an already-running native turn, so the
+    // old and new work generations may deliberately share one native id. Use
+    // the hook observation time (or the newest generation when absent) rather
+    // than the history array's insertion order.
+    const exactCandidates = candidates.filter(item => item.providerTurnId === nativeId)
+    const exact = latest(exactCandidates)
     if (exact) return publicTurn(exact)
+    if (exactCandidates.length) return null
     // Once the current turn has a different native identity, an unknown final
     // is not allowed to borrow it merely because it arrived later.
     if (current?.providerTurnId) return null
   }
-  const observed = Number(observedAt)
-  if (Number.isSafeInteger(observed) && observed > 0) {
-    const temporal = candidates
-      .filter(item => item.startedAt <= observed)
-      .sort((left, right) => right.startedAt - left.startedAt)[0]
-    return publicTurn(temporal)
-  }
+  if (hasObservedAt) return publicTurn(latest(candidates))
   return publicTurn(current)
 }

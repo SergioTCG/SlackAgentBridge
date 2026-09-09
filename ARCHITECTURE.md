@@ -322,7 +322,12 @@ release until exact provider delivery. Before provider input, SAB journals the
 intended generation; accepted input promotes it to a bounded durable native-turn
 fingerprint. Provider finals resolve that fingerprint by native turn identity or
 event observation time rather than sampling mutable task state, so a delayed
-earlier final cannot be mistaken for the follow-up result. Pre-upgrade tasks without an explicit
+earlier final cannot be mistaken for the follow-up result. An active provider
+poller's fallback fingerprint advances at the same acceptance boundary, and a
+delayed prompt acknowledgement may enter bounded history but cannot replace a
+newer generation. Once provider input succeeds, failure to persist that
+activation is an uncertain delivery: SAB retains the task reservation and
+never attempts a second transport. Pre-upgrade tasks without an explicit
 completion policy retain provider-final semantics so an upgrade cannot
 reinterpret an already-running turn.
 

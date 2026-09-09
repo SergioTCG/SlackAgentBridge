@@ -59,6 +59,11 @@ Notable changes to this project. Format based on
   sampling mutable task state. Continuation timeout guidance no longer filters
   mutation lookup by the unknowable child task, and saturated cancelled-task
   retries fail explicitly instead of acknowledging an unqueryable receipt.
+- Delegated input no longer falls through to a second transport after the
+  provider accepted it but lifecycle persistence failed. Active fallback
+  pollers advance with coordinator follow-ups, shared native turn IDs resolve
+  to the generation current at hook observation time, and delayed prompt hooks
+  cannot roll a task back to older work.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.

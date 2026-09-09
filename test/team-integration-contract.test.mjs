@@ -38,6 +38,19 @@ test('team task injection is journal-first and uncertain claims are not replayed
   const dispatchBody = /async function dispatchTeamTask\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.doesNotMatch(dispatchBody, /markTeamTaskRunning/)
   assert.match(daemon, /teamTaskId && session\.teamActiveTaskId === teamTaskId[\s\S]*markTeamTaskRunning/)
+  assert.match(daemon, /providerInputUncertain[\s\S]*refusing retry/)
+  const injection = daemon.slice(daemon.indexOf('async function injectText('), daemon.indexOf('async function downloadSlackFile('))
+  const tmuxWrite = injection.indexOf('await tmuxPaste')
+  const transportTry = injection.lastIndexOf('try {', tmuxWrite)
+  const transportCatchEnd = injection.indexOf('// Only a provably failed tmux write', tmuxWrite)
+  assert.doesNotMatch(injection.slice(transportTry, transportCatchEnd), /acceptExpectedTeamTurn/,
+    'post-write lifecycle persistence must not be caught by the transport fallback')
+  assert.match(injection.slice(transportTry, transportCatchEnd),
+    /expectedTeamTurn[\s\S]*uncertainTeamProviderInput/,
+    'an exact delegated tmux rejection is uncertain and must not reach another transport')
+  const acceptedBoundary = injection.indexOf('if (tmuxAccepted)', tmuxWrite)
+  const acceptancePersist = injection.indexOf('acceptExpectedTeamTurn()', acceptedBoundary)
+  assert.ok(tmuxWrite > 0 && acceptedBoundary > tmuxWrite && acceptancePersist > acceptedBoundary)
 })
 
 test('team file relay journals an in-flight claim before every Slack upload', () => {
@@ -78,6 +91,8 @@ test('hookless successful workers report with warning and cannot race an authent
   assert.match(poller, /await validProviderRootClaim[\s\S]*if \(p\.stopped\) return[\s\S]*finishTeamTaskWithWarningForSession/)
   assert.match(poller, /finishTeamTaskWithWarningForSession\(session, task\.status === 'running'/)
   assert.match(poller, /omitted its acknowledgement and completion hooks/)
+  assert.match(poller, /warning-bearing turn report[\s\S]*task remains reserved until explicit release/)
+  assert.doesNotMatch(poller, /SAB completed the task with a warning/)
   assert.match(daemon, /reportTeamTaskTurn/)
 })
 
@@ -289,6 +304,8 @@ test('coordinator follow-ups serialize and coordinator release does not mint wor
   const release = /async release\(caller, request\) \{[\s\S]*?\n  },\n  async cancel/.exec(daemon)?.[0] || ''
   assert.match(release, /persistTeamLifecycle\(task, \{ enqueueContinuation: false \}\)/)
   assert.doesNotMatch(release, /stageTeamContinuation/)
+  assert.match(daemon, /function refreshTeamTaskPoller[\s\S]*claude\.teamTaskTurn = snapshot[\s\S]*codex\.teamTaskTurn = snapshot/)
+  assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*refreshTeamTaskPoller\(target, activeTurn\)/)
 })
 
 test('reported-worker dormancy is re-evaluated after Slack message audit delivery', () => {

@@ -781,6 +781,25 @@ function startPoller(session) {
 const codexPollers = new Map() // sid → { timer, baseline, current, ... }
 const codexFinalDeliveries = new Map() // sid + turn → one shared Stop/App Server delivery
 const CODEX_USAGE_REFRESH_MS = 12000
+
+function refreshTeamTaskPoller(session, teamTaskTurn) {
+  if (!teamTaskTurn) return
+  const snapshot = Object.freeze({
+    taskId: teamTaskTurn.taskId,
+    providerWorkGeneration: teamTaskTurn.providerWorkGeneration,
+  })
+  const claude = pollers.get(session.id)
+  if (claude) {
+    claude.teamTaskTurn = snapshot
+    claude.idle = 0
+  }
+  const codex = codexPollers.get(session.id)
+  if (codex) {
+    codex.teamTaskTurn = snapshot
+    codex.idleObservation = null
+  }
+}
+
 async function reconcileCodexFooter(session, pane = null) {
   if (!session?.channel || providerOf(session) !== 'codex' ||
       state.channels[session.channel] !== session.id || !(session.pid && pidAlive(session.pid)) || !session.tmux) return false
@@ -868,9 +887,9 @@ function startCodexPoller(session) {
       p.idleObservation = idleDecision.observation
       if (idleDecision.action === 'release' && session.teamActiveTaskId) {
         // A worker can return to the Codex input surface without Stop. Keep the
-        // task journal authoritative: stable idle proves the injected turn is
-        // over, so complete it with a warning even if its acknowledgement or
-        // completion hook was omitted. Never replay it.
+        // task journal authoritative: stable idle proves only that the injected
+        // provider turn ended, so report it with a warning and retain the task
+        // reservation. Never replay it or imply task release.
         const task = state.teamTasks?.[session.teamActiveTaskId]
         const expected = {
           sid: session.id,
@@ -892,7 +911,7 @@ function startCodexPoller(session) {
         stopPoller(session)
         await finishTeamTaskWithWarningForSession(session, task.status === 'running'
           ? 'Codex returned to idle without its lifecycle completion hook. The accepted worker turn completed, but SAB could not authenticate a stable final response.'
-          : 'Codex returned to idle after the injected worker turn, but omitted its acknowledgement and completion hooks. SAB completed the task with a warning and did not replay it.',
+          : 'Codex returned to idle after the injected worker turn, but omitted its acknowledgement and completion hooks. SAB recorded a warning-bearing turn report and did not replay the work; the task remains reserved until explicit release.',
         p.teamTaskTurn)
         clearTeamInputReservation(session)
         saveStateNow(state)
@@ -2026,11 +2045,12 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
           : null
       : null
     if (acknowledgedTurn) {
-      activateTeamProviderTurn(session, {
+      const activeTurn = activateTeamProviderTurn(session, {
         turn: acknowledgedTurn,
         providerTurnId: body.turn_id || null,
         startedAt: body.observed_at || Date.now(),
       })
+      refreshTeamTaskPoller(session, activeTurn)
       saveStateNow(state)
     } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
       saveStateNow(state)
@@ -3368,6 +3388,14 @@ const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kil
 
 // Deliver text into a session: prefer a tmux paste (full text shows in the TUI),
 // fall back to a channel event, and resurrect the session if it's gone.
+function uncertainTeamProviderInput(message, cause, { accepted = false } = {}) {
+  const error = new TeamError('provider_delivery_uncertain', message, 502)
+  error.providerInputUncertain = true
+  error.providerInputAccepted = accepted
+  error.cause = cause
+  return error
+}
+
 async function injectText(session, text, options = {}) {
   const assertExpectedBinding = () => {
     if (!options.expectedSessionId) return
@@ -3422,8 +3450,14 @@ async function injectText(session, text, options = {}) {
   }
   const acceptExpectedTeamTurn = () => {
     if (!expectedTeamTurn) return
-    activateTeamProviderTurn(session, { turn: expectedTeamTurn })
-    saveStateNow(state)
+    const activeTurn = activateTeamProviderTurn(session, { turn: expectedTeamTurn })
+    refreshTeamTaskPoller(session, activeTurn)
+    try { saveStateNow(state) }
+    catch (cause) {
+      throw uncertainTeamProviderInput(
+        'The provider accepted the delegated input, but SAB could not durably record its lifecycle. The input will not be retried.',
+        cause, { accepted: true })
+    }
   }
   const discardExpectedTeamTurn = () => {
     if (discardPendingTeamProviderTurn(session, expectedTeamTurn)) saveStateNow(state)
@@ -3454,15 +3488,31 @@ async function injectText(session, text, options = {}) {
   if (alive && session.tmux && (await tmuxAlive(session.tmux))) {
     assertExpectedBinding()
     rememberInjected(session.id, delivered)
+    let tmuxAccepted = false
     try {
       await tmuxPaste(session.tmux, delivered)
+      tmuxAccepted = true
+    }
+    catch (e) {
+      if (expectedTeamTurn) {
+        // tmuxPaste has multiple subprocess boundaries; a rejection may occur
+        // after paste-buffer or Enter already reached the provider. An exact
+        // delegated task therefore fails closed instead of trying SSE too.
+        throw uncertainTeamProviderInput(
+          'The delegated tmux write outcome is uncertain. SAB retained the task reservation and will not retry another transport.', e)
+      }
+      forgetInjected(session.id, delivered)
+      log('tmux paste failed, falling back to channel event', String(e))
+    }
+    // Only a provably failed tmux write may reach the secondary input surface.
+    // Lifecycle persistence is deliberately outside the transport catch: once
+    // tmux accepted the bytes, a persistence failure is uncertain and must not
+    // submit the same prompt again.
+    if (tmuxAccepted) {
       acceptExpectedTeamTurn()
       if (provider === 'codex') ensureCodexTurnStarted(session)
       log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
       return
-    } catch (e) {
-      forgetInjected(session.id, delivered)
-      log('tmux paste failed, falling back to channel event', String(e))
     }
   }
   if (alive) {
@@ -4260,12 +4310,19 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
     throw new TeamError('target_authority_lost', 'The exact active worker changed before provider delivery.', 409)
   }
   rememberInjected(expected.sid, prompt)
+  const steeredNativeTurnId = providerTurn.inheritProviderTurnId &&
+      target.teamProviderTurn?.taskId === providerTurn.taskId
+    ? target.teamProviderTurn.providerTurnId || null
+    : null
   if (expected.provider === 'pi') {
     if (!injectQueuedPiPrompt(expected.pid, piPromptQueueItem(prompt))) {
       forgetInjected(expected.sid, prompt)
       throw knownUndeliveredTeamMessage('The exact Pi input stream did not accept the coordinator message.')
     }
-    activateTeamProviderTurn(target, { turn: providerTurn })
+    const activeTurn = activateTeamProviderTurn(target, {
+      turn: providerTurn, providerTurnId: steeredNativeTurnId,
+    })
+    refreshTeamTaskPoller(target, activeTurn)
     return
   }
   // This is deliberately one transport attempt. tmuxPaste can become
@@ -4276,7 +4333,10 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
     throw new TeamError('target_authority_lost',
       'The worker changed while the coordinator message was being submitted; delivery is uncertain.', 409)
   }
-  activateTeamProviderTurn(target, { turn: providerTurn })
+  const activeTurn = activateTeamProviderTurn(target, {
+    turn: providerTurn, providerTurnId: steeredNativeTurnId,
+  })
+  refreshTeamTaskPoller(target, activeTurn)
   if (expected.provider === 'codex') ensureCodexTurnStarted(target)
 }
 
@@ -4348,6 +4408,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     const providerTurn = {
       taskId: task.id,
       providerWorkGeneration: Math.max(1, Number(message.workGeneration) || 1),
+      inheritProviderTurnId: !message.resumesTask,
     }
     stageTeamProviderTurn(target, providerTurn)
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_submitting')
@@ -4544,6 +4605,16 @@ async function dispatchTeamTask(task) {
       task.sourceChannel, '→', task.targetChannel, target.id.slice(0, 8))
     return true
   } catch (error) {
+    if (error?.providerInputUncertain) {
+      log('team task provider input may have been accepted; refusing retry',
+        task.id, String(error?.cause?.message || error?.message || error))
+      try { saveStateNow(state) }
+      catch (persistenceError) {
+        log('team task accepted-state persistence remains unavailable', task.id,
+          String(persistenceError?.message || persistenceError))
+      }
+      return true
+    }
     delete target.teamActiveTaskId
     noteTeamAvailability(target, 'provider_injection_failed')
     failTeamTask(state, task.id, `Provider injection failed: ${String(error?.message || error).slice(0, 1000)}`)

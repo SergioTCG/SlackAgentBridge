@@ -54,6 +54,40 @@ test('hook acknowledgement promotes a staged generation exactly once and survive
   assert.equal(recovered.teamProviderTurnHistory?.length || 0, 0)
 })
 
+test('steered native turns resolve the newest generation without delayed-hook rollback', () => {
+  const session = {}
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 1 })
+  activateTeamProviderTurn(session, { startedAt: 1000 })
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 2 }, { now: 2000 })
+  activateTeamProviderTurn(session, {
+    turn: {
+      taskId: 'task_one', providerWorkGeneration: 2,
+      inheritProviderTurnId: true,
+    },
+    startedAt: 2000,
+  })
+
+  // The delayed acknowledgement for generation 1 is retained as history but
+  // must not replace generation 2 as the current accepted work. Because this
+  // follow-up steered the active native turn, that late acknowledgement also
+  // supplies the native id which was not yet known at delivery time.
+  activateTeamProviderTurn(session, {
+    turn: { taskId: 'task_one', providerWorkGeneration: 1 },
+    providerTurnId: 'shared-turn', startedAt: 1500,
+  })
+  assert.equal(session.teamProviderTurn.providerWorkGeneration, 2)
+  assert.equal(session.teamProviderTurn.providerTurnId, 'shared-turn')
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'shared-turn', observedAt: 1750,
+  }), { taskId: 'task_one', providerWorkGeneration: 1 })
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'shared-turn', observedAt: 2500,
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'shared-turn',
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
+})
+
 test('known-undelivered staging is discarded and ordinary turns retire task ownership', () => {
   const session = {}
   stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 1 })
