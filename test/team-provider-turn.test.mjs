@@ -265,6 +265,30 @@ test('a provider final crossing an unresolved submission boundary is retained du
   assert.equal(deferredTeamProviderFinal(recovered), null)
 })
 
+test('a previous accepted turn keeps its final when a follow-up is only staged', () => {
+  const session = {}
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1000 })
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { providerTurnId: 'turn-one' })
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { now: 2000 })
+
+  // Staging precedes tmux Enter. A Stop from the accepted first turn can land
+  // after that intent timestamp and must still resolve to generation one.
+  assert.equal(deferPendingTeamProviderFinal(session, {
+    provider: 'codex', providerTurnId: 'turn-one', observedAt: 2100,
+    lastAssistantMessage: 'Generation one final.',
+  }), null)
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'turn-one', observedAt: 2100,
+  }), { taskId: 'task_one', providerWorkGeneration: 1 })
+  assert.equal(deferredTeamProviderFinal(session), null)
+})
+
 test('an inherited native turn id remains provisional for a distinct follow-up turn', () => {
   const session = {}
   stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 1 })

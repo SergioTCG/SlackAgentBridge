@@ -173,9 +173,15 @@ function taskRequestArgs(args, { text = false, pending = false } = {}) {
     }
     usage(`unknown option: ${arg}`)
   }
-  const pendingGates = pendingValue === null ? null
-    : pendingValue.toLowerCase() === 'none' ? []
-      : pendingValue.split(',').map(item => item.trim()).filter(Boolean)
+  let pendingGates = null
+  if (pendingValue !== null) {
+    const normalizedPending = pendingValue.trim()
+    if (normalizedPending.toLowerCase() === 'none') pendingGates = []
+    else {
+      pendingGates = normalizedPending.split(',').map(item => item.trim()).filter(Boolean)
+      if (!pendingGates.length) usage('--pending requires one or more gate names, or the explicit `none` sentinel')
+    }
+  }
   return { taskId, requestId, text: mode ? readText(mode, message).trim() : '', pendingGates }
 }
 

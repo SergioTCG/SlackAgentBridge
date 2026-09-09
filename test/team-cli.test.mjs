@@ -96,6 +96,13 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   const checkpoint = await run(['checkpoint', '--task', 'task_one', '--pending', 'ci,merge', '--message', 'Still running.'], env)
   assert.equal(checkpoint.status, 0, checkpoint.stderr)
   assert.match(JSON.parse(checkpoint.stdout).mutation.requestId, /^[0-9a-f-]{36}$/)
+  const malformedCheckpoint = await run([
+    'checkpoint', '--task', 'task_one', '--pending', ',', '--message', 'Malformed clear.',
+  ], env)
+  assert.equal(malformedCheckpoint.status, 2)
+  assert.match(malformedCheckpoint.stderr, /pending.*none/i)
+  assert.equal(requests.some(request => request.url.startsWith('/team/checkpoint') &&
+    request.body?.text === 'Malformed clear.'), false)
   const completed = await run(['complete', '--task', 'task_one', '--message', 'Everything passed.'], env)
   const released = await run(['release', '--task', 'task_one'], env)
   const continued = await run(['continue', '--task', 'task_one', '--message', 'Follow up.'], env)

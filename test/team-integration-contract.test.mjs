@@ -285,6 +285,9 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(promptHook,
     /providerPromptAcknowledgesTask\(session,[\s\S]*promptTurn: promptTeamTurn[\s\S]*pending: Boolean\(pendingPromptTeamTurn\)/,
     'a durable exact pending generation must acknowledge coordinator input after restart')
+  assert.match(promptHook,
+    /currentGeneration: pendingPromptTeamTurn\?\.providerWorkGeneration \?\?[\s\S]*teamTaskProviderWorkGeneration\(task\)/,
+    'an exact pending follow-up hook must not be compared with the preceding task generation')
   assert.match(claudeHook, /UserPromptSubmit[\s\S]*observed_at[\s\S]*--argjson observed_at/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
   const claudeFinal = /async function finalizeTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
@@ -474,8 +477,8 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
   assert.match(promptHook,
     /provider === 'codex' && acknowledgedTurnStillCurrent[\s\S]*!codexFinalAlreadyClaimed\(session, body\.turn_id\)[\s\S]*beginCodexTurn\(session, activation\.startedAt, body\.turn_id \|\| null\)/)
   assert.match(promptHook,
-    /providerPromptAcknowledgesTask\(session,[\s\S]*currentGeneration: task \? teamTaskProviderWorkGeneration\(task\) : null/,
-  'provider prompt acknowledgements must match the exact current generation')
+    /providerPromptAcknowledgesTask\(session,[\s\S]*currentGeneration: pendingPromptTeamTurn\?\.providerWorkGeneration \?\?[\s\S]*teamTaskProviderWorkGeneration\(task\)/,
+  'provider prompt acknowledgements must match the exact accepted or pending generation')
   assert.match(promptHook,
     /if \(p && !acknowledgedTurn && !\(teamTaskId && session\.teamActiveTaskId === teamTaskId\)\) reserveTeamInput/,
   'a delayed authenticated team acknowledgement must not recreate an input reservation')

@@ -78,6 +78,9 @@ Notable changes to this project. Format based on
 - Native Codex prompt identities now give each newer turn its own lifecycle
   timestamp without losing the same turn's earlier transport boundary, and an
   accepted team-task retry remains queryable after its worker is removed.
+- Staging a coordinator follow-up no longer captures the preceding turn's final,
+  exact pending-generation prompt hooks can heal a transport race, and malformed
+  empty checkpoint gate lists cannot impersonate the explicit `none` sentinel.
 - Exact provider acknowledgements now require the current work generation,
   overtaking finals remain durably deferred until their staged input settles,
   and late Codex prompt hooks cannot recreate a released input reservation.

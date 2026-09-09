@@ -2206,7 +2206,12 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
     const acknowledgesTask = providerPromptAcknowledgesTask(session, {
       taskId: task?.id,
-      currentGeneration: task ? teamTaskProviderWorkGeneration(task) : null,
+      // Provider delivery advances the task journal only after the transport
+      // callback settles. An earlier exact prompt hook is itself the durable
+      // acceptance proof, so compare it with its staged generation rather than
+      // the still-preceding task projection.
+      currentGeneration: pendingPromptTeamTurn?.providerWorkGeneration ??
+        (task ? teamTaskProviderWorkGeneration(task) : null),
       promptTurn: promptTeamTurn,
       submittedTurn: submittedTeamTaskTurn,
       injected,

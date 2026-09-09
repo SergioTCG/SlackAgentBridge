@@ -128,6 +128,12 @@ export function deferPendingTeamProviderFinal(session, {
   const pending = normalizedTurn(session?.teamProviderTurnPending,
     session?.teamProviderTurnPending?.stagedAt)
   if (!session || !pending || !['claude', 'codex', 'pi'].includes(provider)) return null
+  // Staging records intent before the provider input surface accepts Enter. A
+  // final from the preceding accepted turn can therefore arrive after stagedAt
+  // while the new prompt is still only painted in the input box. Resolve an
+  // exact accepted/history turn first; only an otherwise-unowned final may be
+  // retained behind the pending generation for prompt-hook recovery.
+  if (providerTurnForCompletion(session, { providerTurnId, observedAt })) return null
   const observed = Number(observedAt)
   if (Number.isSafeInteger(observed) && observed > 0 && observed < pending.startedAt) return null
   const existing = session.teamProviderTurnDeferredFinal
