@@ -2455,6 +2455,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
         (task ? teamTaskProviderWorkGeneration(task) : null),
       promptTurn: promptTeamTurn,
       submittedTurn: submittedTeamTaskTurn,
+      prompt: p,
       injected,
       pending: Boolean(pendingPromptTeamTurn),
     })
@@ -3951,7 +3952,10 @@ async function injectText(session, text, options = {}) {
     : null
   const expectedTeamTurnStartedAt = Date.now()
   if (expectedTeamTurn) {
-    stageTeamProviderTurn(session, expectedTeamTurn, { now: expectedTeamTurnStartedAt })
+    stageTeamProviderTurn(session, expectedTeamTurn, {
+      now: expectedTeamTurnStartedAt,
+      prompt: `${String(text || '')}${String(options.privateContext || '')}`,
+    })
     saveStateNow(state)
   }
   const acceptExpectedTeamTurn = () => {
@@ -4958,17 +4962,22 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       inheritProviderTurnId: !message.resumesTask,
     }
     const providerTurnStartedAt = Date.now()
-    stageTeamProviderTurn(target, providerTurn, { now: providerTurnStartedAt })
-    if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_submitting')
-    saveStateNow(state)
-    providerAttempted = true
-    const submittedTurn = await injectCoordinatorTaskMessageOnce(task, target, expected, [
+    const providerPrompt = [
       `<sab-team-message task="${task.id}" generation="${providerTurn.providerWorkGeneration}" source="coordinator">`,
       '[Slack Agent Bridge coordinator message for your active delegated task]',
       `Provider work generation: ${providerTurn.providerWorkGeneration}. If this completes the task, use \`sab team complete --task ${task.id} --generation ${providerTurn.providerWorkGeneration} --stdin\` before your final answer.`,
       message.text,
       '</sab-team-message>',
-    ].join('\n'), providerTurn, providerTurnStartedAt)
+    ].join('\n')
+    stageTeamProviderTurn(target, providerTurn, {
+      now: providerTurnStartedAt,
+      prompt: providerPrompt,
+    })
+    if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_submitting')
+    saveStateNow(state)
+    providerAttempted = true
+    const submittedTurn = await injectCoordinatorTaskMessageOnce(task, target, expected,
+      providerPrompt, providerTurn, providerTurnStartedAt)
     recordTeamWorkerProof(target, task)
     completeCoordinatorTaskMessageDelivery(state, task.id, message.id)
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_delivered')

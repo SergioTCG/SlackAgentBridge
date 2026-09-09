@@ -100,6 +100,10 @@ Notable changes to this project. Format based on
   pre-submit Claude final from being attributed to a follow-up whose transport
   promoted later; recovered checkpoint retries are re-journaled before Slack
   audit or reply delivery.
+- Team prompt acknowledgements now require the durable digest of the exact
+  bridge-delivered instruction, preventing pasted marker text from claiming a
+  task generation; timestamp-less finals fail closed when multiple retained
+  provider generations make attribution ambiguous.
 - Completion declarations retain the provider generation observed before
   caller authentication, deferred finals cannot cross task identities, and
   malformed checkpoints without an explicit gate array now fail closed.

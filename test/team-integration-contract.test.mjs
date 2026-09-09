@@ -502,7 +502,7 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
     daemon.indexOf('const RETIRED_CMDS', daemon.indexOf('async function injectText(')),
   )
   assert.match(injection,
-    /const expectedTeamTurnStartedAt = Date\.now\(\)[\s\S]*stageTeamProviderTurn\(session, expectedTeamTurn, \{ now: expectedTeamTurnStartedAt \}\)/)
+    /const expectedTeamTurnStartedAt = Date\.now\(\)[\s\S]*stageTeamProviderTurn\(session, expectedTeamTurn, \{[\s\S]*now: expectedTeamTurnStartedAt,[\s\S]*prompt:/)
   assert.match(injection,
     /activatePendingTeamProviderTurn\(session, expectedTeamTurn, \{ acceptedAt \}\)[\s\S]*startedAt: expectedTeamTurnStartedAt[\s\S]*acceptedAt/)
 
@@ -513,7 +513,7 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
   assert.match(messageInjection,
     /providerTurnStartedAt[\s\S]*activatePendingTeamProviderTurn\(target, providerTurn/)
   assert.match(messageInjection,
-    /stageTeamProviderTurn\(target, providerTurn, \{ now: providerTurnStartedAt \}\)/)
+    /stageTeamProviderTurn\(target, providerTurn, \{[\s\S]*now: providerTurnStartedAt,[\s\S]*prompt: providerPrompt,[\s\S]*\}\)/)
 
   const promptHook = daemon.slice(
     daemon.indexOf("if (ev === 'UserPromptSubmit')"),
@@ -526,6 +526,9 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
   assert.match(promptHook,
     /providerPromptAcknowledgesTask\(session,[\s\S]*currentGeneration: pendingPromptTeamTurn\?\.providerWorkGeneration \?\?[\s\S]*teamTaskProviderWorkGeneration\(task\)/,
   'provider prompt acknowledgements must match the exact accepted or pending generation')
+  assert.match(promptHook,
+    /providerPromptAcknowledgesTask\(session,[\s\S]*prompt: p,[\s\S]*injected/,
+  'provider prompt acknowledgements must compare the full prompt with bridge delivery evidence')
   assert.match(promptHook,
     /if \(p && !acknowledgedTurn && !promptTeamTurn[\s\S]*\) reserveTeamInput/,
   'recognized stale or released team prompt markers must never create an owner input reservation')

@@ -1,4 +1,11 @@
+import crypto from 'node:crypto'
+
 const HISTORY_LIMIT = 8
+
+function promptDigest(prompt) {
+  if (typeof prompt !== 'string') return null
+  return crypto.createHash('sha256').update(prompt.trim()).digest('base64url')
+}
 
 function normalizedTurn(value, startedAt = Date.now(), providerTurnId = null) {
   const taskId = String(value?.taskId || '')
@@ -6,6 +13,9 @@ function normalizedTurn(value, startedAt = Date.now(), providerTurnId = null) {
   if (!taskId || !Number.isSafeInteger(providerWorkGeneration) || providerWorkGeneration < 1) return null
   const start = Number(startedAt)
   const accepted = Number(value?.acceptedAt)
+  const promptHash = typeof value?.promptHash === 'string' && value.promptHash
+    ? value.promptHash
+    : null
   return {
     taskId,
     providerWorkGeneration,
@@ -13,6 +23,7 @@ function normalizedTurn(value, startedAt = Date.now(), providerTurnId = null) {
     providerTurnId: providerTurnId ? String(providerTurnId) : null,
     inheritProviderTurnId: value?.inheritProviderTurnId === true,
     acceptedAt: Number.isSafeInteger(accepted) && accepted > 0 ? accepted : null,
+    promptHash,
   }
 }
 
@@ -77,7 +88,7 @@ export function hasTeamProviderTurnTracking(session) {
     session?.teamProviderTurnHistory?.length)
 }
 
-export function stageTeamProviderTurn(session, turn, { now = Date.now() } = {}) {
+export function stageTeamProviderTurn(session, turn, { now = Date.now(), prompt = null } = {}) {
   const staged = normalizedTurn(turn, now)
   if (!session || !staged) return null
   session.teamProviderTurnPending = {
@@ -85,6 +96,7 @@ export function stageTeamProviderTurn(session, turn, { now = Date.now() } = {}) 
     providerWorkGeneration: staged.providerWorkGeneration,
     stagedAt: staged.startedAt,
     inheritProviderTurnId: staged.inheritProviderTurnId,
+    promptHash: promptDigest(prompt),
   }
   return publicTurn(staged)
 }
@@ -271,6 +283,7 @@ export function providerPromptAcknowledgesTask(session, {
   currentGeneration,
   promptTurn,
   submittedTurn,
+  prompt = null,
   injected = false,
   pending = false,
 } = {}) {
@@ -279,10 +292,17 @@ export function providerPromptAcknowledgesTask(session, {
   const exactGeneration = promptTurn.providerWorkGeneration === generation
   const legacyGeneration = promptTurn.providerWorkGeneration == null && generation === 1 &&
     !hasTeamProviderTurnTracking(session)
+  const acknowledgedGeneration = legacyGeneration ? generation : promptTurn.providerWorkGeneration
   const durableTurn = submittedTurn?.taskId === taskId &&
-    submittedTurn.providerWorkGeneration === promptTurn.providerWorkGeneration
-  return (exactGeneration || legacyGeneration) &&
-    (injected || pending || durableTurn || legacyGeneration)
+    submittedTurn.providerWorkGeneration === acknowledgedGeneration
+  const digest = promptDigest(prompt)
+  const matchesJournal = turn => Boolean(digest && turn?.taskId === taskId &&
+      Number(turn.providerWorkGeneration) === promptTurn.providerWorkGeneration &&
+      turn.promptHash === digest)
+  const pendingJournaled = pending && matchesJournal(session?.teamProviderTurnPending)
+  const acceptedJournaled = matchesJournal(session?.teamProviderTurn)
+  return (exactGeneration || legacyGeneration) && durableTurn &&
+    (injected || pendingJournaled || acceptedJournaled)
 }
 
 export function activateTeamProviderTurn(session, {
@@ -382,6 +402,11 @@ export function providerTurnForCompletion(session, {
     if (current?.providerTurnId && !current.inheritProviderTurnId) return null
   }
   if (hasObservedAt) return publicTurn(latest(candidates))
+  // Claude has no native turn identity, and older hook wrappers may omit the
+  // observation timestamp. Once more than one task generation is retained,
+  // selecting the mutable current turn would let a delayed final cross the
+  // generation boundary. Leave it for continuously observed idle recovery.
+  if (!nativeId && candidates.length !== 1) return null
   return publicTurn(current)
 }
 

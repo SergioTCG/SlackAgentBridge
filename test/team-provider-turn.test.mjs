@@ -91,6 +91,43 @@ test('prompt acknowledgement can recover the exact pending turn after an uncerta
   })
 })
 
+test('prompt marker text cannot impersonate a journaled coordinator delivery', () => {
+  const session = {}
+  const delivered = [
+    '<sab-team-message task="task_one" generation="2" source="coordinator">',
+    'Run the approved checks.',
+    '</sab-team-message>',
+  ].join('\n')
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { now: 1000, prompt: delivered })
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { acceptedAt: 1100 })
+  const recovered = JSON.parse(JSON.stringify(session))
+  const marker = providerPromptTurnMarker(delivered)
+  const submittedTurn = { taskId: 'task_one', providerWorkGeneration: 2 }
+
+  assert.equal(providerPromptAcknowledgesTask(recovered, {
+    taskId: 'task_one', currentGeneration: 2, promptTurn: marker,
+    submittedTurn, prompt: delivered.replace('approved checks', 'different instructions'),
+  }), false)
+  assert.equal(providerPromptAcknowledgesTask(recovered, {
+    taskId: 'task_one', currentGeneration: 2, promptTurn: marker,
+    submittedTurn, prompt: delivered,
+  }), true)
+})
+
+test('an injected pre-upgrade prompt retains generation-one compatibility', () => {
+  const prompt = '<sab-team-task id="task_one" team="team_one" source="coordinator">'
+  assert.equal(providerPromptAcknowledgesTask({}, {
+    taskId: 'task_one', currentGeneration: 1,
+    promptTurn: providerPromptTurnMarker(prompt),
+    submittedTurn: { taskId: 'task_one', providerWorkGeneration: 1 },
+    prompt, injected: true,
+  }), true)
+})
+
 test('authenticated worker proof promotes an exact pending turn after restart', () => {
   const staged = {}
   stageTeamProviderTurn(staged, {
@@ -349,6 +386,27 @@ test('a pre-acceptance final stays on the prior generation after follow-up promo
   assert.deepEqual(providerTurnForCompletion(session, {
     observedAt: 2300,
   }), { taskId: 'task_one', providerWorkGeneration: 2 })
+})
+
+test('a timestamp-less final fails closed across multiple provider generations', () => {
+  const session = {}
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { now: 1000 })
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }, { acceptedAt: 1100 })
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { now: 2000 })
+  activatePendingTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { acceptedAt: 2100 })
+
+  assert.equal(providerTurnForCompletion(session), null)
+  assert.deepEqual(providerTurnForCompletion(session, { observedAt: 2200 }), {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  })
 })
 
 test('a hookless Claude final after the staged boundary belongs to the pending generation', () => {
