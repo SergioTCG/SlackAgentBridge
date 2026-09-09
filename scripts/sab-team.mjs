@@ -317,14 +317,17 @@ try {
     let task
     do {
       task = (await request(`/team/tasks/${encodeURIComponent(taskId)}`)).task
-      if (['completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)) break
+      // `awaiting_release` is actionable, not merely intermediate: only this
+      // coordinator turn can inspect the report and issue the explicit release.
+      // Blocking here would consume that authority until the wait timed out.
+      if (['awaiting_release', 'completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)) break
       await new Promise(resolve => setTimeout(resolve, 1000))
     } while (Date.now() < deadline)
-    if (!task || !['completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)) {
+    if (!task || !['awaiting_release', 'completed', 'completed_with_warning', 'failed', 'cancelled'].includes(task.status)) {
       throw Object.assign(new Error(`timed out waiting for ${taskId}; the task remains active`), { exitCode: 1 })
     }
     output(task)
-    if (!['completed', 'completed_with_warning'].includes(task.status)) process.exitCode = 1
+    if (!['awaiting_release', 'completed', 'completed_with_warning'].includes(task.status)) process.exitCode = 1
   } else usage(`unknown command: ${command}`)
 } catch (error) {
   process.stderr.write(`sab team: ${error?.message || error}\n`)

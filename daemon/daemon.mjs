@@ -616,6 +616,7 @@ async function bumpStatusForChannel(channel, afterTs = null) {
 // While a turn runs, mirror the terminal's spinner line (verb + elapsed + tokens)
 // into the edit-in-place status message. Reads rendered pane output, not internals.
 const pollers = new Map() // sid → { timer, last }
+const claudeFinalDeliveries = new Map() // exact lifecycle → one Stop/poller finalization
 const claudeTerminalFailures = new Map() // sid → { key, at }; bounded duplicate suppression
 function rememberClaudeTerminalFailure(sid, failure) {
   claudeTerminalFailures.set(sid, failure)
@@ -1115,53 +1116,67 @@ function teamTaskTurnOwnsCurrentLifecycle(session, expected) {
 // Idempotent: readNewAssistantText advances the read offset, so a second caller
 // (whichever of Stop / poller runs later) reads nothing and posts nothing.
 async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = currentTeamTaskProviderTurn(session) } = {}) {
-  if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
-    log('ignored stale Claude final before lifecycle mutation', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
-    return false
+  const deliveryKey = teamTaskTurn
+    ? `${session.id}\u0000${teamTaskTurn.taskId}\u0000${teamTaskTurn.providerWorkGeneration}`
+    : `${session.id}\u0000${session.transcript || ''}\u0000${Number(session.offset) || 0}`
+  if (claudeFinalDeliveries.has(deliveryKey)) return claudeFinalDeliveries.get(deliveryKey)
+  const finalization = (async () => {
+    if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
+      log('ignored stale Claude final before lifecycle mutation', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
+      return false
+    }
+    // Claim this exact lifecycle before transcript settling. Otherwise the Stop
+    // hook and missing-Stop poller can both consume/report one native final.
+    stopPoller(session)
+    if (session.transcript) await waitTranscriptSettle(session.transcript)
+    // Transcript settling yields. A coordinator follow-up may have advanced the
+    // task generation meanwhile; reject that older final before consuming any
+    // of the newer turn's transcript bytes or clearing its status.
+    if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
+      log('ignored stale Claude final after transcript settle', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
+      return false
+    }
+    clearStatusDeferred(session)
+    void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
+    const rawText = readNewAssistantText(session)
+    const delivery = prepareClaudeTerminalDelivery(
+      rawText || terminalFailure?.text || '',
+      claudeTerminalFailures.get(session.id),
+    )
+    if (delivery.failure) rememberClaudeTerminalFailure(session.id, delivery.failure)
+    else if (delivery.text) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
+    if (delivery.text && !delivery.suppress) await postProviderOutput(session.channel, delivery.text)
+    else if (delivery.suppress) log('suppressed duplicate Claude terminal failure', session.id.slice(0, 8), delivery.failure?.key)
+    const taskFailure = terminalFailure
+      ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
+      : delivery.failure?.text || null
+    const finalizedTask = await finishTeamTaskForSession(session, delivery.text, taskFailure, {
+      expectedTeamTaskTurn: teamTaskTurn,
+    })
+    // Slack delivery above can yield while a coordinator follow-up enters the
+    // same Claude process. Never clear that newer input reservation.
+    if (!teamTaskTurn || (finalizedTask && (!session.teamActiveTaskId ||
+        teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)))) {
+      clearTeamInputReservation(session)
+    }
+    saveState(state)
+    // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
+    // poller is watching — check once, shortly after, and hand off to a poller.
+    setTimeout(async () => {
+      try {
+        if (!(session.pid && pidAlive(session.pid) && session.tmux && (await tmuxAlive(session.tmux)))) return
+        const form = questionFormFromPane(await tmuxCapture(session.tmux))
+        if (form) { await relayQuestionForm(session, form); startPoller(session) }
+      } catch (e) { log('post-stop form check failed', String(e?.message || e)) }
+    }, 5000)
+    return true
+  })()
+  claudeFinalDeliveries.set(deliveryKey, finalization)
+  try {
+    return await finalization
+  } finally {
+    if (claudeFinalDeliveries.get(deliveryKey) === finalization) claudeFinalDeliveries.delete(deliveryKey)
   }
-  if (session.transcript) await waitTranscriptSettle(session.transcript)
-  // Transcript settling yields. A coordinator follow-up may have advanced the
-  // task generation meanwhile; reject that older final before stopping the new
-  // poller or consuming any of its transcript bytes.
-  if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
-    log('ignored stale Claude final after transcript settle', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
-    return false
-  }
-  stopPoller(session)
-  clearStatusDeferred(session)
-  void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
-  const rawText = readNewAssistantText(session)
-  const delivery = prepareClaudeTerminalDelivery(
-    rawText || terminalFailure?.text || '',
-    claudeTerminalFailures.get(session.id),
-  )
-  if (delivery.failure) rememberClaudeTerminalFailure(session.id, delivery.failure)
-  else if (delivery.text) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
-  if (delivery.text && !delivery.suppress) await postProviderOutput(session.channel, delivery.text)
-  else if (delivery.suppress) log('suppressed duplicate Claude terminal failure', session.id.slice(0, 8), delivery.failure?.key)
-  const taskFailure = terminalFailure
-    ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
-    : delivery.failure?.text || null
-  const finalizedTask = await finishTeamTaskForSession(session, delivery.text, taskFailure, {
-    expectedTeamTaskTurn: teamTaskTurn,
-  })
-  // Slack delivery above can yield while a coordinator follow-up enters the
-  // same Claude process. Never clear that newer input reservation.
-  if (!teamTaskTurn || (finalizedTask && (!session.teamActiveTaskId ||
-      teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)))) {
-    clearTeamInputReservation(session)
-  }
-  saveState(state)
-  // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
-  // poller is watching — check once, shortly after, and hand off to a poller.
-  setTimeout(async () => {
-    try {
-      if (!(session.pid && pidAlive(session.pid) && session.tmux && (await tmuxAlive(session.tmux)))) return
-      const form = questionFormFromPane(await tmuxCapture(session.tmux))
-      if (form) { await relayQuestionForm(session, form); startPoller(session) }
-    } catch (e) { log('post-stop form check failed', String(e?.message || e)) }
-  }, 5000)
-  return true
 }
 
 // Codex exposes stable final text on Stop and on the supported App Server's
@@ -1231,17 +1246,36 @@ async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt,
 }
 
 async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProviderTurn(session)) {
-  stopPoller(session)
-  clearStatusDeferred(session)
   const turnId = body.turn_id || null
   if (turnId && session.lastMirroredTurn === turnId) return
+  const expectedStartedAt = session.piTurnStartedAt || null
+  const observedAt = Number(body.observed_at) || null
+  const stillCurrent = ({ afterStop = false } = {}) =>
+    teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn) &&
+    (!expectedStartedAt || !observedAt || observedAt >= expectedStartedAt) &&
+    (afterStop ? !session.piTurnStartedAt : session.piTurnStartedAt === expectedStartedAt)
+  if (!stillCurrent()) {
+    log('ignored stale Pi final before lifecycle mutation', session.id.slice(0, 8), turnId)
+    return false
+  }
+  stopPoller(session)
+  clearStatusDeferred(session)
   const text = String(body.last_assistant_message || '').trim()
   if (text && session.channel) await postProviderOutput(session.channel, text)
-  await finishTeamTaskForSession(session, text, null, { expectedTeamTaskTurn: teamTaskTurn })
+  // Slack delivery yields. A follow-up may have started a newer Pi turn; its
+  // poller, timestamps, usage, and task generation must survive the older final.
+  if (!stillCurrent({ afterStop: true })) {
+    log('ignored stale Pi final after Slack delivery', session.id.slice(0, 8), turnId)
+    return false
+  }
+  const finalizedTask = await finishTeamTaskForSession(session, text, null, { expectedTeamTaskTurn: teamTaskTurn })
+  if (session.piTurnStartedAt || (teamTaskTurn && !finalizedTask &&
+      !teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn))) return false
   clearTeamInputReservation(session)
   recordPiUsage(session, body)
   if (turnId) session.lastMirroredTurn = turnId
   saveState(state)
+  return true
 }
 
 function recordPiUsage(session, body) {
@@ -4724,8 +4758,17 @@ async function reconcileTeamTasks() {
           saveStateNow(state)
           continue
         }
-        await ensureCoordinatorTaskMessageDelivery(task, message).catch(error =>
-          log('team coordinator message reconciliation failed', task.id, message.id, String(error?.message || error)))
+        if (task.status === 'awaiting_release') {
+          const target = task.targetSessionId ? state.sessions?.[task.targetSessionId] : null
+          if (!target?.pid || !pidAlive(target.pid) || !target.tmux || !(await tmuxAlive(target.tmux))) continue
+        }
+        await ensureCoordinatorTaskMessageDelivery(task, message).catch(error => {
+          // Dormancy and ordered predecessors are expected durable deferrals,
+          // not three-second reconciliation failures. Liveness or predecessor
+          // settlement will make a later sweep eligible without log churn.
+          if (['worker_dormant', 'task_message_predecessor_pending'].includes(error?.code)) return
+          log('team coordinator message reconciliation failed', task.id, message.id, String(error?.message || error))
+        })
       }
       if (terminal && task.completionDeliveryStatus !== 'delivered') {
         await ensureTeamCompletionDelivery(task).catch(error =>

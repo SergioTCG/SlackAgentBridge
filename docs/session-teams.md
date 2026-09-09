@@ -162,9 +162,10 @@ external CI or deployment truth. `complete` is rejected while any gate remains.
 After the worker clears all gates, it calls `complete` with a summary and then
 finishes its provider turn. The resulting report is delivered to the
 coordinator, but the exact worker session remains reserved until `release`.
-`sab team wait` therefore continues waiting while a task is
-`awaiting_release`; the coordinator should inspect `releaseReady`, reports, and
-pending gates in the inbox.
+`sab team wait` returns as soon as a task becomes `awaiting_release`, because
+that state requires action from the current coordinator turn. The coordinator
+should inspect `releaseReady`, reports, and pending gates, then either send a
+follow-up or release the task. It also returns for terminal states as before.
 
 The coordinator may use `message` for questions or amendments while the task is
 reserved. Any such follow-up invalidates the previous completion declaration;

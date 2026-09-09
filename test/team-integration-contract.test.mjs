@@ -273,16 +273,18 @@ test('provider turn reporting preserves task and process ownership until explici
     daemon.indexOf("if (ev === 'UserPromptSubmit')"),
     daemon.indexOf("if (ev === 'PreToolUse')"),
   )
-  assert.ok(promptHook.indexOf('const submittedTeamTaskTurn = currentTeamTaskProviderTurn(session, body)') <
-    promptHook.indexOf('await updateTeamTaskAudit(task)'),
-  'prompt generation must be captured before an audit await can admit a follow-up')
+  const submittedTurnSnapshot = promptHook.indexOf('const submittedTeamTaskTurn =')
+  const auditAwait = promptHook.indexOf('await updateTeamTaskAudit(task)')
+  assert.ok(submittedTurnSnapshot >= 0 && auditAwait > submittedTurnSnapshot,
+    'prompt generation must be captured before an audit await can admit a follow-up')
   assert.match(promptHook, /acknowledgedTurn[\s\S]*submittedTeamTaskTurn/)
   assert.match(promptHook, /providerPromptTurnMarker\(p\)[\s\S]*pendingTeamProviderTurn/)
   assert.match(claudeHook, /UserPromptSubmit[\s\S]*observed_at[\s\S]*--argjson observed_at/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
   const claudeFinal = /async function finalizeTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(claudeFinal, /claudeFinalDeliveries\.has\(deliveryKey\)[\s\S]*stopPoller\(session\)[\s\S]*waitTranscriptSettle/)
   assert.match(claudeFinal,
-    /teamTaskTurnOwnsCurrentLifecycle[\s\S]*waitTranscriptSettle[\s\S]*teamTaskTurnOwnsCurrentLifecycle[\s\S]*stopPoller/)
+    /teamTaskTurnOwnsCurrentLifecycle[\s\S]*stopPoller[\s\S]*waitTranscriptSettle[\s\S]*teamTaskTurnOwnsCurrentLifecycle[\s\S]*readNewAssistantText/)
   assert.ok(claudeFinal.indexOf('teamTaskTurnOwnsCurrentLifecycle') < claudeFinal.indexOf('readNewAssistantText'),
     'a stale Claude final must be rejected before transcript consumption')
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
@@ -295,6 +297,30 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.doesNotMatch(continuation, /to: previous\.targetAlias/)
   assert.ok(continuation.indexOf('teamTaskForRequest') < continuation.indexOf('teamTask(state, request.taskId)'),
     'an accepted continuation retry must resolve before its bounded parent history is loaded')
+})
+
+test('coordinator wait returns actionable release state and dormant message retries stay quiet', () => {
+  assert.match(cli, /\['awaiting_release', 'completed', 'completed_with_warning', 'failed', 'cancelled'\]\.includes\(task\.status\)/)
+  const reconciliation = daemon.slice(
+    daemon.indexOf('async function reconcileTeamTasks('),
+    daemon.indexOf('function startTeamReconciler('),
+  )
+  assert.match(reconciliation,
+    /task\.status === 'awaiting_release'[\s\S]*pidAlive\(target\.pid\)[\s\S]*tmuxAlive\(target\.tmux\)[\s\S]*continue/)
+  assert.match(reconciliation,
+    /\['worker_dormant', 'task_message_predecessor_pending'\]\.includes\(error\?\.code\)[\s\S]*return/)
+})
+
+test('stale Pi finals cannot clear a newer provider turn', () => {
+  const piFinal = /async function finalizePiTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  const firstGuard = piFinal.indexOf('if (!stillCurrent())')
+  const stop = piFinal.indexOf('stopPoller(session)')
+  const post = piFinal.indexOf('await postProviderOutput')
+  const secondGuard = piFinal.indexOf("if (!stillCurrent({ afterStop: true }))")
+  const finish = piFinal.indexOf('await finishTeamTaskForSession')
+  const usage = piFinal.indexOf('recordPiUsage(session, body)')
+  assert.ok(firstGuard >= 0 && stop > firstGuard && post > stop && secondGuard > post &&
+    finish > secondGuard && usage > finish)
 })
 
 test('coordinator follow-ups serialize and coordinator release does not mint worker authority', () => {

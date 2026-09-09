@@ -6,6 +6,14 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Coordinator waits now return the actionable `awaiting_release` state instead
+  of deadlocking the only turn authorized to release the worker.
+- Exact-generation Claude finalization is claimed before transcript settling,
+  stale Pi finals are fenced before and after Slack delivery, and dormant
+  coordinator messages no longer create three-second reconciliation log storms.
+
 ### Added
 
 - New session-team tasks now use explicit two-phase completion: bounded worker

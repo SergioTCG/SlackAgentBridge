@@ -35,6 +35,9 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
     if (req.url.startsWith('/team/tasks/task_warning')) return res.end(JSON.stringify({
       ok: true, task: { id: 'task_warning', status: 'completed_with_warning', result: '', warning: 'Hook omitted.' },
     }))
+    if (req.url.startsWith('/team/tasks/task_release')) return res.end(JSON.stringify({
+      ok: true, task: { id: 'task_release', status: 'awaiting_release', result: 'Ready.', releaseReady: true },
+    }))
     if (req.url.startsWith('/team/tasks/')) return res.end(JSON.stringify({ ok: true, task: { id: 'task_one', status: 'completed', result: 'Done.' } }))
     if (req.url.startsWith('/team/mutations/')) return res.end(JSON.stringify({
       ok: true, mutation: { requestId: decodeURIComponent(req.url.split('/').at(-1).split('?')[0]), status: 'accepted' },
@@ -124,6 +127,10 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   const warned = await run(['wait', '--task', 'task_warning', '--timeout', '2', '--json'], env)
   assert.equal(warned.status, 0, warned.stderr)
   assert.equal(JSON.parse(warned.stdout).status, 'completed_with_warning')
+  const releasable = await run(['wait', '--task', 'task_release', '--timeout', '2', '--json'], env)
+  assert.equal(releasable.status, 0, releasable.stderr)
+  assert.equal(JSON.parse(releasable.stdout).status, 'awaiting_release')
+  assert.equal(JSON.parse(releasable.stdout).releaseReady, true)
 
   const sendRequest = requests.find(request => request.url.startsWith('/team/send'))
   assert.equal(sendRequest.headers['x-ccs-provider'], 'codex')
