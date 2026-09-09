@@ -330,6 +330,36 @@ test('provider turn reporting preserves task and process ownership until explici
     'an accepted continuation retry must resolve before its bounded parent history is loaded')
 })
 
+test('App Server finals defer behind unresolved Codex team input', () => {
+  const codexFinal = /async function finalizeCodexTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(codexFinal,
+    /if \(!teamTaskTurn && deferFinalAcrossPendingTeamSubmission\(session, 'codex', body\)\) return true[\s\S]*currentTeamTaskProviderTurn\(session, body\)/,
+    'App Server finals must use the same staged-input deferral as Codex Stop hooks')
+})
+
+test('delayed older-generation team prompt hooks cannot fail newer work', () => {
+  const promptHook = daemon.slice(
+    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
+    daemon.indexOf("if (ev === 'PreToolUse')"),
+  )
+  const stalePromptGuard = promptHook.indexOf('const staleSameTaskPrompt =')
+  const stalePromptBranch = promptHook.indexOf('else if (staleSameTaskPrompt)')
+  const localPromptFailure = promptHook.indexOf("await failTeamTaskForSession(session, 'A local terminal prompt replaced")
+  assert.ok(stalePromptGuard >= 0 && stalePromptBranch > stalePromptGuard &&
+    localPromptFailure > stalePromptBranch,
+  'a delayed older-generation prompt for the active task must be ignored before local-input failure')
+})
+
+test('accepted continuation retries re-persist recovered state', () => {
+  const continuation = /async continue\(caller, request\) \{[\s\S]*?\n  },\n  async reply/.exec(daemon)?.[0] || ''
+  const continuationRetry = continuation.indexOf('if (prior)')
+  const continuationRetryPersist = continuation.indexOf('saveStateNow(state)', continuationRetry)
+  const continuationRetryReturn = continuation.indexOf('return {', continuationRetry)
+  assert.ok(continuationRetry >= 0 && continuationRetryPersist > continuationRetry &&
+    continuationRetryReturn > continuationRetryPersist,
+  'an accepted continuation retry must re-persist recovered in-memory state before success')
+})
+
 test('coordinator wait returns actionable release state and dormant message retries stay quiet', () => {
   assert.match(cli, /\['awaiting_release', 'completed', 'completed_with_warning', 'failed', 'cancelled'\]\.includes\(task\.status\)/)
   const reconciliation = daemon.slice(

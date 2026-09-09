@@ -1283,6 +1283,11 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
 // Codex exposes stable final text on Stop and on the supported App Server's
 // successful turn completion. Both enter here; JSONL and terminal output never do.
 async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
+  // The App Server fallback enters here directly rather than through the Stop
+  // hook. A final can therefore overtake the async transport that is promoting
+  // a staged team generation. Retain it behind that exact durable intent and
+  // let the normal post-promotion flush own finalization.
+  if (!teamTaskTurn && deferFinalAcrossPendingTeamSubmission(session, 'codex', body)) return true
   teamTaskTurn ||= currentTeamTaskProviderTurn(session, body)
   const turnId = body.turn_id || null
   const deliveryKey = turnId ? `${session.id}\u0000${turnId}` : null
@@ -2222,6 +2227,9 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       submittedTeamTaskTurn?.taskId === task.id
       ? submittedTeamTaskTurn
       : null
+    const staleSameTaskPrompt = Boolean(task && promptTeamTurn?.taskId === task.id &&
+      Number.isSafeInteger(promptTeamTurn.providerWorkGeneration) &&
+      promptTeamTurn.providerWorkGeneration < teamTaskProviderWorkGeneration(task))
     let acknowledgedCoordinatorMessage = null
     if (acknowledgedTurn) {
       // An uncertain tmux delivery may leave only the pending generation for
@@ -2278,6 +2286,13 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
         await updateTeamTaskAudit(task)
       }
       catch (error) { log('team task prompt acknowledgement rejected', teamTaskId, String(error?.message || error)) }
+    } else if (staleSameTaskPrompt) {
+      // Provider hooks may be delayed beyond the in-memory injected-text cache
+      // or a daemon restart. An older exact generation for this same task is
+      // system input, not a local owner prompt and not authority for the newer
+      // work. Ignore it without changing either lifecycle.
+      log('ignored stale team prompt acknowledgement', teamTaskId,
+        promptTeamTurn.providerWorkGeneration, 'current', teamTaskProviderWorkGeneration(task))
     } else if (teamTaskId && session.teamActiveTaskId && teamTaskId !== session.teamActiveTaskId) {
       await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
     } else if (session.teamActiveTaskId && p && !automationEcho && !injected) {
@@ -5485,6 +5500,10 @@ const teamService = {
         files: [],
         parentTaskId: request.taskId,
       })
+      // The original create may have mutated memory and then failed its atomic
+      // write. An idempotent retry must make that exact accepted mutation
+      // durable again before acknowledging it to the caller.
+      saveStateNow(state)
       return {
         task: publicTeamTask(prior, session.channel), created: false,
         mutation: acceptedTeamMutation(session, prior, request.requestId),
