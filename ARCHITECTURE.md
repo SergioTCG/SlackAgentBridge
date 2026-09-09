@@ -87,8 +87,8 @@ them.
   `daemon/team-auth.mjs` is the exact caller-identity gate;
   `daemon/team-files.mjs` owns workspace-contained private file staging; and
   `daemon/team-http.mjs` plus `scripts/sab-team.mjs` expose the loopback-only,
-  JSON-safe agent mailbox. Slack membership administration and provider-final
-  correlation remain in the sole daemon.
+  JSON-safe agent mailbox. Slack membership administration, provider-turn
+  reporting, and explicit task release remain in the sole daemon.
 - `daemon/nodes.mjs` defines compatibility-safe execution-node identity and
   exact channel/session/node binding. `daemon/execution-nodes.mjs` is the
   execution boundary; the first adapter wraps existing local spawn and terminal
@@ -312,6 +312,34 @@ may cancel/replace its exact queued tasks and send an audited message to the
 exact authoritative session owning an active task; every operation is bounded,
 idempotent, and journaled before Slack or provider effects.
 
+Tasks created by the current bridge use a two-phase completion protocol. The
+end of one provider turn is only a durable report and moves the task to
+`awaiting_release`; it does not clear the worker reservation. The worker
+maintains an explicit bounded pending-gate set, must clear it, and must declare
+completion before the coordinator can release the task. Coordinator follow-up
+invalidates the old declaration. Accepted follow-ups fence completion and
+release until exact provider delivery. Before provider input, SAB journals the
+intended generation; accepted input promotes it to a bounded durable native-turn
+fingerprint. Provider finals resolve that fingerprint by native turn identity or
+event observation time rather than sampling mutable task state, so a delayed
+earlier final cannot be mistaken for the follow-up result. An active provider
+poller's fallback fingerprint advances at the same acceptance boundary, and a
+delayed prompt acknowledgement may enter bounded history but cannot replace a
+newer generation. Each asynchronous poller observation retains the immutable
+generation with which it began and is invalidated when accepted follow-up input
+advances that generation. Initial and follow-up envelopes both bind their exact
+generation; an inherited native turn identity remains provisional until a hook
+confirms it, and a recovered prompt acknowledgement is persisted before any
+Slack audit await. Codex checks generation ownership before stopping a poller or
+clearing live turn state. A discarded stale Claude final advances its transcript
+offset only to the next generation marker whether it became stale before or
+during finalization, while an authenticated completion declaration supplies the
+same live worker proof as a reply. Once provider input succeeds, failure to persist that
+activation is an uncertain delivery: SAB retains the task reservation and
+never attempts a second transport. Pre-upgrade tasks without an explicit
+completion policy retain provider-final semantics so an upgrade cannot
+reinterpret an already-running turn.
+
 Teams may opt into `auto-until-blocked` continuation. Every authenticated
 worker reply—including ordinary progress and idempotent retries that heal a
 dispatch—or task result is persisted and delivered before creating one deduplicated
@@ -365,12 +393,16 @@ task or mutating a replacement session.
 A delegated Codex task uses a stricter variant of the same live proof. If the
 exact continuously observed process returns to idle twice after the grace
 period, the injected turn is over even when acknowledgement and completion
-hooks are absent. SAB records `completed_with_warning`, never fabricates a
-stable final, and releases the worker without replay. An idle task discovered
-during boot has no continuous delivery proof and therefore fails closed instead;
-a genuinely live turn is re-adopted and may continue. This distinction preserves
-historical no-replay guarantees while allowing fresh queued work to reach an
-already idle re-adopted session without manual activation.
+hooks are absent. SAB records a warning-bearing report, never fabricates a
+stable final, and keeps the task and worker reserved for coordinator follow-up
+or explicit release. An idle legacy task discovered during boot has no
+continuous delivery proof and therefore fails closed instead. A persisted
+`awaiting_release` report is already durable proof and is re-adopted without
+replaying provider input, even while its provider is dormant. An owner may wake
+that exact reserved session without submitting the wake message as task input.
+Coordinator follow-ups are journaled and mirrored to both channels before a
+dormant provider defers their exact-once injection; successful injection creates
+fresh in-memory turn proof for restart reconciliation.
 
 Pi restart adoption never treats its persisted turn-start timestamp as current
 liveness. SAB restores Pi polling and delegated-task proof only after a new
@@ -404,8 +436,25 @@ Task delivery is journal-first:
    for that task. The latter is durable acceptance proof when a provider omits
    its prompt hook; it is not final-result proof. Claude's completed transcript
    path, Codex's Stop hook or matching successful App Server turn, or Pi's
-   extension final event may complete only the same task/session binding.
-6. Persist `completed`, `completed_with_warning`, failure, or cancellation and a
+   extension final event may report only the same task/session binding. A
+   provider final changes a new task to `awaiting_release`, posts its report,
+   and leaves `session.teamActiveTaskId` intact. Coordinator follow-ups are
+   serialized in durable acceptance order; a coordinator release is persisted
+   without being reclassified as an authenticated worker continuation event.
+6. A worker checkpoint atomically replaces the complete bounded pending-gate
+   set. A completion declaration is rejected while any gate remains. Once the
+   worker declares readiness with the work generation from its current
+   authenticated prompt and a later exact provider-turn report exists, an
+   authorized coordinator may release the task. A coordinator message invalidates stale
+   readiness and fences release from journal acceptance through exact provider
+   delivery. Release requires a readiness declaration and a subsequent report
+   from the latest delivered work generation. "Subsequent" is proved by the
+   provider-boundary observation timestamp, not by when delayed hook or Slack
+   processing happened to append the report journal. Exact provider-turn keys coalesce
+   duplicate lifecycle delivery without discarding later turns in that same
+   generation; a terminal task can receive work only as a new
+   linked task.
+7. Persist `completed`, `completed_with_warning`, failure, or cancellation and a
    delivery claim before updating both audit cards and
    idempotently posting the stable result in the coordinator channel. A missing
    or uneditable audit card is reported with the result but cannot suppress it;
@@ -420,7 +469,10 @@ and permissions stay on the worker's normal Slack surface. A coordinator uses
 in both channels; SAB refuses delivery while a question or permission surface
 is open, and an uncertain provider attempt is never replayed. A disconnected
 Pi stream is a known pre-write rejection: the journal remains pending and the
-normal reconciler may deliver it once after the exact stream reconnects. Filtered,
+normal reconciler may deliver it once after the exact stream reconnects. Every
+mutation response contains its journaled request receipt; after a client
+timeout, `sab team mutation` queries that identity without replaying the
+operation. Filtered,
 cursor-paginated inbox reads expose only the caller's task envelopes and retain
 the original instruction for that bounded journal lifetime. Interrupt, kill,
 session death, team removal/closure, and expiry produce visible task failure or
@@ -618,8 +670,9 @@ Automation endpoints are:
 Team endpoints are:
 
 - `GET /team/context`, `/team/peers`, and `/team/inbox`
-- `GET /team/tasks/:taskId`
-- `POST /team/send`, `/team/reply`, `/team/message`, `/team/replace`,
+- `GET /team/tasks/:taskId` and `/team/mutations/:requestId`
+- `POST /team/send`, `/team/reply`, `/team/checkpoint`, `/team/complete`,
+  `/team/release`, `/team/continue`, `/team/message`, `/team/replace`,
   `/team/cancel`, and `/team/mode`
 
 Every endpoint rejects browser origins and non-loopback Host values. Team

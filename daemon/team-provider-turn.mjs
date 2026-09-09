@@ -1,0 +1,430 @@
+import crypto from 'node:crypto'
+
+const HISTORY_LIMIT = 8
+
+function promptDigest(prompt) {
+  if (typeof prompt !== 'string') return null
+  return crypto.createHash('sha256').update(prompt.trim()).digest('base64url')
+}
+
+function normalizedTurn(value, startedAt = Date.now(), providerTurnId = null) {
+  const taskId = String(value?.taskId || '')
+  const providerWorkGeneration = Number(value?.providerWorkGeneration)
+  if (!taskId || !Number.isSafeInteger(providerWorkGeneration) || providerWorkGeneration < 1) return null
+  const start = Number(startedAt)
+  const accepted = Number(value?.acceptedAt)
+  const promptHash = typeof value?.promptHash === 'string' && value.promptHash
+    ? value.promptHash
+    : null
+  return {
+    taskId,
+    providerWorkGeneration,
+    startedAt: Number.isSafeInteger(start) && start > 0 ? start : Date.now(),
+    providerTurnId: providerTurnId ? String(providerTurnId) : null,
+    inheritProviderTurnId: value?.inheritProviderTurnId === true,
+    acceptedAt: Number.isSafeInteger(accepted) && accepted > 0 ? accepted : null,
+    promptHash,
+  }
+}
+
+function publicTurn(value) {
+  return value ? {
+    taskId: value.taskId,
+    providerWorkGeneration: value.providerWorkGeneration,
+  } : null
+}
+
+// A tmux poller observation spans asynchronous pane, process, and Slack checks.
+// Keep the task generation it began with immutable, and invalidate it whenever
+// accepted coordinator input advances the poller's generation. An old idle
+// pane must never be re-labelled as proof for work accepted while the tick was
+// awaiting I/O.
+export function beginTeamProviderPollerObservation(poller) {
+  if (!poller) return null
+  const turn = publicTurn(poller.teamTaskTurn)
+  return Object.freeze({
+    revision: Number(poller.teamTaskRevision) || 0,
+    teamTaskTurn: turn ? Object.freeze(turn) : null,
+  })
+}
+
+export function refreshTeamProviderPollerTurn(poller, turn) {
+  const snapshot = publicTurn(turn)
+  if (!poller || !snapshot) return null
+  poller.teamTaskTurn = Object.freeze(snapshot)
+  poller.teamTaskRevision = (Number(poller.teamTaskRevision) || 0) + 1
+  return poller.teamTaskTurn
+}
+
+export function teamProviderPollerObservationCurrent(poller, observation) {
+  return Boolean(poller && observation && !poller.stopped &&
+    (Number(poller.teamTaskRevision) || 0) === observation.revision)
+}
+
+function sameLogicalTurn(left, right) {
+  return left?.taskId === right?.taskId &&
+    left?.providerWorkGeneration === right?.providerWorkGeneration &&
+    (!left.providerTurnId || !right.providerTurnId || left.providerTurnId === right.providerTurnId)
+}
+
+function rememberPrevious(session, value) {
+  if (!value) return
+  const history = Array.isArray(session.teamProviderTurnHistory)
+    ? session.teamProviderTurnHistory.filter(item => item?.taskId && Number(item?.providerWorkGeneration) > 0)
+    : []
+  // Coordinator follow-ups can deliberately steer one native provider turn,
+  // so several work generations may share its native ID. Collapse only the
+  // same logical task generation; dropping an older generation would make a
+  // delayed final impossible to fence by its observation boundary.
+  const duplicate = history.findIndex(item => item.taskId === value.taskId &&
+    Number(item.providerWorkGeneration) === value.providerWorkGeneration)
+  if (duplicate >= 0) history.splice(duplicate, 1)
+  history.push(value)
+  session.teamProviderTurnHistory = history.slice(-HISTORY_LIMIT)
+}
+
+export function hasTeamProviderTurnTracking(session) {
+  return Boolean(session?.teamProviderTurn || session?.teamProviderTurnPending ||
+    session?.teamProviderTurnHistory?.length)
+}
+
+export function stageTeamProviderTurn(session, turn, { now = Date.now(), prompt = null } = {}) {
+  const staged = normalizedTurn(turn, now)
+  if (!session || !staged) return null
+  session.teamProviderTurnPending = {
+    taskId: staged.taskId,
+    providerWorkGeneration: staged.providerWorkGeneration,
+    stagedAt: staged.startedAt,
+    inheritProviderTurnId: staged.inheritProviderTurnId,
+    promptHash: promptDigest(prompt),
+  }
+  return publicTurn(staged)
+}
+
+export function discardPendingTeamProviderTurn(session, expected = null, { preserveDeferred = false } = {}) {
+  const pending = session?.teamProviderTurnPending
+  if (!pending) return false
+  if (expected && (pending.taskId !== expected.taskId ||
+      pending.providerWorkGeneration !== expected.providerWorkGeneration)) return false
+  if (!preserveDeferred) clearDeferredTeamProviderFinal(session, pending)
+  delete session.teamProviderTurnPending
+  return true
+}
+
+export function pendingTeamProviderTurn(session, expected = null) {
+  const pending = normalizedTurn(session?.teamProviderTurnPending,
+    session?.teamProviderTurnPending?.stagedAt)
+  if (!pending) return null
+  if (expected?.taskId && pending.taskId !== expected.taskId) return null
+  if (expected?.providerWorkGeneration != null &&
+      pending.providerWorkGeneration !== Number(expected.providerWorkGeneration)) return null
+  return publicTurn(pending)
+}
+
+function clonedJsonObject(value) {
+  if (!value || typeof value !== 'object') return null
+  try { return JSON.parse(JSON.stringify(value)) }
+  catch { return null }
+}
+
+// A Stop/final can overtake the callback that settles a multi-step provider
+// input write. Preserve that final behind the exact staged generation instead
+// of borrowing the preceding generation or dropping it. The daemon releases
+// this journal only after the submission is promoted or provably rejected.
+export function deferPendingTeamProviderFinal(session, {
+  provider,
+  providerTurnId = null,
+  observedAt = null,
+  lastAssistantMessage = '',
+  usage = null,
+  contextUsage = null,
+  pendingPromptObserved = false,
+} = {}) {
+  const pending = normalizedTurn(session?.teamProviderTurnPending,
+    session?.teamProviderTurnPending?.stagedAt)
+  if (!session || !pending || !['claude', 'codex', 'pi'].includes(provider)) return null
+  const observed = Number(observedAt)
+  const afterPendingBoundary = Number.isSafeInteger(observed) && observed > 0 &&
+    observed >= pending.startedAt
+  // Staging records intent before the provider input surface accepts Enter. A
+  // final from the preceding accepted turn can therefore arrive after stagedAt
+  // while the new prompt is still only painted in the input box. Resolve an
+  // exact accepted/history turn first; only an otherwise-unowned final may be
+  // retained behind the pending generation for prompt-hook recovery. Claude
+  // has no native turn id, however: its hook timestamp plus transcript evidence
+  // form the immutable boundary. A Stop emitted after and proven to contain the
+  // staged input must follow that generation; otherwise the preceding accepted
+  // turn would always win this lookup.
+  const identified = providerTurnForCompletion(session, { providerTurnId, observedAt })
+  const hooklessClaudePending = provider === 'claude' && !providerTurnId &&
+    afterPendingBoundary && pendingPromptObserved === true
+  if (identified && !hooklessClaudePending) return null
+  if (!afterPendingBoundary) return null
+  // State created before provider-turn generations existed can already be on a
+  // later task generation without any accepted-turn history. A native final in
+  // that upgrade window is ambiguous: its ID/timestamp alone does not prove the
+  // newly staged prompt reached the provider. Fail closed unless the caller has
+  // positive prompt correlation. Generation one remains the compatible initial
+  // boundary for a newly dispatched task.
+  const hasAcceptedTracking = Boolean(session.teamProviderTurn ||
+    (Array.isArray(session.teamProviderTurnHistory) && session.teamProviderTurnHistory.length))
+  if (pending.providerWorkGeneration > 1 && !hasAcceptedTracking &&
+      pendingPromptObserved !== true) return null
+  const existing = session.teamProviderTurnDeferredFinal
+  if (existing && (existing.taskId !== pending.taskId ||
+      Number(existing.providerWorkGeneration) !== pending.providerWorkGeneration)) return null
+  session.teamProviderTurnDeferredFinal = {
+    taskId: pending.taskId,
+    providerWorkGeneration: pending.providerWorkGeneration,
+    provider,
+    providerTurnId: providerTurnId ? String(providerTurnId) : null,
+    observedAt: Number.isSafeInteger(observed) && observed > 0 ? observed : null,
+    lastAssistantMessage: String(lastAssistantMessage || existing?.lastAssistantMessage || ''),
+    usage: clonedJsonObject(usage) || existing?.usage || null,
+    contextUsage: clonedJsonObject(contextUsage) || existing?.contextUsage || null,
+    // Preserve an in-flight settlement claim if a duplicate native final
+    // refreshes the retained bytes before submission promotion finishes.
+    settlementClaimedAt: Number(existing?.settlementClaimedAt) || null,
+  }
+  return publicTurn(pending)
+}
+
+export function deferredTeamProviderFinal(session, expected = null) {
+  const record = session?.teamProviderTurnDeferredFinal
+  const turn = normalizedTurn(record, record?.observedAt || Date.now(), record?.providerTurnId)
+  if (!record || !turn || !['claude', 'codex', 'pi'].includes(record.provider)) return null
+  if (expected && (turn.taskId !== expected.taskId ||
+      turn.providerWorkGeneration !== Number(expected.providerWorkGeneration))) return null
+  const settlementClaimedAt = Number(record.settlementClaimedAt)
+  return {
+    ...publicTurn(turn),
+    provider: record.provider,
+    providerTurnId: record.providerTurnId ? String(record.providerTurnId) : null,
+    observedAt: Number.isSafeInteger(Number(record.observedAt)) && Number(record.observedAt) > 0
+      ? Number(record.observedAt) : null,
+    lastAssistantMessage: String(record.lastAssistantMessage || ''),
+    usage: clonedJsonObject(record.usage),
+    contextUsage: clonedJsonObject(record.contextUsage),
+    ...(Number.isSafeInteger(settlementClaimedAt) && settlementClaimedAt > 0
+      ? { settlementClaimedAt } : {}),
+  }
+}
+
+// Journal final settlement before any Slack side effect. A retained claim on
+// restart means provider-output delivery is uncertain and must not be replayed;
+// the durable task report can still be completed idempotently from the retained
+// final bytes. The provider finalizer clears the deferred record in the same
+// atomic state write as its completed lifecycle.
+export function claimDeferredTeamProviderFinal(session, expected = null, { now = Date.now() } = {}) {
+  const deferred = deferredTeamProviderFinal(session, expected)
+  const record = session?.teamProviderTurnDeferredFinal
+  if (!deferred || !record) return null
+  const recovered = Boolean(deferred.settlementClaimedAt)
+  if (!recovered) {
+    const claimedAt = Number(now)
+    record.settlementClaimedAt = Number.isSafeInteger(claimedAt) && claimedAt > 0
+      ? claimedAt : Date.now()
+  }
+  return { ...deferredTeamProviderFinal(session, expected), recovered }
+}
+
+export function releaseDeferredTeamProviderFinalClaim(session, expected = null) {
+  const deferred = deferredTeamProviderFinal(session, expected)
+  if (!deferred || !session?.teamProviderTurnDeferredFinal?.settlementClaimedAt) return false
+  delete session.teamProviderTurnDeferredFinal.settlementClaimedAt
+  return true
+}
+
+export function clearDeferredTeamProviderFinal(session, expected = null) {
+  const record = deferredTeamProviderFinal(session, expected)
+  if (!record) return false
+  delete session.teamProviderTurnDeferredFinal
+  return true
+}
+
+// Promote only the exact durable generation staged before provider delivery.
+// Calling activateTeamProviderTurn without an explicit turn preserves pending
+// metadata such as inheritProviderTurnId across a daemon restart.
+export function activatePendingTeamProviderTurn(session, expected, {
+  providerTurnId = null,
+  startedAt = null,
+  acceptedAt = null,
+} = {}) {
+  const pending = normalizedTurn(session?.teamProviderTurnPending,
+    session?.teamProviderTurnPending?.stagedAt)
+  if (!pending || !pendingTeamProviderTurn(session, expected)) return null
+  // The transport can return after the provider has already emitted its Stop
+  // event. Keep the boundary journaled before submission so event ordering does
+  // not depend on when this promotion callback happened to run.
+  const boundary = startedAt == null ? pending.startedAt : startedAt
+  return activateTeamProviderTurn(session, {
+    providerTurnId,
+    startedAt: boundary,
+    acceptedAt: acceptedAt == null ? boundary : acceptedAt,
+  })
+}
+
+// Both delegated-task envelopes and coordinator follow-ups carry a private,
+// provider-visible task identity. A prompt hook can use this marker to promote
+// a staged generation after a tmux write whose return status was uncertain.
+export function providerPromptTurnMarker(prompt) {
+  const tag = /<sab-team-(?:task|message)\b([^>]*)>/.exec(String(prompt || ''))
+  if (!tag) return null
+  const taskId = /\b(?:id|task)="(task_[A-Za-z0-9_-]+)"/.exec(tag[1])?.[1]
+  if (!taskId) return null
+  const rawGeneration = /\bgeneration="([1-9][0-9]*)"/.exec(tag[1])?.[1]
+  const providerWorkGeneration = rawGeneration ? Number(rawGeneration) : null
+  if (providerWorkGeneration !== null && !Number.isSafeInteger(providerWorkGeneration)) return null
+  return { taskId, providerWorkGeneration }
+}
+
+export function providerPromptAcknowledgesTask(session, {
+  taskId,
+  currentGeneration,
+  promptTurn,
+  submittedTurn,
+  prompt = null,
+  injected = false,
+  pending = false,
+} = {}) {
+  const generation = Number(currentGeneration)
+  if (!taskId || promptTurn?.taskId !== taskId || !Number.isSafeInteger(generation) || generation < 1) return false
+  const exactGeneration = promptTurn.providerWorkGeneration === generation
+  const legacyGeneration = promptTurn.providerWorkGeneration == null && generation === 1 &&
+    !hasTeamProviderTurnTracking(session)
+  const acknowledgedGeneration = legacyGeneration ? generation : promptTurn.providerWorkGeneration
+  const durableTurn = submittedTurn?.taskId === taskId &&
+    submittedTurn.providerWorkGeneration === acknowledgedGeneration
+  const digest = promptDigest(prompt)
+  const matchesJournal = turn => Boolean(digest && turn?.taskId === taskId &&
+      Number(turn.providerWorkGeneration) === promptTurn.providerWorkGeneration &&
+      turn.promptHash === digest)
+  const pendingJournaled = pending && matchesJournal(session?.teamProviderTurnPending)
+  const acceptedJournaled = matchesJournal(session?.teamProviderTurn)
+  return (exactGeneration || legacyGeneration) && durableTurn &&
+    (injected || pendingJournaled || acceptedJournaled)
+}
+
+export function activateTeamProviderTurn(session, {
+  turn = null,
+  providerTurnId = null,
+  startedAt = Date.now(),
+  acceptedAt = null,
+} = {}) {
+  if (!session) return null
+  const source = turn || session.teamProviderTurnPending
+  let next = normalizedTurn(source, startedAt, providerTurnId)
+  if (!next) return null
+  const accepted = Number(acceptedAt)
+  next.acceptedAt = Number.isSafeInteger(accepted) && accepted > 0
+    ? accepted
+    : next.acceptedAt || next.startedAt
+  const current = normalizedTurn(session.teamProviderTurn,
+    session.teamProviderTurn?.startedAt, session.teamProviderTurn?.providerTurnId)
+  if (current && next.inheritProviderTurnId && !next.providerTurnId &&
+      current.taskId === next.taskId) {
+    next = { ...next, providerTurnId: current.providerTurnId }
+  }
+  // A delayed UserPromptSubmit hook may resume after a coordinator follow-up
+  // has already advanced this task. Preserve the observed older native turn in
+  // history, but never let it replace the newer accepted work generation.
+  if (current && current.taskId === next.taskId &&
+      current.providerWorkGeneration > next.providerWorkGeneration) {
+    if (current.inheritProviderTurnId && !current.providerTurnId && next.providerTurnId) {
+      session.teamProviderTurn = { ...current, providerTurnId: next.providerTurnId }
+    }
+    rememberPrevious(session, next)
+    discardPendingTeamProviderTurn(session, next, { preserveDeferred: true })
+    return publicTurn(session.teamProviderTurn || current)
+  }
+  if (current && sameLogicalTurn(current, next)) {
+    session.teamProviderTurn = {
+      ...current,
+      providerTurnId: current.providerTurnId || next.providerTurnId,
+      startedAt: Math.min(current.startedAt, next.startedAt),
+      acceptedAt: Math.min(current.acceptedAt || current.startedAt,
+        next.acceptedAt || next.startedAt),
+    }
+  } else {
+    rememberPrevious(session, current)
+    session.teamProviderTurn = next
+  }
+  discardPendingTeamProviderTurn(session, next, { preserveDeferred: true })
+  return publicTurn(session.teamProviderTurn)
+}
+
+export function retireTeamProviderTurn(session) {
+  if (!session) return false
+  const current = normalizedTurn(session.teamProviderTurn,
+    session.teamProviderTurn?.startedAt, session.teamProviderTurn?.providerTurnId)
+  const changed = Boolean(current || session.teamProviderTurnPending || session.teamProviderTurnDeferredFinal)
+  rememberPrevious(session, current)
+  delete session.teamProviderTurn
+  delete session.teamProviderTurnPending
+  delete session.teamProviderTurnDeferredFinal
+  return changed
+}
+
+export function providerTurnForCompletion(session, {
+  providerTurnId = null,
+  observedAt = null,
+} = {}) {
+  if (!session) return null
+  const current = normalizedTurn(session.teamProviderTurn,
+    session.teamProviderTurn?.startedAt, session.teamProviderTurn?.providerTurnId)
+  const history = (Array.isArray(session.teamProviderTurnHistory) ? session.teamProviderTurnHistory : [])
+    .map(item => normalizedTurn(item, item?.startedAt, item?.providerTurnId))
+    .filter(Boolean)
+  const candidates = [...history, current].filter(Boolean)
+  const observed = Number(observedAt)
+  const hasObservedAt = Number.isSafeInteger(observed) && observed > 0
+  const latest = values => values
+    .filter(item => !hasObservedAt ||
+      (item.startedAt <= observed && (item.acceptedAt || item.startedAt) <= observed))
+    .sort((left, right) => right.startedAt - left.startedAt ||
+      right.providerWorkGeneration - left.providerWorkGeneration)[0]
+  const nativeId = providerTurnId ? String(providerTurnId) : null
+  if (nativeId) {
+    // A coordinator follow-up can steer an already-running native turn, so the
+    // old and new work generations may deliberately share one native id. Use
+    // the hook observation time (or the newest generation when absent) rather
+    // than the history array's insertion order.
+    const exactCandidates = candidates.filter(item => item.providerTurnId === nativeId)
+    const exact = latest(exactCandidates)
+    if (exact) return publicTurn(exact)
+    if (exactCandidates.length) return null
+    // Once the current turn has a different native identity, an unknown final
+    // is not allowed to borrow it merely because it arrived later.
+    // An inherited identity means the follow-up may have steered the existing
+    // native turn, but it may also have started a distinct turn after the old
+    // final ended. Until a prompt hook replaces it, use the event boundary to
+    // resolve a different native id instead of treating the copied id as final.
+    if (current?.providerTurnId && !current.inheritProviderTurnId) return null
+  }
+  if (hasObservedAt) return publicTurn(latest(candidates))
+  // Claude has no native turn identity, and older hook wrappers may omit the
+  // observation timestamp. Once more than one task generation is retained,
+  // selecting the mutable current turn would let a delayed final cross the
+  // generation boundary. Leave it for continuously observed idle recovery.
+  if (!nativeId && candidates.length !== 1) return null
+  return publicTurn(current)
+}
+
+// Resolve the provider generation represented by a final while an exact task
+// is currently bound to the session. A delayed final may legitimately resolve
+// to a historical task: callers must retain that identity so they can reject
+// its lifecycle mutation and discard only its stale transcript prefix.
+export function providerTurnForTaskLifecycle(session, {
+  taskId,
+  providerWorkGeneration,
+  providerTurnId = null,
+  observedAt = null,
+} = {}) {
+  const activeTaskId = String(taskId || '')
+  const generation = Number(providerWorkGeneration)
+  if (!activeTaskId || !Number.isSafeInteger(generation) || generation < 1) return null
+  const tracked = providerTurnForCompletion(session, { providerTurnId, observedAt })
+  if (tracked) return publicTurn(tracked)
+  if (hasTeamProviderTurnTracking(session)) return null
+  return { taskId: activeTaskId, providerWorkGeneration: generation }
+}

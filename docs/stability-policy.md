@@ -17,6 +17,12 @@ In particular, status `chat.update` traffic is cosmetic and may coalesce or be
 dropped; provider commentary and finals are critical, bypass that queue, and
 retain their provider source order across retries.
 
+For delegated team work, provider-turn completion is not task completion. A
+turn report must preserve the exact worker reservation until declared gates are
+clear, the worker declares readiness, and the coordinator explicitly releases
+the task. Presentation or provider-idle evidence must never imply those external
+proofs succeeded.
+
 ## Change classes
 
 Every compatibility-sensitive change is assigned a class before merge:
@@ -78,6 +84,9 @@ Do not promote or continue adding features when any of these occurs:
 - requested model/effort is silently replaced in durable resume settings;
 - a stale control can act on a rebound session, channel, node, or provider leg;
 - daemon restart duplicates a prompt, provider process, channel, or team task;
+- a provider final releases a new team task or declared gates remain pending;
+- a reported team task loses its exact worker binding, or a coordinator release
+  stops that provider/tmux or an unrelated background process;
 - installer activation points hooks or the public executable at a disposable
   worktree;
 - a bulk command touches an ineligible session;

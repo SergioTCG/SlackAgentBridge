@@ -44,6 +44,7 @@ test('team HTTP exposes context, peers, inbox, and exact task status', async () 
       return { tasks: [{ id: `limit-${options.limit}-after-${options.after}` }], nextCursor: 'next-page' }
     },
     task: async (_meta, id) => ({ id, status: 'running' }),
+    mutation: async (_meta, requestId, taskId) => ({ requestId, taskId, status: 'accepted' }),
     send: async () => assert.fail('unexpected send'),
     reply: async () => assert.fail('unexpected reply'),
   }
@@ -63,6 +64,9 @@ test('team HTTP exposes context, peers, inbox, and exact task status', async () 
     assert.deepEqual((await response.json()).tasks, [{ id: 'limit-5-after-task_old' }])
     response = await fetch(`${base}/team/tasks/task_123${caller}`, { headers })
     assert.deepEqual((await response.json()).task, { id: 'task_123', status: 'running' })
+    response = await fetch(`${base}/team/mutations/request-1${caller}&taskId=task_123`, { headers })
+    assert.deepEqual((await response.json()).mutation,
+      { requestId: 'request-1', taskId: 'task_123', status: 'accepted' })
   })
   assert.deepEqual(seen[0], { ppid: '123', tmux: 'sab-test', provider: 'codex' })
   assert.equal(inboxSeen[1].after, 'task_old')
@@ -77,15 +81,41 @@ test('team HTTP rejects ambiguous legacy and filtered inbox cursors', async () =
   })
 })
 
+test('accepted mutation receipt is returned without a second caller-identity lookup', async () => {
+  let mutationLookups = 0
+  const receipt = {
+    requestId: 'atomic-1', kind: 'send', status: 'accepted', resourceId: 'task_atomic',
+    taskId: 'task_atomic', taskStatus: 'queued', lifecycleVersion: 1, acceptedAt: '2026-01-01T00:00:00.000Z',
+  }
+  const service = {
+    send: async () => ({ task: { id: 'task_atomic', status: 'queued' }, created: true, mutation: receipt }),
+    mutation: async () => { mutationLookups++; throw new Error('second lookup must not happen') },
+  }
+  await withServer(service, async base => {
+    const response = await fetch(`${base}/team/send${caller}`, {
+      method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'worker', text: 'Do work.', requestId: 'atomic-1' }),
+    })
+    assert.equal(response.status, 202)
+    assert.deepEqual((await response.json()).mutation, receipt)
+  })
+  assert.equal(mutationLookups, 0)
+})
+
 test('team HTTP accepts JSON-safe send, reply, control, and mode requests', async () => {
   const calls = []
   const service = {
     context: async () => null, peers: async () => [], inbox: async () => [], task: async () => null,
+    mutation: async (_meta, requestId, taskId) => ({ requestId, taskId, status: 'accepted' }),
     send: async (meta, body) => { calls.push(['send', meta, body]); return { task: { id: 'task_one' }, created: true } },
     reply: async (meta, body) => { calls.push(['reply', meta, body]); return { reply: { id: 'reply_one' } } },
     cancel: async (meta, body) => { calls.push(['cancel', meta, body]); return { task: { id: 'task_one', status: 'cancelled' } } },
     replace: async (meta, body) => { calls.push(['replace', meta, body]); return { task: { id: 'task_one', instruction: body.text } } },
     message: async (meta, body) => { calls.push(['message', meta, body]); return { message: { id: 'message_one' } } },
+    checkpoint: async (meta, body) => { calls.push(['checkpoint', meta, body]); return { task: { id: body.taskId }, reply: { id: 'reply_checkpoint' } } },
+    complete: async (meta, body) => { calls.push(['complete', meta, body]); return { task: { id: body.taskId, status: 'running' } } },
+    release: async (meta, body) => { calls.push(['release', meta, body]); return { task: { id: body.taskId, status: 'completed' } } },
+    continue: async (meta, body) => { calls.push(['continue', meta, body]); return { task: { id: 'task_continued', parentTaskId: body.taskId } } },
     mode: async (meta, body) => { calls.push(['mode', meta, body]); return { mode: body.mode } },
   }
   await withServer(service, async base => {
@@ -96,6 +126,14 @@ test('team HTTP accepts JSON-safe send, reply, control, and mode requests', asyn
     response = await fetch(`${base}/team/reply${caller}`, options({ taskId: 'task_one', text: 'Progress.', requestId: 'r2' }))
     assert.equal(response.status, 200)
     assert.equal((await response.json()).reply.id, 'reply_one')
+    response = await fetch(`${base}/team/checkpoint${caller}`, options({ taskId: 'task_one', text: 'CI pending.', pendingGates: ['ci'], requestId: 'r2c' }))
+    assert.equal((await response.json()).reply.id, 'reply_checkpoint')
+    response = await fetch(`${base}/team/complete${caller}`, options({ taskId: 'task_one', text: 'Ready.', requestId: 'r2d' }))
+    assert.equal((await response.json()).mutation.requestId, 'r2d')
+    response = await fetch(`${base}/team/release${caller}`, options({ taskId: 'task_one', requestId: 'r2e' }))
+    assert.equal((await response.json()).task.status, 'completed')
+    response = await fetch(`${base}/team/continue${caller}`, options({ taskId: 'task_one', text: 'Follow up.', requestId: 'r2f' }))
+    assert.equal((await response.json()).task.parentTaskId, 'task_one')
     response = await fetch(`${base}/team/cancel${caller}`, options({ taskId: 'task_one', reason: 'Done elsewhere.', requestId: 'r3' }))
     assert.equal((await response.json()).task.status, 'cancelled')
     response = await fetch(`${base}/team/replace${caller}`, options({ taskId: 'task_one', text: 'New work.', requestId: 'r4' }))
@@ -107,7 +145,8 @@ test('team HTTP accepts JSON-safe send, reply, control, and mode requests', asyn
   })
   assert.equal(calls[0][0], 'send')
   assert.equal(calls[1][0], 'reply')
-  assert.deepEqual(calls.slice(2).map(call => call[0]), ['cancel', 'replace', 'message', 'mode'])
+  assert.deepEqual(calls.slice(2).map(call => call[0]),
+    ['checkpoint', 'complete', 'release', 'continue', 'cancel', 'replace', 'message', 'mode'])
 })
 
 test('team HTTP rejects browser origins, non-loopback Host, wrong media type, and oversized bodies', async () => {

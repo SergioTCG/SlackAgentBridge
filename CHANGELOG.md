@@ -6,6 +6,161 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- New session-team tasks now use explicit two-phase completion: bounded worker
+  checkpoints declare pending gates, worker completion declares readiness, and
+  an exact coordinator release is required before worker availability clears.
+- `sab team checkpoint`, `complete`, `release`, `continue`, and `mutation` add
+  gate tracking, linked post-completion follow-up, and queryable request-ID
+  receipts for ambiguous client outcomes.
+- Team context and task envelopes expose observation timestamps, current
+  availability reasons, and last durable transition reasons.
+
+### Changed
+
+- A provider final or continuously observed hookless Codex idle surface is now
+  a durable worker turn report, not implicit task completion. Coordinator
+  follow-up invalidates an earlier readiness declaration, while pre-upgrade
+  tasks retain their historical provider-final behavior.
+
+### Fixed
+
+- Coordinator waits now return the actionable `awaiting_release` state instead
+  of deadlocking the only turn authorized to release the worker.
+- Exact-generation Claude finalization is claimed before transcript settling,
+  stale Pi finals are fenced before and after Slack delivery, and dormant
+  coordinator messages no longer create three-second reconciliation log storms.
+- Initial delegated prompts now carry their immutable work generation;
+  sequential coordinator messages recompute resume semantics at delivery, and
+  inherited Codex native-turn identities remain replaceable by exact later
+  lifecycle events.
+- Discarded stale Claude finals preserve the next generation's transcript
+  boundary, while authenticated completion declarations establish live worker
+  proof and heal a missed initial provider acknowledgement.
+- In-flight Claude and Codex poller observations retain their starting work
+  generation, recovered prompt identities become durable before audit I/O, and
+  stale provider finals cannot stop or consume state belonging to a follow-up.
+- Bound provider prompt acknowledgements and finals to immutable task
+  generations across audit waits, serialized coordinator follow-ups, preserved
+  reported workers that become dormant during Slack audit delivery, and kept
+  coordinator release from generating spurious worker continuation authority.
+- Restart reconciliation repairs only exact redundant session/task bindings,
+  preserves reported tasks and their worker reservations across daemon or
+  provider downtime, refuses conflicting bindings instead of guessing, and
+  restores those bindings before Slack ingress can accept owner input.
+- Every team mutation returns its journaled request receipt; generated CLI
+  request IDs and safe retry/status guidance are retained across timeouts.
+- Reported workers can be resumed by an owner without injecting unrelated task
+  input. Deferred coordinator follow-ups are mirrored before provider delivery,
+  establish fresh post-restart turn proof, and no longer fail valid re-adopted
+  work as stale.
+- Per-task request-ID collisions now fail before mutation, and delayed worker
+  reports describe the current lifecycle instead of offering stale release
+  guidance after a task has already moved on.
+- Legacy queued work retains provider-final instructions, while delivery-time
+  follow-up races, post-release completion retries, and renamed-worker
+  continuations preserve their exact durable task identity.
+- Completion declarations are fenced while coordinator follow-up is entering
+  the provider, dormant wakeups preserve only durably reported work, and the
+  bounded reply journal reserves capacity to clear the final task gate.
+- Accepted coordinator messages now fence completion and release before Slack
+  mirroring begins, and provider reports bind to a monotonic task-local work
+  generation so a delayed earlier final cannot satisfy a delivered follow-up.
+- Codex acknowledgement hooks now persist lifecycle tracking before audit I/O,
+  only durably written hook acknowledgements may override a racing transport
+  error, and idempotent release retries re-persist accepted terminal state.
+- Delegated and coordinator-follow-up turns retain their pre-submit event
+  boundary, and delayed Codex prompt hooks cannot restart a completed turn or
+  retag lifecycle tracking after a newer work generation begins.
+- Coordinator follow-up generations reset Claude spinner and Codex terminal
+  failure/idle evidence, while successful `sab team` mutations retain their
+  durable request receipts in CLI output.
+- Native Codex prompt identities now give each newer turn its own lifecycle
+  timestamp without losing the same turn's earlier transport boundary, and an
+  accepted team-task retry remains queryable after its worker is removed.
+- Completion declarations now carry the generation observed in the worker's
+  current task prompt; release requires a subsequent exact-turn report, while
+  later provider turns in the same work generation supersede earlier progress.
+- Default cancellation receipts use their effective request identity, and
+  idempotent mutation retries re-persist accepted in-memory state before
+  reporting success.
+- Staging a coordinator follow-up no longer captures the preceding turn's final,
+  exact pending-generation prompt hooks can heal a transport race, and malformed
+  empty checkpoint gate lists cannot impersonate the explicit `none` sentinel.
+- Exact provider acknowledgements now require the current work generation,
+  overtaking finals remain durably deferred until their staged input settles,
+  and late Codex prompt hooks cannot recreate a released input reservation.
+- Follow-up generations sharing one native provider turn retain distinct
+  history entries, while coalesced undelivered reports receive fresh Slack
+  idempotency identities instead of reusing an earlier accepted request.
+- Deferred provider finals now journal an in-flight settlement claim and clear
+  it atomically with the recovered task lifecycle, so a daemon crash cannot
+  leave a claimed Codex or Pi final permanently fencing its worker task.
+- Provider generations now retain a distinct acceptance boundary, preventing a
+  pre-submit Claude final from being attributed to a follow-up whose transport
+  promoted later; recovered checkpoint retries are re-journaled before Slack
+  audit or reply delivery.
+- Team prompt acknowledgements now require the durable digest of the exact
+  bridge-delivered instruction, preventing pasted marker text from claiming a
+  task generation; timestamp-less finals fail closed when multiple retained
+  provider generations make attribution ambiguous.
+- Completion declarations retain the provider generation observed before
+  caller authentication, deferred finals cannot cross task identities, and
+  malformed checkpoints without an explicit gate array now fail closed.
+- Legacy tasks retain their historical 32-reply capacity, while a saturated
+  cancellation journal rejects reuse of its terminal request ID with a changed
+  payload.
+- Provider turns now retain a bounded, durable task-generation fingerprint;
+  delayed native finals resolve by turn identity or observation time instead of
+  sampling mutable task state. Continuation timeout guidance no longer filters
+  mutation lookup by the unknowable child task, and saturated cancelled-task
+  retries fail explicitly instead of acknowledging an unqueryable receipt.
+- Untracked post-upgrade follow-ups now require positive prompt evidence before
+  accepting an overtaking final; Claude failure peeks are generation-scoped,
+  revoked-task fallback pollers cannot wedge later turns, and mutation recovery
+  re-persists the journal before confirming acceptance.
+- Delegated input no longer falls through to a second transport after the
+  provider accepted it but lifecycle persistence failed. Active fallback
+  pollers advance with coordinator follow-ups, shared native turn IDs resolve
+  to the generation current at hook observation time, and delayed prompt hooks
+  cannot roll a task back to older work.
+- Provider prompt acknowledgements now promote an exact pending generation
+  after an uncertain tmux result. Delayed Claude finals are rejected before
+  stopping a newer poller or consuming newer transcript output, and legacy
+  empty finals retain their historical failure semantics.
+- Historical Claude turn identities now survive task replacement long enough
+  to discard only their stale transcript bytes. Authenticated worker proof and
+  durable post-restart coordinator-message markers promote the exact pending
+  generation instead of leaving work reserved or misclassifying it as local
+  terminal input.
+- An exact native prompt acknowledgement now settles a coordinator follow-up
+  whose tmux delivery was uncertain or interrupted by restart. The authenticated
+  acknowledgement wins a racing late transport error, advances the durable work
+  generation once, and removes the stale completion/release fence.
+- App Server finals now defer behind unresolved Codex team input just like Stop
+  hooks, delayed older-generation prompt hooks cannot fail newer same-task work,
+  and accepted continuation retries re-persist recovered state before success.
+- Restart recovery now flushes settled durable provider finals before idle
+  re-adoption, preserves any final whose side effects still need retrying, and
+  refreshes pre-existing Claude/Codex pollers after repairing task bindings.
+- Stale Claude Stop events now wait for transcript settlement before advancing
+  past their generation, and reconciliation fences a task while a durably
+  captured provider final remains pending after a transient flush failure.
+- Claude task reports now select assistant output from the exact embedded work
+  generation, and delayed team prompt hooks can no longer create a stale owner
+  input reservation after newer work or coordinator release.
+- Hookless Claude finals now follow their immutable pre-submit timestamp into a
+  staged generation, streamed tool output persists its transcript-generation
+  boundary, and boot repairs exact task bindings before recovering deferred
+  finals or provider turns.
+- Release readiness now uses provider-event observation order rather than
+  journal insertion order, so a delayed older final cannot certify a later
+  completion declaration.
+- The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
+  form-nesting denial-of-service, and query-fragment advisories reported against
+  the earlier transitive release.
+
 ## [2.1.0] — 2026-09-08
 
 ### Added

@@ -79,7 +79,8 @@ accounts, and the Mac user running the daemon.
   its exact native session owns the exact
   journaled task. Such an authenticated task-bound reply proves prompt
   acceptance if the provider omitted its lifecycle marker, but never substitutes
-  for a stable final. Stop, kill, session death/replacement, switch, removal,
+  for a stable turn report or explicit task release. Stop, kill, session
+  death/replacement, switch, removal,
   close, and expiry revoke or invalidate stale authority.
 - **Root-provider process claims:** a nested provider utility may inherit SAB
   environment variables and live under the same tmux pane, but another matching
@@ -93,10 +94,16 @@ accounts, and the Mac user running the daemon.
   optimistic session flag. A restart may deliver a
   queued task but never retries an uncertain dispatch. Persisted worker replies
   prevent already-accepted work from being misclassified as uncertain; stable
-  provider finals can complete only their bound task/session. Repeated live
-  exact-process idle proof may close a hookless Codex turn only as
-  `completed_with_warning`; boot-time idle lacks that proof and fails closed.
-  Completion posts have durable,
+  provider finals can report only their bound task/session. New tasks keep that
+  exact worker reserved until bounded gates are clear, the worker declares
+  readiness, and the coordinator releases it. Accepted coordinator messages
+  fence readiness/release until exact provider delivery, and task-local work
+  generations are durably attached to the accepted native turn so delayed
+  earlier finals cannot satisfy newer work by sampling current task state.
+  Repeated live exact-process idle
+  proof may close a hookless Codex turn only as a warning-bearing report;
+  boot-time idle lacks that proof and fails closed for legacy running work.
+  Report and completion posts have durable,
   idempotent delivery claims; input/file delivery is serialized in-process and
   failed queued envelopes are removed before reconnect; missing audit-card
   updates are reported without suppressing the stable result; queue, reply,
@@ -283,11 +290,14 @@ accounts, and the Mac user running the daemon.
   idle-surface observations following the grace period. The fallback proves the
   exact session, channel, PID/tmux ancestry, and turn fingerprint, persists
   cleanup before waking queued dispatch. An exact delegated task observed
-  continuously by its live poller may become `completed_with_warning` only
-  after that same proof; an already-idle historical task discovered during boot
-  fails closed. Both paths preserve the journal, never replay work, and never
-  release a replacement session. No fallback path fabricates a provider final
-  response from terminal output.
+  continuously by its live poller may create only a warning-bearing turn report
+  after that same proof; it does not release the task. An already-idle legacy
+  task discovered during boot fails closed, while an already-reported task is
+  durably re-adopted. The owner may wake that exact reserved session, but SAB
+  consumes the wake message without submitting it as unrelated task input.
+  Both paths preserve the journal, never replay work, and
+  never release a replacement session. No fallback path fabricates a provider
+  final response from terminal output.
 - **Rate-safe status delivery:** live status edits use one workspace-wide,
   bounded queue, discard superseded timer text before Slack I/O, and prioritize
   end-of-turn cleanup. Provider commentary and finals do not wait on cosmetic
@@ -328,6 +338,18 @@ Slack when its scope or progress is no longer appropriate.
 - Use `/sab-team drain` before a quiet merge or review boundary when active
   workers may finish but no queued task or automatic continuation should start;
   explicitly `/sab-team resume` afterward. Drain does not cancel queued work.
+- Treat provider turn completion and team-task release as separate decisions.
+  Workers must declare bounded pending gates with `sab team checkpoint`, clear
+  them, and call `sab team complete` with the generation from the current
+  authenticated task prompt; only the exact coordinator may then call
+  `sab team release`. A follow-up invalidates the prior readiness declaration.
+  Until its exact provider delivery succeeds, that accepted follow-up also
+  blocks a new completion declaration and release. Release additionally needs
+  a provider report produced after that exact completion declaration. This
+  prevents a provider final from implicitly certifying tests, CI, runtime
+  proof, review, or merge state that SAB cannot independently observe. SAB
+  compares the timestamp captured at the provider event boundary; delayed hook
+  processing and Slack backoff cannot turn an earlier final into later proof.
 - Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
   replies create only durable event identifiers; the coordinator rereads the
   authenticated team inbox before acting. An exhausted coordinator turn can
@@ -337,10 +359,15 @@ Slack when its scope or progress is no longer appropriate.
   every dispatch requires human approval. Missing Codex lifecycle hooks may
   release stale coordinator fences after repeated idle proof from the exact
   authoritative PID/tmux. For a continuously observed delegated turn, that
-  proof may record only `completed_with_warning`, never a fabricated final; an
-  idle historical task found during boot fails closed. The bridge does not
+  proof may record only a warning-bearing report, never a fabricated final or
+  automatic task release; an idle historical legacy task found during boot
+  fails closed. The bridge does not
   scrape terminal answers, retry uncertain provider input, or cross a
   session/channel rebind.
+- Mutation request IDs are durable receipts, not bearer capabilities. They are
+  queryable only from the same exact authenticated session/team envelope and
+  make an accepted timeout safe to inspect or retry. They do not weaken PID,
+  tmux, provider, channel, native-session, or owner/delegated-task checks.
 - Remember that mirrored prompts, responses, filenames, and attachments are
   stored under the Slack workspace's retention and administration policies.
 - Treat artifact requests as deliberate data egress. Review collaborator access
@@ -377,6 +404,9 @@ Coordinator-to-worker messages are journaled before provider delivery. A
 provable pre-write rejection, such as a disconnected Pi input stream, may be
 retried against the same exact task/session authority. Once a provider write is
 attempted and its result is uncertain, SAB fails closed and never replays it.
+Messages for one task are submitted in durable acceptance order, and an
+unsettled predecessor blocks later generations. Delayed provider finals without
+an exact native-turn or event-time match cannot borrow the current task binding.
 
 ## Research-preview dependencies
 
