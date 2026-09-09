@@ -287,6 +287,7 @@ test('new tasks separate provider turn reports from explicit coordinator release
   reportTeamTaskTurn(state, task.id, {
     targetSessionId: worker.id,
     result: 'Final provider report.',
+    reportKey: 'claude:turn-1',
     now: 8000,
   })
   assert.equal(task.status, 'awaiting_release')
@@ -294,10 +295,19 @@ test('new tasks separate provider turn reports from explicit coordinator release
   reportTeamTaskTurn(state, task.id, {
     targetSessionId: worker.id,
     result: 'A duplicate lifecycle path must not create another report.',
+    reportKey: 'claude:turn-1',
     now: 8100,
   })
   assert.equal(task.reports.length, 1)
   assert.equal(task.result, 'Final provider report.')
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id,
+    result: 'A later provider turn in the same work generation.',
+    reportKey: 'claude:turn-2',
+    now: 8150,
+  })
+  assert.equal(task.reports.length, 2)
+  assert.equal(task.result, 'A later provider turn in the same work generation.')
   assert.throws(() => reportTeamTaskTurn(state, task.id, {
     targetSessionId: 'stale-worker-leg', result: 'Spoofed duplicate.', now: 8200,
   }), error => error.code === 'task_target_changed')
@@ -652,6 +662,39 @@ test('completion declarations reject a provider generation that advanced during 
     now: 5300,
   }), error => error.code === 'task_revision_changed')
   assert.equal(task.completionRequest, null)
+})
+
+test('a completion declaration requires a later exact provider report', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'claude',
+    target: 'parallel-1', text: 'Plan and implement.', requestId: 'ordered-release-task',
+    id: 'task_ordered_release', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'claude', now: 3000 })
+  markTeamTaskRunning(state, task.id, { now: 4000 })
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id, result: 'The plan is ready.', reportKey: 'claude:plan', now: 5000,
+  })
+  requestTeamTaskCompletion(state, task.id, {
+    targetSessionId: worker.id, fromChannel: worker.channel,
+    summary: 'Implementation is now complete.', requestId: 'ordered-release-complete',
+    expectedProviderWorkGeneration: task.providerWorkGeneration, now: 6000,
+  })
+
+  assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, false)
+  assert.throws(() => releaseTeamTask(state, task.id, {
+    sourceChannel: 'C-MASTER', requestId: 'ordered-release-too-early', now: 6100,
+  }), error => error.code === 'stale_task_report')
+
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id, result: 'Implemented and verified.', reportKey: 'claude:implementation', now: 7000,
+  })
+  assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, true)
+  assert.equal(task.result, 'Implemented and verified.')
 })
 
 test('the bounded reply journal reserves capacity to clear the final gate', () => {
@@ -1219,6 +1262,9 @@ test('coordinator can cancel or replace only queued work and message only its ac
   assert.equal(cancelQueuedTeamTask(state, queued.id, {
     sourceChannel: 'C-MASTER', reason: 'No longer needed.', now: 4500,
   }).status, 'cancelled')
+  assert.equal(teamMutationForRequest(state, 'C-MASTER', `cancel:${queued.id}`, {
+    taskId: queued.id,
+  }).kind, 'cancel')
   assert.equal(cancelQueuedTeamTask(state, queued.id, {
     sourceChannel: 'C-MASTER', reason: 'A different retry description.', requestId: 'cancel-again', now: 4600,
   }).status, 'cancelled')

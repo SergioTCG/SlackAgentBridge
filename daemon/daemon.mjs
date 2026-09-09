@@ -948,7 +948,7 @@ function startCodexPoller(session) {
         await finishTeamTaskWithWarningForSession(session, task.status === 'running'
           ? 'Codex returned to idle without its lifecycle completion hook. The accepted worker turn completed, but SAB could not authenticate a stable final response.'
           : 'Codex returned to idle after the injected worker turn, but omitted its acknowledgement and completion hooks. SAB recorded a warning-bearing turn report and did not replay the work; the task remains reserved until explicit release.',
-        observation.teamTaskTurn)
+        observation.teamTaskTurn, `codex-idle:${p.turnStartedAt}`)
         clearTeamInputReservation(session)
         saveStateNow(state)
         await clearStatus(session)
@@ -1331,8 +1331,13 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     const taskFailure = terminalFailure
       ? String(terminalFailure.text || 'The worker turn failed in the terminal.').slice(0, 2000)
       : delivery.failure?.text || null
+    const reportKey = teamTaskTurn
+      ? `claude:${crypto.createHash('sha256').update(JSON.stringify([
+          session.transcript || '', Number(session.offset) || 0,
+        ])).digest('base64url')}`
+      : null
     const finalizedTask = await finishTeamTaskForSession(session, delivery.text, taskFailure, {
-      expectedTeamTaskTurn: teamTaskTurn,
+      expectedTeamTaskTurn: teamTaskTurn, reportKey,
     })
     // Slack delivery above can yield while a coordinator follow-up enters the
     // same Claude process. Never clear that newer input reservation.
@@ -1402,7 +1407,12 @@ async function finalizeCodexTurn(session, body, teamTaskTurn = null) {
     }
     if (ownsLifecycle && teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn) &&
         codexFinalLifecycleStillCurrent(session, expected)) {
-      await finishTeamTaskForSession(session, text, null, { expectedTeamTaskTurn: teamTaskTurn })
+      await finishTeamTaskForSession(session, text, null, {
+        expectedTeamTaskTurn: teamTaskTurn,
+        reportKey: turnId
+          ? `codex:${turnId}`
+          : `codex-start:${expected.turnStartedAt || expected.observedAt}`,
+      })
       clearTeamInputReservation(session)
     } else {
       log('Codex final arrived after a newer turn started; preserved newer lifecycle state', session.id.slice(0, 8), turnId)
@@ -1427,7 +1437,10 @@ async function finalizeCodexTerminalFailure(session, failure, expectedStartedAt,
   clearStatusDeferred(session)
   const text = String(failure?.text || 'Codex could not start this turn.').slice(0, 2000)
   if (session.channel) await postProviderOutput(session.channel, `⚠️ *Codex turn failed:* ${text}`)
-  await finishTeamTaskForSession(session, '', text, { expectedTeamTaskTurn })
+  await finishTeamTaskForSession(session, '', text, {
+    expectedTeamTaskTurn,
+    reportKey: `codex-terminal:${expectedStartedAt}:${failure?.key || 'failure'}`,
+  })
   clearTeamInputReservation(session)
   saveState(state)
   return true
@@ -1456,7 +1469,10 @@ async function finalizePiTurn(session, body, teamTaskTurn = currentTeamTaskProvi
     log('ignored stale Pi final after Slack delivery', session.id.slice(0, 8), turnId)
     return false
   }
-  const finalizedTask = await finishTeamTaskForSession(session, text, null, { expectedTeamTaskTurn: teamTaskTurn })
+  const finalizedTask = await finishTeamTaskForSession(session, text, null, {
+    expectedTeamTaskTurn: teamTaskTurn,
+    reportKey: turnId ? `pi:${turnId}` : `pi-start:${expectedStartedAt || observedAt}`,
+  })
   if (session.piTurnStartedAt || (teamTaskTurn && !finalizedTask &&
       !teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn))) return false
   clearTeamInputReservation(session)
@@ -4832,6 +4848,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     const submittedTurn = await injectCoordinatorTaskMessageOnce(task, target, expected, [
       `<sab-team-message task="${task.id}" generation="${providerTurn.providerWorkGeneration}" source="coordinator">`,
       '[Slack Agent Bridge coordinator message for your active delegated task]',
+      `Provider work generation: ${providerTurn.providerWorkGeneration}. If this completes the task, use \`sab team complete --task ${task.id} --generation ${providerTurn.providerWorkGeneration} --stdin\` before your final answer.`,
       message.text,
       '</sab-team-message>',
     ].join('\n'), providerTurn, providerTurnStartedAt)
@@ -5317,7 +5334,11 @@ async function recoverInterruptedTeamContinuations() {
   }
 }
 
-async function finishTeamTaskForSession(session, result, error = null, { warning = null, expectedTeamTaskTurn = currentTeamTaskProviderTurn(session) } = {}) {
+async function finishTeamTaskForSession(session, result, error = null, {
+  warning = null,
+  expectedTeamTaskTurn = currentTeamTaskProviderTurn(session),
+  reportKey = null,
+} = {}) {
   // `null` is an authenticated non-match, not permission to borrow the latest
   // mutable task binding. Legacy untracked tasks are synthesized by
   // currentTeamTaskProviderTurn() before reaching this boundary.
@@ -5359,6 +5380,7 @@ async function finishTeamTaskForSession(session, result, error = null, { warning
         result: finalText,
         warning: reportWarning,
         providerWorkGeneration: expectedTeamTaskTurn?.providerWorkGeneration ?? null,
+        reportKey,
       })
       if (reported.stale) return false
       if (!reported.created) {
@@ -5395,14 +5417,14 @@ async function finishTeamTaskForSession(session, result, error = null, { warning
 }
 
 async function finishTeamTaskWithWarningForSession(session, warning,
-  expectedTeamTaskTurn = currentTeamTaskProviderTurn(session)) {
+  expectedTeamTaskTurn = currentTeamTaskProviderTurn(session), reportKey = null) {
   const taskId = session?.teamActiveTaskId
   if (!taskId) { clearTeamTurn(session); saveStateNow(state); return false }
   const task = state.teamTasks?.[taskId]
   const latestReply = task?.replies?.at(-1)?.text || ''
   return finishTeamTaskForSession(session,
     latestReply ? `Last authenticated worker update:\n${latestReply}` : '', null,
-    { warning, expectedTeamTaskTurn })
+    { warning, expectedTeamTaskTurn, reportKey })
 }
 
 async function releaseIdleReadoptedTeamTask(session, label) {
@@ -5507,7 +5529,12 @@ async function failTeamTaskForSession(session, reason, { preserveReported = fals
 }
 
 function acceptedTeamMutation(session, task, requestId) {
-  return teamMutationForRequest(state, session.channel, requestId, { taskId: task.id })
+  const mutation = teamMutationForRequest(state, session.channel, requestId, { taskId: task.id })
+  // The original atomic write may have failed after mutating this process's
+  // in-memory journal. Every idempotent POST receipt is also a recovery point:
+  // never confirm accepted state until that exact mutation is durable again.
+  saveStateNow(state)
+  return mutation
 }
 
 const teamService = {
@@ -5787,15 +5814,6 @@ const teamService = {
     })
   },
   async complete(caller, request) {
-    // Snapshot before resolveTeamCaller() yields to PID/tmux authentication. A
-    // coordinator follow-up can complete provider delivery during those awaits;
-    // readiness authored before that work must never be credited to its newer
-    // generation. Missing/foreign tasks are still reported only after caller
-    // authentication below.
-    const ingressTask = state.teamTasks?.[String(request.taskId || '')]
-    const expectedProviderWorkGeneration = ingressTask
-      ? teamTaskProviderWorkGeneration(ingressTask)
-      : null
     const session = await resolveTeamCaller(caller)
     requireTeamCallerContext(session)
     const task = teamTask(state, request.taskId)
@@ -5807,12 +5825,16 @@ const teamService = {
     if (!priorRequest && session.teamActiveTaskId !== task.id) {
       throw new TeamError('completion_not_allowed', 'This live worker session does not own that active task.', 403)
     }
+    if (!Number.isSafeInteger(Number(request.providerWorkGeneration)) || Number(request.providerWorkGeneration) < 1) {
+      throw new TeamError('invalid_work_generation',
+        'Task completion must include the provider work generation from the current SAB task prompt.', 400)
+    }
     const result = requestTeamTaskCompletion(state, task.id, {
       targetSessionId: session.id,
       fromChannel: session.channel,
       summary: request.text,
       requestId: request.requestId,
-      expectedProviderWorkGeneration,
+      expectedProviderWorkGeneration: request.providerWorkGeneration,
     })
     const startCodexStatus = isWorkerBoundTeamTask(task)
       ? recordTeamWorkerProof(session, task)
@@ -5881,8 +5903,9 @@ const teamService = {
     assertCoordinatorTaskControl(session, {
       teamId: team.id, allowContinuation: team.continuation?.mode === 'auto-until-blocked',
     })
+    const effectiveRequestId = request.requestId || `cancel:${request.taskId}`
     const task = cancelQueuedTeamTask(state, request.taskId, {
-      sourceChannel: session.channel, reason: request.reason, requestId: request.requestId,
+      sourceChannel: session.channel, reason: request.reason, requestId: effectiveRequestId,
     })
     saveStateNow(state)
     removeTeamFiles(task.id)
@@ -5890,7 +5913,7 @@ const teamService = {
     setImmediate(() => reconcileTeamTasks().catch(error => log('team cancel follow-up failed', String(error))))
     return {
       task: publicTeamTask(task, session.channel),
-      mutation: acceptedTeamMutation(session, task, request.requestId),
+      mutation: acceptedTeamMutation(session, task, effectiveRequestId),
     }
   },
   async replace(caller, request) {

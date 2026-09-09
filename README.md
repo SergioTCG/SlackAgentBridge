@@ -209,7 +209,7 @@ sab team context --json
 sab team send --to WORKER_ALIAS --stdin
 sab team inbox --active --limit 20 --page --json
 sab team checkpoint --task TASK_ID --pending ci,review --stdin
-sab team complete --task TASK_ID --stdin
+sab team complete --task TASK_ID --generation N --stdin
 sab team message --task TASK_ID --stdin
 sab team release --task TASK_ID
 sab team continue --task TASK_ID --stdin

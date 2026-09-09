@@ -22,7 +22,7 @@ function usage(message = '') {
   sab team wait --task TASK_ID [--timeout SECONDS] [--json]
   sab team reply --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
   sab team checkpoint --task TASK_ID --pending GATE[,GATE]|none (--stdin | --message TEXT) [--request-id ID]
-  sab team complete --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
+  sab team complete --task TASK_ID --generation N (--stdin | --message TEXT) [--request-id ID]
   sab team release --task TASK_ID [--request-id ID]
   sab team continue --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
   sab team message --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
@@ -152,17 +152,21 @@ async function mutate(pathname, body, { timeout = 30_000 } = {}) {
   }
 }
 
-function taskRequestArgs(args, { text = false, pending = false } = {}) {
+function taskRequestArgs(args, { text = false, pending = false, generation = false } = {}) {
   let taskId = null
   let requestId = null
   let mode = null
   let message = ''
   let pendingValue = null
+  let providerWorkGeneration = null
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (arg === '--task') { taskId = value(args, i, arg); i++; continue }
     if (arg === '--request-id') { requestId = value(args, i, arg); i++; continue }
     if (pending && arg === '--pending') { pendingValue = value(args, i, arg); i++; continue }
+    if (generation && arg === '--generation') {
+      providerWorkGeneration = Number(value(args, i, arg)); i++; continue
+    }
     if (text && arg === '--stdin') {
       if (mode) usage('choose only one of --stdin or --message')
       mode = 'stdin'; continue
@@ -182,7 +186,13 @@ function taskRequestArgs(args, { text = false, pending = false } = {}) {
       if (!pendingGates.length) usage('--pending requires one or more gate names, or the explicit `none` sentinel')
     }
   }
-  return { taskId, requestId, text: mode ? readText(mode, message).trim() : '', pendingGates }
+  if (generation && (!Number.isSafeInteger(providerWorkGeneration) || providerWorkGeneration < 1)) {
+    usage('--generation must be a positive integer copied from the current SAB task prompt')
+  }
+  return {
+    taskId, requestId, text: mode ? readText(mode, message).trim() : '', pendingGates,
+    providerWorkGeneration,
+  }
 }
 
 requireSession()
@@ -267,10 +277,13 @@ try {
     })
     outputMutation(result, result.reply)
   } else if (command === 'complete') {
-    const parsed = taskRequestArgs(args, { text: true })
-    if (!parsed.taskId || !parsed.text) usage('complete requires --task and either --stdin or --message')
+    const parsed = taskRequestArgs(args, { text: true, generation: true })
+    if (!parsed.taskId || !parsed.text) {
+      usage('complete requires --task, --generation, and either --stdin or --message')
+    }
     const result = await mutate('/team/complete', {
       taskId: parsed.taskId, text: parsed.text, requestId: parsed.requestId,
+      providerWorkGeneration: parsed.providerWorkGeneration,
     })
     outputMutation(result, result.task)
   } else if (command === 'release') {

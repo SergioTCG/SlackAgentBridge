@@ -103,13 +103,24 @@ test('sab team uses JSON-safe task, wait, reply, inbox, and file requests', asyn
   assert.match(malformedCheckpoint.stderr, /pending.*none/i)
   assert.equal(requests.some(request => request.url.startsWith('/team/checkpoint') &&
     request.body?.text === 'Malformed clear.'), false)
-  const completed = await run(['complete', '--task', 'task_one', '--message', 'Everything passed.'], env)
+  const missingCompletionGeneration = await run([
+    'complete', '--task', 'task_one', '--message', 'Unsafe unstamped completion.',
+  ], env)
+  assert.equal(missingCompletionGeneration.status, 2)
+  assert.match(missingCompletionGeneration.stderr, /--generation/)
+  assert.equal(requests.some(request => request.url.startsWith('/team/complete') &&
+    request.body?.text === 'Unsafe unstamped completion.'), false)
+  const completed = await run([
+    'complete', '--task', 'task_one', '--generation', '7', '--message', 'Everything passed.',
+  ], env)
   const released = await run(['release', '--task', 'task_one'], env)
   const continued = await run(['continue', '--task', 'task_one', '--message', 'Follow up.'], env)
   for (const result of [completed, released, continued]) {
     assert.equal(result.status, 0, result.stderr)
     assert.match(JSON.parse(result.stdout).mutation.requestId, /^[0-9a-f-]{36}$/)
   }
+  const completionRequest = requests.find(request => request.url.startsWith('/team/complete'))
+  assert.equal(completionRequest.body.providerWorkGeneration, 7)
   const uncertainContinuation = await run([
     'continue', '--task', 'task_one', '--message', 'Uncertain continuation.',
   ], env)

@@ -443,11 +443,14 @@ Task delivery is journal-first:
    without being reclassified as an authenticated worker continuation event.
 6. A worker checkpoint atomically replaces the complete bounded pending-gate
    set. A completion declaration is rejected while any gate remains. Once the
-   worker declares readiness and a turn report exists, an authorized
-   coordinator may release the task. A coordinator message invalidates stale
+   worker declares readiness with the work generation from its current
+   authenticated prompt and a later exact provider-turn report exists, an
+   authorized coordinator may release the task. A coordinator message invalidates stale
    readiness and fences release from journal acceptance through exact provider
-   delivery. Release requires a readiness declaration and report from the latest
-   delivered work generation; a terminal task can receive work only as a new
+   delivery. Release requires a readiness declaration and a subsequent report
+   from the latest delivered work generation. Exact provider-turn keys coalesce
+   duplicate lifecycle delivery without discarding later turns in that same
+   generation; a terminal task can receive work only as a new
    linked task.
 7. Persist `completed`, `completed_with_warning`, failure, or cancellation and a
    delivery claim before updating both audit cards and

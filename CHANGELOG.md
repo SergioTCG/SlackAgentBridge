@@ -78,6 +78,12 @@ Notable changes to this project. Format based on
 - Native Codex prompt identities now give each newer turn its own lifecycle
   timestamp without losing the same turn's earlier transport boundary, and an
   accepted team-task retry remains queryable after its worker is removed.
+- Completion declarations now carry the generation observed in the worker's
+  current task prompt; release requires a subsequent exact-turn report, while
+  later provider turns in the same work generation supersede earlier progress.
+- Default cancellation receipts use their effective request identity, and
+  idempotent mutation retries re-persist accepted in-memory state before
+  reporting success.
 - Staging a coordinator follow-up no longer captures the preceding turn's final,
   exact pending-generation prompt hooks can heal a transport race, and malformed
   empty checkpoint gate lists cannot impersonate the explicit `none` sentinel.

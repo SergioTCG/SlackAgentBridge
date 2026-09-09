@@ -340,11 +340,13 @@ Slack when its scope or progress is no longer appropriate.
   explicitly `/sab-team resume` afterward. Drain does not cancel queued work.
 - Treat provider turn completion and team-task release as separate decisions.
   Workers must declare bounded pending gates with `sab team checkpoint`, clear
-  them, and call `sab team complete`; only the exact coordinator may then call
+  them, and call `sab team complete` with the generation from the current
+  authenticated task prompt; only the exact coordinator may then call
   `sab team release`. A follow-up invalidates the prior readiness declaration.
   Until its exact provider delivery succeeds, that accepted follow-up also
-  blocks a new completion declaration and release. This prevents a provider
-  final from implicitly certifying tests, CI, runtime
+  blocks a new completion declaration and release. Release additionally needs
+  a provider report produced after that exact completion declaration. This
+  prevents a provider final from implicitly certifying tests, CI, runtime
   proof, review, or merge state that SAB cannot independently observe.
 - Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
   replies create only durable event identifiers; the coordinator rereads the

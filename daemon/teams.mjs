@@ -83,13 +83,25 @@ function unresolvedCoordinatorMessages(task) {
     message.deliveryStatus !== 'delivered' || message.providerDeliveryStatus !== 'delivered')
 }
 
+function reportCoversCompletion(task, report, requiredGeneration = teamTaskWorkGeneration(task)) {
+  if (!report || Number(report.workGeneration) !== requiredGeneration || !task?.completionRequest) return false
+  const reportVersion = Number(report.lifecycleVersion)
+  const requestVersion = Number(task.completionRequest.lifecycleVersion)
+  if (Number.isSafeInteger(reportVersion) && Number.isSafeInteger(requestVersion)) {
+    return reportVersion > requestVersion
+  }
+  const reportedAt = Date.parse(report.createdAt || 0)
+  const requestedAt = Date.parse(task.completionRequest.requestedAt || 0)
+  return Number.isFinite(reportedAt) && Number.isFinite(requestedAt) && reportedAt >= requestedAt
+}
+
 export function teamTaskReleaseReady(task) {
   if (task?.status !== 'awaiting_release' || !task.completionRequest || task.pendingGates?.length) return false
   const requiredGeneration = teamTaskWorkGeneration(task)
   if (teamTaskProviderWorkGeneration(task) !== requiredGeneration ||
       Number(task.completionRequest.workGeneration) !== requiredGeneration ||
       unresolvedCoordinatorMessages(task).length) return false
-  return (task.reports || []).some(report => Number(report.workGeneration) === requiredGeneration)
+  return (task.reports || []).some(report => reportCoversCompletion(task, report, requiredGeneration))
 }
 
 function normalizePendingGates(value) {
@@ -611,9 +623,22 @@ export function requestTeamTaskCompletion(state, taskId, {
   if (textBytes(text) > TEAM_MESSAGE_MAX_BYTES) {
     throw new TeamError('message_too_large', `Team messages may be at most ${TEAM_MESSAGE_MAX_BYTES} bytes.`, 413)
   }
+  const suppliedGeneration = Number(expectedProviderWorkGeneration)
+  if (expectedProviderWorkGeneration !== null && expectedProviderWorkGeneration !== undefined &&
+      (!Number.isSafeInteger(suppliedGeneration) || suppliedGeneration < 1)) {
+    throw new TeamError('invalid_work_generation',
+      'Task completion must include the provider work generation observed by this worker.', 400)
+  }
+  const currentProviderWorkGeneration = teamTaskProviderWorkGeneration(task)
+  // Direct module callers from the pre-release implementation remain readable;
+  // the authenticated HTTP service requires and forwards an explicit observed
+  // generation before entering this compatibility boundary.
+  const observedGeneration = expectedProviderWorkGeneration === null || expectedProviderWorkGeneration === undefined
+    ? currentProviderWorkGeneration
+    : suppliedGeneration
   const key = String(requestId || '')
   if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
-  const payloadHash = hash(text)
+  const payloadHash = hash(JSON.stringify({ text, providerWorkGeneration: observedGeneration }))
   const existing = [task.completionRequest, ...(task.completionRequestHistory || [])]
     .find(item => item?.requestId === key)
   if (existing) {
@@ -627,9 +652,7 @@ export function requestTeamTaskCompletion(state, taskId, {
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_active', 'Only an assigned active task may be declared ready.', 409)
   }
-  const currentProviderWorkGeneration = teamTaskProviderWorkGeneration(task)
-  if (expectedProviderWorkGeneration !== null &&
-      currentProviderWorkGeneration !== Number(expectedProviderWorkGeneration)) {
+  if (currentProviderWorkGeneration !== observedGeneration) {
     throw new TeamError('task_revision_changed',
       'The task received newer coordinator work while this completion declaration was being authenticated. Review that work before declaring completion again.', 409)
   }
@@ -678,6 +701,7 @@ export function reportTeamTaskTurn(state, taskId, {
   result,
   warning = null,
   providerWorkGeneration = null,
+  reportKey = null,
   now = Date.now(),
 } = {}) {
   const task = teamTask(state, taskId)
@@ -706,10 +730,12 @@ export function reportTeamTaskTurn(state, taskId, {
     return { task, report: null, created: false, stale: true }
   }
   // Stop, App Server completion, and the idle fallback can converge on the
-  // same native turn. Deduplicate that exact provider-work generation while
-  // still allowing a later delivered coordinator follow-up to report anew.
-  const existingReport = (task.reports || []).find(report =>
-    Number(report.workGeneration || 1) === observedGeneration)
+  // same native turn. Deduplicate only its exact provider identity: a later
+  // native turn may legitimately supersede progress in the same work generation.
+  const exactReportKey = String(reportKey || '').slice(0, 512)
+  const existingReport = exactReportKey
+    ? (task.reports || []).find(report => report.providerTurnKey === exactReportKey)
+    : null
   if (existingReport) return { task, report: existingReport, created: false, stale: false }
   if (!WORKER_BOUND_TASK_STATES.has(task.status)) {
     throw new TeamError('task_not_running', 'Only the assigned active task may report a completed provider turn.', 409)
@@ -735,6 +761,7 @@ export function reportTeamTaskTurn(state, taskId, {
       result: task.result,
       warning: task.warning,
       workGeneration: observedGeneration,
+      providerTurnKey: exactReportKey || null,
       deliveryStatus: 'pending',
       deliveryError: null,
       slackTs: null,
@@ -749,6 +776,7 @@ export function reportTeamTaskTurn(state, taskId, {
       result: task.result,
       warning: task.warning,
       workGeneration: observedGeneration,
+      providerTurnKey: exactReportKey || null,
       deliveryStatus: 'pending',
       deliveryError: null,
       slackTs: null,
@@ -796,9 +824,10 @@ export function releaseTeamTask(state, taskId, {
       'A coordinator follow-up has not completed exact provider delivery; this task cannot be released.', 409)
   }
   const requiredGeneration = teamTaskWorkGeneration(task)
+  const releaseReport = (task.reports || []).filter(report =>
+    reportCoversCompletion(task, report, requiredGeneration)).at(-1)
   if (teamTaskProviderWorkGeneration(task) !== requiredGeneration ||
-      Number(task.completionRequest.workGeneration) !== requiredGeneration ||
-      !(task.reports || []).some(report => Number(report.workGeneration) === requiredGeneration)) {
+      Number(task.completionRequest.workGeneration) !== requiredGeneration || !releaseReport) {
     throw new TeamError('stale_task_report',
       'The completion declaration and provider report do not cover the latest delivered coordinator work.', 409)
   }
@@ -810,7 +839,8 @@ export function releaseTeamTask(state, taskId, {
   task.terminalRequest = {
     requestId: control.key, kind: 'release', payloadHash, createdAt: nowIso(now),
   }
-  task.result = task.result || task.completionRequest.summary
+  task.result = releaseReport.result || task.completionRequest.summary
+  task.warning = releaseReport.warning || null
   task.text = ''
   task.files = []
   task.completionDeliveryStatus = 'pending'
@@ -1384,7 +1414,7 @@ export function delegatedTaskPrompt(team, task, destinationFiles = []) {
     : [
         'A provider turn ending reports progress; it does not release this task or its worker reservation.',
         `Use \`sab team checkpoint --task ${task.id} --pending GATE[,GATE] --stdin\` whenever tests, CI, runtime proof, review, or merge work remains. Use \`--pending none\` only when every declared gate is clear.`,
-        `Only after all work and gates are complete, declare readiness with \`sab team complete --task ${task.id} --stdin\` before your final answer. The coordinator then releases the task.`,
+        `Only after all work and gates are complete, declare readiness with \`sab team complete --task ${task.id} --generation ${teamTaskProviderWorkGeneration(task)} --stdin\` before your final answer. Copy this exact generation from the current SAB task or follow-up prompt; stale generations fail closed. The coordinator then releases the task.`,
         `Use \`sab team reply --task ${task.id} --stdin\` for other useful interim findings. Use \`sab team send-file --task ${task.id} -- FILE_PATH\` to return files when file relay is enabled.`,
       ]
   return [

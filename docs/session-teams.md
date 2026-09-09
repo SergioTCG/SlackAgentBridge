@@ -106,7 +106,7 @@ sab team wait --task TASK_ID --timeout 3600 --json
 sab team reply --task TASK_ID --stdin
 sab team checkpoint --task TASK_ID --pending tests,ci,review,merge --stdin
 sab team checkpoint --task TASK_ID --pending none --stdin
-sab team complete --task TASK_ID --stdin
+sab team complete --task TASK_ID --generation N --stdin
 sab team release --task TASK_ID
 sab team continue --task TASK_ID --stdin
 sab team message --task TASK_ID --stdin --request-id STABLE_ID
@@ -159,8 +159,10 @@ While working, the worker uses `checkpoint` to publish the complete current set
 of unfinished gates. Typical names are `tests`, `ci`, `runtime`, `review`, and
 `merge`; names are opaque bounded labels, so SAB does not pretend it can infer
 external CI or deployment truth. `complete` is rejected while any gate remains.
-After the worker clears all gates, it calls `complete` with a summary and then
-finishes its provider turn. The resulting report is delivered to the
+After the worker clears all gates, it calls `complete` with a summary and the
+exact generation shown in its current SAB task or follow-up prompt, then
+finishes its provider turn. A stale or omitted generation fails closed. The
+resulting later report is delivered to the
 coordinator, but the exact worker session remains reserved until `release`.
 `sab team wait` returns as soon as a task becomes `awaiting_release`, because
 that state requires action from the current coordinator turn. The coordinator
@@ -173,8 +175,11 @@ from the moment it is accepted, it fences completion and release until exact
 provider delivery. After confirmed delivery the task returns to `running` and
 the worker must declare completion again. Reports and messages carry a
 monotonic task-local work generation, preventing a delayed final from the
-preceding turn from satisfying the new instruction. SAB stages that generation
-before provider input and promotes it to a bounded durable native-turn record
+preceding turn—or a completion declaration authored before a newly delivered
+follow-up—from satisfying the new instruction. Reports also carry an exact
+provider-turn key, so a duplicate lifecycle path is coalesced while a later
+turn in the same work generation supersedes its earlier progress report. SAB
+stages that generation before provider input and promotes it to a bounded durable native-turn record
 when the input is accepted; final hooks resolve the record by turn identity or
 event observation time. Multiple follow-ups are delivered in their durable
 acceptance order; an unsettled earlier message fences every later one. Releasing

@@ -242,7 +242,10 @@ test('worker lifecycle transitions and coordinator wakes share one atomic state 
   assert.match(stage, /queueContinuation\(team/)
   assert.match(persist, /stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
 
-  const completion = /async function finishTeamTaskForSession\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  const completion = daemon.slice(
+    daemon.indexOf('async function finishTeamTaskForSession('),
+    daemon.indexOf('async function finishTeamTaskWithWarningForSession('),
+  )
   assert.match(completion, /reportTeamTaskTurn\(state[\s\S]*persistTeamLifecycle\(task\)[\s\S]*ensureTeamReportDelivery/)
 
   const reply = /async reply\(caller, request\) \{[\s\S]*?\n  },\n  async checkpoint/.exec(daemon)?.[0] || ''
@@ -250,7 +253,10 @@ test('worker lifecycle transitions and coordinator wakes share one atomic state 
 })
 
 test('provider turn reporting preserves task and process ownership until explicit release', () => {
-  const completion = /async function finishTeamTaskForSession\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  const completion = daemon.slice(
+    daemon.indexOf('async function finishTeamTaskForSession('),
+    daemon.indexOf('async function finishTeamTaskWithWarningForSession('),
+  )
   assert.match(completion, /reportTeamTaskTurn/)
   assert.match(completion, /expectedTeamTaskTurn[\s\S]*teamTaskProviderWorkGeneration\(task\)[\s\S]*ignored stale team task final/)
   assert.match(completion, /const taskId = expectedTeamTaskTurn\?\.taskId/)
@@ -313,12 +319,9 @@ test('provider turn reporting preserves task and process ownership until explici
     /beginTeamProviderPollerObservation[\s\S]*teamProviderPollerObservationCurrent/)
   const completionDeclaration = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
   assert.match(completionDeclaration, /task\.status === 'awaiting_release'[\s\S]*stageTeamContinuation\(task[\s\S]*saveStateNow\(state\)[\s\S]*scheduleTeamContinuation/)
-  const completionGenerationSnapshot = completionDeclaration.indexOf('const expectedProviderWorkGeneration')
-  const completionCallerResolution = completionDeclaration.indexOf('await resolveTeamCaller(caller)')
-  assert.ok(completionGenerationSnapshot >= 0 && completionCallerResolution > completionGenerationSnapshot,
-    'completion must snapshot its provider generation before asynchronous caller authentication')
   assert.match(completionDeclaration,
-    /requestTeamTaskCompletion\(state[\s\S]*expectedProviderWorkGeneration/)
+    /invalid_work_generation[\s\S]*requestTeamTaskCompletion\(state[\s\S]*expectedProviderWorkGeneration:\s*request\.providerWorkGeneration/,
+  'completion must validate and carry the immutable generation observed by the worker')
   assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('session.teamActiveTaskId !== task.id'),
     'an exact completion retry must be recovered before the released session binding is rejected')
   assert.match(completionDeclaration,
@@ -577,7 +580,10 @@ test('restored durable task bindings refresh poller lifecycle snapshots', () => 
 })
 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {
-  assert.match(daemon, /function acceptedTeamMutation\([\s\S]*teamMutationForRequest/)
+  const accepted = /function acceptedTeamMutation\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(accepted, /teamMutationForRequest/)
+  assert.match(accepted, /saveStateNow\(state\)[\s\S]*return mutation/,
+    'idempotent POST retries must re-persist an accepted in-memory mutation before acknowledging it')
   assert.match(daemon, /mutation: acceptedTeamMutation\(session, result\.task, request\.requestId\)/)
   const lookup = daemon.slice(
     daemon.indexOf('async mutation(caller, requestId, taskId = null)'),
@@ -588,6 +594,18 @@ test('team mutation responses carry the journaled receipt from the original auth
     'a recovery lookup must durably re-persist the accepted mutation before confirming it')
   assert.match(cli, /verify acceptance with sab team mutation --request-id/)
   assert.match(teamModules, /result\?\.mutation \|\| await service\.mutation/)
+})
+
+test('completion and default cancellation receipts use the caller-observed request identity', () => {
+  const completion = /async complete\(caller, request\) \{[\s\S]*?\n  },\n  async release/.exec(daemon)?.[0] || ''
+  assert.match(completion,
+    /expectedProviderWorkGeneration:\s*request\.providerWorkGeneration/,
+    'completion must carry the generation observed by the worker instead of deriving mutable daemon state')
+  assert.doesNotMatch(completion, /const ingressTask|expectedProviderWorkGeneration = ingressTask/)
+
+  const cancel = /async cancel\(caller, request\) \{[\s\S]*?\n  },\n  async replace/.exec(daemon)?.[0] || ''
+  assert.match(cancel, /effectiveRequestId\s*=\s*request\.requestId\s*\|\|\s*`cancel:\$\{request\.taskId\}`/)
+  assert.match(cancel, /acceptedTeamMutation\(session, task, effectiveRequestId\)/)
 })
 
 test('Claude fallback polling cannot leak evidence or retain a revoked task poller', () => {
