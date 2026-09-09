@@ -403,6 +403,41 @@ test('delivery-time coordinator follow-up wins a concurrent worker report', () =
   assert.equal(publicTeamTask(task, 'C-MASTER').releaseReady, true)
 })
 
+test('bounded undelivered reports receive a fresh Slack idempotency identity', () => {
+  const { state, team } = fixture()
+  const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }
+  state.sessions[worker.id] = worker
+  state.channels[worker.channel] = worker.id
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Produce many progress reports.', requestId: 'bounded-reports',
+    id: 'task_bounded_reports', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: 3000 })
+
+  for (let generation = 1; generation <= 32; generation++) {
+    task.status = 'running'
+    task.providerWorkGeneration = generation
+    reportTeamTaskTurn(state, task.id, {
+      targetSessionId: worker.id, providerWorkGeneration: generation,
+      result: `Report ${generation}.`, now: 3000 + generation,
+    })
+  }
+  const displacedId = task.reports.at(-1).id
+  task.status = 'running'
+  task.providerWorkGeneration = 33
+  reportTeamTaskTurn(state, task.id, {
+    targetSessionId: worker.id, providerWorkGeneration: 33,
+    result: 'Report 33.', now: 4000,
+  })
+
+  assert.equal(task.reports.length, 32)
+  assert.notEqual(task.reports.at(-1).id, displacedId)
+  assert.equal(new Set(task.reports.map(report => report.id)).size, 32)
+  assert.equal(task.reports.at(-1).result, 'Report 33.')
+  assert.equal(task.reports.at(-1).coalescedCount, 2)
+})
+
 test('queued follow-ups recompute whether each delivery resumes the task', () => {
   const { state, team } = fixture()
   const worker = { id: 'worker-sid', channel: 'C-WORKER-1' }

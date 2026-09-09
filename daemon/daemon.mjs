@@ -86,7 +86,9 @@ import {
 } from './team-message-delivery.mjs'
 import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
-  discardPendingTeamProviderTurn, pendingTeamProviderTurn, providerPromptTurnMarker,
+  clearDeferredTeamProviderFinal, deferPendingTeamProviderFinal, deferredTeamProviderFinal,
+  discardPendingTeamProviderTurn, pendingTeamProviderTurn, providerPromptAcknowledgesTask,
+  providerPromptTurnMarker,
   providerTurnForTaskLifecycle,
   refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
   teamProviderPollerObservationCurrent,
@@ -1130,6 +1132,73 @@ function currentTeamTaskProviderTurn(session, body = null) {
   return tracked ? Object.freeze(tracked) : null
 }
 
+function deferFinalAcrossPendingTeamSubmission(session, provider, body) {
+  const turn = deferPendingTeamProviderFinal(session, {
+    provider,
+    providerTurnId: body?.turn_id || null,
+    observedAt: body?.observed_at || null,
+    lastAssistantMessage: body?.last_assistant_message || '',
+    usage: body?.usage || null,
+    contextUsage: body?.context_usage || null,
+  })
+  if (!turn) return null
+  saveStateNow(state)
+  log('deferred provider final across unresolved team input',
+    session.id.slice(0, 8), turn.taskId, turn.providerWorkGeneration)
+  return turn
+}
+
+async function flushDeferredTeamProviderFinal(session, expected = null) {
+  const deferred = deferredTeamProviderFinal(session, expected)
+  if (!deferred || pendingTeamProviderTurn(session, deferred)) return false
+  const key = `${session.id}\u0000${deferred.taskId}\u0000${deferred.providerWorkGeneration}`
+  if (teamDeferredFinalFlushes.has(key)) return false
+  teamDeferredFinalFlushes.add(key)
+  try {
+    const taskTurn = currentTeamTaskProviderTurn(session, {
+      turn_id: deferred.providerTurnId,
+      observed_at: deferred.observedAt,
+    })
+    if (!taskTurn || taskTurn.taskId !== deferred.taskId ||
+        taskTurn.providerWorkGeneration !== deferred.providerWorkGeneration) {
+      // A newer exact generation has superseded this retained final. It must not
+      // mutate that lifecycle, and keeping it would fence reconciliation forever.
+      const activeTask = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
+      if (!activeTask || teamTaskProviderWorkGeneration(activeTask) > deferred.providerWorkGeneration) {
+        clearDeferredTeamProviderFinal(session, deferred)
+        saveStateNow(state)
+      }
+      return false
+    }
+    const body = {
+      turn_id: deferred.providerTurnId,
+      observed_at: deferred.observedAt,
+      last_assistant_message: deferred.lastAssistantMessage,
+      usage: deferred.usage,
+      context_usage: deferred.contextUsage,
+    }
+    let finalized = false
+    if (deferred.provider === 'codex') finalized = await finalizeCodexTurn(session, body, taskTurn)
+    else if (deferred.provider === 'pi') finalized = await finalizePiTurn(session, body, taskTurn)
+    else finalized = await finalizeTurn(session, { teamTaskTurn: taskTurn })
+    if (finalized && deferredTeamProviderFinal(session, deferred)) {
+      clearDeferredTeamProviderFinal(session, deferred)
+      saveStateNow(state)
+      log('flushed deferred provider final', session.id.slice(0, 8), deferred.taskId,
+        deferred.providerWorkGeneration)
+    }
+    return Boolean(finalized)
+  } finally {
+    teamDeferredFinalFlushes.delete(key)
+  }
+}
+
+function scheduleDeferredTeamProviderFinal(session, expected = null) {
+  if (!deferredTeamProviderFinal(session, expected)) return
+  setImmediate(() => flushDeferredTeamProviderFinal(session, expected).catch(error =>
+    log('deferred team provider final flush failed', session.id.slice(0, 8), String(error?.message || error))))
+}
+
 function teamTaskTurnOwnsCurrentLifecycle(session, expected) {
   const taskId = session?.teamActiveTaskId || null
   if (!taskId) return expected == null
@@ -2134,12 +2203,14 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       currentTeamTaskProviderTurn(session, body)
     const injected = consumeInjected(sid, p)
     const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
-    const durablePromptTeamTurn = promptTeamTurn && submittedTeamTaskTurn &&
-      promptTeamTurn.taskId === submittedTeamTaskTurn.taskId &&
-      promptTeamTurn.providerWorkGeneration === submittedTeamTaskTurn.providerWorkGeneration
-    const acknowledgesTask = teamTaskId === task?.id ||
-      (promptTeamTurn?.taskId === task?.id &&
-        (injected || pendingPromptTeamTurn || durablePromptTeamTurn))
+    const acknowledgesTask = providerPromptAcknowledgesTask(session, {
+      taskId: task?.id,
+      currentGeneration: task ? teamTaskProviderWorkGeneration(task) : null,
+      promptTurn: promptTeamTurn,
+      submittedTurn: submittedTeamTaskTurn,
+      injected,
+      pending: Boolean(pendingPromptTeamTurn),
+    })
     const acknowledgedTurn = task && task.targetSessionId === session.id &&
       task.targetChannel === session.channel && acknowledgesTask &&
       submittedTeamTaskTurn?.taskId === task.id
@@ -2177,6 +2248,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
         beginCodexTurn(session, activation.startedAt, body.turn_id || null)
       }
       saveStateNow(state)
+      scheduleDeferredTeamProviderFinal(session, activeTurn)
       if (acknowledgedCoordinatorMessage?.message) {
         // This in-memory proof is deliberately recorded only after the atomic
         // state write. A racing transport error may trust it; locally mutated
@@ -2186,13 +2258,13 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
       saveStateNow(state)
     }
-    if (p && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
+    if (p && !acknowledgedTurn && !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
     const ch = session.channel || (await ensureChannel(session))
     if (acknowledgedCoordinatorMessage?.created) {
       await updateTeamTaskAudit(task).catch(error =>
         log('team coordinator message acknowledgement audit deferred', task.id, String(error?.message || error)))
     }
-    if (teamTaskId && session.teamActiveTaskId === teamTaskId) {
+    if (acknowledgedTurn && teamTaskId && session.teamActiveTaskId === teamTaskId) {
       try {
         const task = markTeamTaskRunning(state, teamTaskId)
         teamTurnProof.add(session.id)
@@ -2200,7 +2272,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
         await updateTeamTaskAudit(task)
       }
       catch (error) { log('team task prompt acknowledgement rejected', teamTaskId, String(error?.message || error)) }
-    } else if (teamTaskId && session.teamActiveTaskId) {
+    } else if (teamTaskId && session.teamActiveTaskId && teamTaskId !== session.teamActiveTaskId) {
       await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
     } else if (session.teamActiveTaskId && p && !automationEcho && !injected) {
       await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
@@ -2216,7 +2288,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
-    else if (provider === 'codex' && !acknowledgedTurn &&
+    else if (provider === 'codex' && !acknowledgedTurn && !promptTeamTurn &&
         !codexFinalAlreadyClaimed(session, body.turn_id)) {
       beginCodexTurn(session, body.observed_at || Date.now(), body.turn_id || null)
     }
@@ -2242,6 +2314,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
   }
   if (ev === 'Stop') {
     log('stop hook', session.id.slice(0, 8))
+    if (deferFinalAcrossPendingTeamSubmission(session, provider, body)) return
     // Capture delegated-work identity before the private-turn await yields. A
     // coordinator follow-up may complete provider delivery while an older Stop
     // hook is still posting its Slack output; that older final must retain its
@@ -3622,6 +3695,7 @@ async function injectText(session, text, options = {}) {
         'The provider accepted the delegated input, but SAB could not durably record its lifecycle. The input will not be retried.',
         cause, { accepted: true })
     }
+    scheduleDeferredTeamProviderFinal(session, activeTurn)
   }
   const discardExpectedTeamTurn = () => {
     if (discardPendingTeamProviderTurn(session, expectedTeamTurn)) saveStateNow(state)
@@ -3809,6 +3883,7 @@ const teamReportDeliveries = new Map()
 const teamMessageDeliveries = new Map()
 const teamMessageDeliveryTails = new Map()
 const teamCompletionDeliveries = new Map()
+const teamDeferredFinalFlushes = new Set()
 // Hook and direct transport handlers can interleave while tmux input is in
 // flight. Weak object identity proves that this exact journal mutation passed
 // a synchronous atomic write in the authenticated hook path.
@@ -3833,6 +3908,7 @@ function recordTeamWorkerProof(session, task) {
       }, { startedAt: Number.isFinite(claimedAt) ? claimedAt : Date.now() })
     : null
   if (activeTurn) refreshTeamTaskPoller(session, activeTurn)
+  if (activeTurn) scheduleDeferredTeamProviderFinal(session, activeTurn)
   if (providerOf(session) !== 'codex' || session.codexTurnStartedAt) return false
   session.codexTurnStartedAt = Number.isFinite(claimedAt) ? claimedAt : Date.now()
   delete session.codexUsageBaseline
@@ -4508,7 +4584,7 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
     }
     const activeTurn = activateSubmittedTurn()
     refreshTeamTaskPoller(target, activeTurn)
-    return
+    return activeTurn
   }
   // This is deliberately one transport attempt. tmuxPaste can become
   // uncertain after its buffer or Enter side effect; falling back to a channel
@@ -4522,6 +4598,7 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
   refreshTeamTaskPoller(target, activeTurn)
   if (expected.provider === 'claude') startPoller(target)
   else if (expected.provider === 'codex') ensureCodexTurnStarted(target, providerTurnStartedAt)
+  return activeTurn
 }
 
 async function performCoordinatorTaskMessageDelivery(task, message) {
@@ -4599,7 +4676,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_submitting')
     saveStateNow(state)
     providerAttempted = true
-    await injectCoordinatorTaskMessageOnce(task, target, expected, [
+    const submittedTurn = await injectCoordinatorTaskMessageOnce(task, target, expected, [
       `<sab-team-message task="${task.id}" generation="${providerTurn.providerWorkGeneration}" source="coordinator">`,
       '[Slack Agent Bridge coordinator message for your active delegated task]',
       message.text,
@@ -4609,6 +4686,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
     completeCoordinatorTaskMessageDelivery(state, task.id, message.id)
     if (message.resumesTask) noteTeamAvailability(target, 'coordinator_follow_up_delivered')
     saveStateNow(state)
+    scheduleDeferredTeamProviderFinal(target, submittedTurn)
     if (message.resumesTask) await updateTeamTaskAudit(task).catch(error =>
       log('team follow-up lifecycle audit deferred', task.id, String(error?.message || error)))
     return true
@@ -4840,6 +4918,15 @@ async function reconcileTeamTasks() {
     for (const anomaly of bindingRepair.anomalies) {
       log('team/session binding conflict retained fail-closed', anomaly.sessionId.slice(0, 8),
         anomaly.activeTaskId, anomaly.taskIds?.join(',') || anomaly.taskId)
+    }
+    // A daemon crash can occur after provider submission was promoted but
+    // before its overtaking final was flushed. Resume only a settled exact
+    // boundary; unresolved staged input remains fail-closed until native proof.
+    for (const session of Object.values(state.sessions || {})) {
+      const deferred = deferredTeamProviderFinal(session)
+      if (deferred && !pendingTeamProviderTurn(session, deferred)) {
+        scheduleDeferredTeamProviderFinal(session, deferred)
+      }
     }
     const tasks = Object.values(state.teamTasks || {}).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
     for (const task of tasks) {

@@ -283,7 +283,7 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(promptHook, /acknowledgedTurn[\s\S]*submittedTeamTaskTurn/)
   assert.match(promptHook, /providerPromptTurnMarker\(p\)[\s\S]*pendingPromptTeamTurn[\s\S]*pendingTeamProviderTurn/)
   assert.match(promptHook,
-    /promptTeamTurn\?\.taskId === task\?\.id[\s\S]*injected \|\| pendingPromptTeamTurn/,
+    /providerPromptAcknowledgesTask\(session,[\s\S]*promptTurn: promptTeamTurn[\s\S]*pending: Boolean\(pendingPromptTeamTurn\)/,
     'a durable exact pending generation must acknowledge coordinator input after restart')
   assert.match(claudeHook, /UserPromptSubmit[\s\S]*observed_at[\s\S]*--argjson observed_at/)
   assert.match(daemon, /failure\.retryable[\s\S]*deferCoordinatorTaskMessageDelivery\(state/)
@@ -463,6 +463,15 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
     /const acknowledgedTurnStillCurrent[\s\S]*activeTurn\.taskId === acknowledgedTurn\.taskId[\s\S]*activeTurn\.providerWorkGeneration === acknowledgedTurn\.providerWorkGeneration/)
   assert.match(promptHook,
     /provider === 'codex' && acknowledgedTurnStillCurrent[\s\S]*!codexFinalAlreadyClaimed\(session, body\.turn_id\)[\s\S]*beginCodexTurn\(session, activation\.startedAt, body\.turn_id \|\| null\)/)
+  assert.match(promptHook,
+    /providerPromptAcknowledgesTask\(session,[\s\S]*currentGeneration: task \? teamTaskProviderWorkGeneration\(task\) : null/,
+  'provider prompt acknowledgements must match the exact current generation')
+  assert.match(promptHook,
+    /if \(p && !acknowledgedTurn && !\(teamTaskId && session\.teamActiveTaskId === teamTaskId\)\) reserveTeamInput/,
+  'a delayed authenticated team acknowledgement must not recreate an input reservation')
+  assert.match(daemon,
+    /deferPendingTeamProviderFinal[\s\S]*flushDeferredTeamProviderFinal/,
+  'a final racing staged provider submission must be retained until promotion settles')
 })
 
 test('team mutation responses carry the journaled receipt from the original authority check', () => {

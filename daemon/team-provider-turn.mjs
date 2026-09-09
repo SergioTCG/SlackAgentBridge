@@ -59,8 +59,12 @@ function rememberPrevious(session, value) {
   const history = Array.isArray(session.teamProviderTurnHistory)
     ? session.teamProviderTurnHistory.filter(item => item?.taskId && Number(item?.providerWorkGeneration) > 0)
     : []
-  const duplicate = history.findIndex(item => item.providerTurnId &&
-    item.providerTurnId === value.providerTurnId)
+  // Coordinator follow-ups can deliberately steer one native provider turn,
+  // so several work generations may share its native ID. Collapse only the
+  // same logical task generation; dropping an older generation would make a
+  // delayed final impossible to fence by its observation boundary.
+  const duplicate = history.findIndex(item => item.taskId === value.taskId &&
+    Number(item.providerWorkGeneration) === value.providerWorkGeneration)
   if (duplicate >= 0) history.splice(duplicate, 1)
   history.push(value)
   session.teamProviderTurnHistory = history.slice(-HISTORY_LIMIT)
@@ -83,11 +87,12 @@ export function stageTeamProviderTurn(session, turn, { now = Date.now() } = {}) 
   return publicTurn(staged)
 }
 
-export function discardPendingTeamProviderTurn(session, expected = null) {
+export function discardPendingTeamProviderTurn(session, expected = null, { preserveDeferred = false } = {}) {
   const pending = session?.teamProviderTurnPending
   if (!pending) return false
   if (expected && (pending.taskId !== expected.taskId ||
       pending.providerWorkGeneration !== expected.providerWorkGeneration)) return false
+  if (!preserveDeferred) clearDeferredTeamProviderFinal(session, pending)
   delete session.teamProviderTurnPending
   return true
 }
@@ -100,6 +105,70 @@ export function pendingTeamProviderTurn(session, expected = null) {
   if (expected?.providerWorkGeneration != null &&
       pending.providerWorkGeneration !== Number(expected.providerWorkGeneration)) return null
   return publicTurn(pending)
+}
+
+function clonedJsonObject(value) {
+  if (!value || typeof value !== 'object') return null
+  try { return JSON.parse(JSON.stringify(value)) }
+  catch { return null }
+}
+
+// A Stop/final can overtake the callback that settles a multi-step provider
+// input write. Preserve that final behind the exact staged generation instead
+// of borrowing the preceding generation or dropping it. The daemon releases
+// this journal only after the submission is promoted or provably rejected.
+export function deferPendingTeamProviderFinal(session, {
+  provider,
+  providerTurnId = null,
+  observedAt = null,
+  lastAssistantMessage = '',
+  usage = null,
+  contextUsage = null,
+} = {}) {
+  const pending = normalizedTurn(session?.teamProviderTurnPending,
+    session?.teamProviderTurnPending?.stagedAt)
+  if (!session || !pending || !['claude', 'codex', 'pi'].includes(provider)) return null
+  const observed = Number(observedAt)
+  if (Number.isSafeInteger(observed) && observed > 0 && observed < pending.startedAt) return null
+  const existing = session.teamProviderTurnDeferredFinal
+  if (existing && (existing.taskId !== pending.taskId ||
+      Number(existing.providerWorkGeneration) !== pending.providerWorkGeneration)) return null
+  session.teamProviderTurnDeferredFinal = {
+    taskId: pending.taskId,
+    providerWorkGeneration: pending.providerWorkGeneration,
+    provider,
+    providerTurnId: providerTurnId ? String(providerTurnId) : null,
+    observedAt: Number.isSafeInteger(observed) && observed > 0 ? observed : null,
+    lastAssistantMessage: String(lastAssistantMessage || existing?.lastAssistantMessage || ''),
+    usage: clonedJsonObject(usage) || existing?.usage || null,
+    contextUsage: clonedJsonObject(contextUsage) || existing?.contextUsage || null,
+  }
+  return publicTurn(pending)
+}
+
+export function deferredTeamProviderFinal(session, expected = null) {
+  const record = session?.teamProviderTurnDeferredFinal
+  const turn = normalizedTurn(record, record?.observedAt || Date.now(), record?.providerTurnId)
+  if (!record || !turn || !['claude', 'codex', 'pi'].includes(record.provider)) return null
+  if (expected && (turn.taskId !== expected.taskId ||
+      turn.providerWorkGeneration !== Number(expected.providerWorkGeneration))) return null
+  return {
+    ...publicTurn(turn),
+    provider: record.provider,
+    providerTurnId: record.providerTurnId ? String(record.providerTurnId) : null,
+    observedAt: Number.isSafeInteger(Number(record.observedAt)) && Number(record.observedAt) > 0
+      ? Number(record.observedAt) : null,
+    lastAssistantMessage: String(record.lastAssistantMessage || ''),
+    usage: clonedJsonObject(record.usage),
+    contextUsage: clonedJsonObject(record.contextUsage),
+  }
+}
+
+export function clearDeferredTeamProviderFinal(session, expected = null) {
+  const record = deferredTeamProviderFinal(session, expected)
+  if (!record) return false
+  delete session.teamProviderTurnDeferredFinal
+  return true
 }
 
 // Promote only the exact durable generation staged before provider delivery.
@@ -133,6 +202,25 @@ export function providerPromptTurnMarker(prompt) {
   return { taskId, providerWorkGeneration }
 }
 
+export function providerPromptAcknowledgesTask(session, {
+  taskId,
+  currentGeneration,
+  promptTurn,
+  submittedTurn,
+  injected = false,
+  pending = false,
+} = {}) {
+  const generation = Number(currentGeneration)
+  if (!taskId || promptTurn?.taskId !== taskId || !Number.isSafeInteger(generation) || generation < 1) return false
+  const exactGeneration = promptTurn.providerWorkGeneration === generation
+  const legacyGeneration = promptTurn.providerWorkGeneration == null && generation === 1 &&
+    !hasTeamProviderTurnTracking(session)
+  const durableTurn = submittedTurn?.taskId === taskId &&
+    submittedTurn.providerWorkGeneration === promptTurn.providerWorkGeneration
+  return (exactGeneration || legacyGeneration) &&
+    (injected || pending || durableTurn || legacyGeneration)
+}
+
 export function activateTeamProviderTurn(session, {
   turn = null,
   providerTurnId = null,
@@ -157,7 +245,7 @@ export function activateTeamProviderTurn(session, {
       session.teamProviderTurn = { ...current, providerTurnId: next.providerTurnId }
     }
     rememberPrevious(session, next)
-    discardPendingTeamProviderTurn(session, next)
+    discardPendingTeamProviderTurn(session, next, { preserveDeferred: true })
     return publicTurn(session.teamProviderTurn || current)
   }
   if (current && sameLogicalTurn(current, next)) {
@@ -170,7 +258,7 @@ export function activateTeamProviderTurn(session, {
     rememberPrevious(session, current)
     session.teamProviderTurn = next
   }
-  discardPendingTeamProviderTurn(session, next)
+  discardPendingTeamProviderTurn(session, next, { preserveDeferred: true })
   return publicTurn(session.teamProviderTurn)
 }
 
@@ -178,10 +266,11 @@ export function retireTeamProviderTurn(session) {
   if (!session) return false
   const current = normalizedTurn(session.teamProviderTurn,
     session.teamProviderTurn?.startedAt, session.teamProviderTurn?.providerTurnId)
-  const changed = Boolean(current || session.teamProviderTurnPending)
+  const changed = Boolean(current || session.teamProviderTurnPending || session.teamProviderTurnDeferredFinal)
   rememberPrevious(session, current)
   delete session.teamProviderTurn
   delete session.teamProviderTurnPending
+  delete session.teamProviderTurnDeferredFinal
   return changed
 }
 

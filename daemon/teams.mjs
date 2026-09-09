@@ -720,14 +720,22 @@ export function reportTeamTaskTurn(state, taskId, {
   if (task.reports.length >= TEAM_MAX_REPORTS) {
     // Slack may be unavailable for many turns. Keep bounded state and preserve
     // the newest authoritative report without rejecting provider finalization.
-    report = task.reports.at(-1)
-    report.result = task.result
-    report.warning = task.warning
-    report.workGeneration = observedGeneration
-    report.deliveryStatus = 'pending'
-    report.deliveryError = null
-    report.coalescedCount = Number(report.coalescedCount || 1) + 1
-    report.createdAt = nowIso(now)
+    // A prior Slack request may have succeeded while its response was lost, so
+    // updated content must never reuse that request's client_msg_id.
+    const displaced = task.reports.at(-1)
+    report = {
+      id: randomId('report'),
+      result: task.result,
+      warning: task.warning,
+      workGeneration: observedGeneration,
+      deliveryStatus: 'pending',
+      deliveryError: null,
+      slackTs: null,
+      supersedesReportId: displaced.id,
+      coalescedCount: Number(displaced.coalescedCount || 1) + 1,
+      createdAt: nowIso(now),
+    }
+    task.reports[task.reports.length - 1] = report
   } else {
     report = {
       id: randomId('report'),

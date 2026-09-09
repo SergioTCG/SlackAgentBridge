@@ -3,9 +3,10 @@ import assert from 'node:assert/strict'
 
 import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
-  discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
+  clearDeferredTeamProviderFinal, deferPendingTeamProviderFinal,
+  deferredTeamProviderFinal, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
   pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
-  providerTurnForTaskLifecycle,
+  providerPromptAcknowledgesTask, providerTurnForTaskLifecycle,
   refreshTeamProviderPollerTurn, retireTeamProviderTurn, stageTeamProviderTurn,
   teamProviderPollerObservationCurrent,
 } from '../daemon/team-provider-turn.mjs'
@@ -159,6 +160,10 @@ test('a delayed initial acknowledgement cannot promote a newer pending generatio
   assert.deepEqual(pendingTeamProviderTurn(session, {
     taskId: 'task_one', providerWorkGeneration: 2,
   }), { taskId: 'task_one', providerWorkGeneration: 2 })
+  assert.equal(providerPromptAcknowledgesTask(session, {
+    taskId: 'task_one', currentGeneration: 2, promptTurn: initial,
+    submittedTurn: { taskId: 'task_one', providerWorkGeneration: 2 }, injected: true,
+  }), false)
 })
 
 test('steered native turns resolve the newest generation without delayed-hook rollback', () => {
@@ -193,6 +198,71 @@ test('steered native turns resolve the newest generation without delayed-hook ro
   assert.deepEqual(providerTurnForCompletion(session, {
     providerTurnId: 'shared-turn',
   }), { taskId: 'task_one', providerWorkGeneration: 2 })
+})
+
+test('bounded history preserves distinct generations that share one native turn id', () => {
+  const session = {}
+  for (let generation = 1; generation <= 3; generation++) {
+    stageTeamProviderTurn(session, {
+      taskId: 'task_one', providerWorkGeneration: generation,
+      inheritProviderTurnId: generation > 1,
+    }, { now: generation * 1000 })
+    activatePendingTeamProviderTurn(session, {
+      taskId: 'task_one', providerWorkGeneration: generation,
+    }, { providerTurnId: 'shared-turn' })
+  }
+
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'shared-turn', observedAt: 1500,
+  }), { taskId: 'task_one', providerWorkGeneration: 1 })
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'shared-turn', observedAt: 2500,
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
+  assert.deepEqual(providerTurnForCompletion(session, {
+    providerTurnId: 'shared-turn', observedAt: 3500,
+  }), { taskId: 'task_one', providerWorkGeneration: 3 })
+})
+
+test('a provider final crossing an unresolved submission boundary is retained durably', () => {
+  const session = {}
+  stageTeamProviderTurn(session, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { now: 2000 })
+
+  assert.equal(deferPendingTeamProviderFinal(session, {
+    provider: 'codex', providerTurnId: 'old-turn', observedAt: 1500,
+    lastAssistantMessage: 'Old final.',
+  }), null)
+  assert.deepEqual(deferPendingTeamProviderFinal(session, {
+    provider: 'codex', providerTurnId: 'turn-two', observedAt: 2100,
+    lastAssistantMessage: 'Fast final.',
+  }), { taskId: 'task_one', providerWorkGeneration: 2 })
+
+  const recovered = JSON.parse(JSON.stringify(session))
+  assert.deepEqual(deferredTeamProviderFinal(recovered, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }), {
+    taskId: 'task_one',
+    providerWorkGeneration: 2,
+    provider: 'codex',
+    providerTurnId: 'turn-two',
+    observedAt: 2100,
+    lastAssistantMessage: 'Fast final.',
+    usage: null,
+    contextUsage: null,
+  })
+  activatePendingTeamProviderTurn(recovered, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }, { providerTurnId: 'turn-two' })
+  assert.equal(pendingTeamProviderTurn(recovered), null)
+  assert.equal(deferredTeamProviderFinal(recovered)?.lastAssistantMessage, 'Fast final.')
+  assert.equal(clearDeferredTeamProviderFinal(recovered, {
+    taskId: 'task_one', providerWorkGeneration: 1,
+  }), false)
+  assert.equal(clearDeferredTeamProviderFinal(recovered, {
+    taskId: 'task_one', providerWorkGeneration: 2,
+  }), true)
+  assert.equal(deferredTeamProviderFinal(recovered), null)
 })
 
 test('an inherited native turn id remains provisional for a distinct follow-up turn', () => {

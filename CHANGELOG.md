@@ -78,6 +78,12 @@ Notable changes to this project. Format based on
 - Native Codex prompt identities now give each newer turn its own lifecycle
   timestamp without losing the same turn's earlier transport boundary, and an
   accepted team-task retry remains queryable after its worker is removed.
+- Exact provider acknowledgements now require the current work generation,
+  overtaking finals remain durably deferred until their staged input settles,
+  and late Codex prompt hooks cannot recreate a released input reservation.
+- Follow-up generations sharing one native provider turn retain distinct
+  history entries, while coalesced undelivered reports receive fresh Slack
+  idempotency identities instead of reusing an earlier accepted request.
 - Legacy tasks retain their historical 32-reply capacity, while a saturated
   cancellation journal rejects reuse of its terminal request ID with a changed
   payload.
