@@ -296,6 +296,12 @@ test('provider turn reporting preserves task and process ownership until explici
     /teamTaskTurnOwnsCurrentLifecycle[\s\S]*stopPoller[\s\S]*waitTranscriptSettle[\s\S]*teamTaskTurnOwnsCurrentLifecycle[\s\S]*readNewAssistantText/)
   assert.match(claudeFinal,
     /!teamTaskTurnOwnsCurrentLifecycle[\s\S]*discardStaleClaudeTeamTurnTranscript[\s\S]*return false/)
+  const firstStaleCheck = claudeFinal.indexOf('if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn))')
+  const firstStaleSettle = claudeFinal.indexOf('await waitTranscriptSettle', firstStaleCheck)
+  const firstStaleDiscard = claudeFinal.indexOf('discardStaleClaudeTeamTurnTranscript', firstStaleCheck)
+  assert.ok(firstStaleCheck >= 0 && firstStaleSettle > firstStaleCheck &&
+    firstStaleDiscard > firstStaleSettle,
+  'a stale Claude Stop must settle its transcript before advancing past the old generation')
   assert.ok(claudeFinal.indexOf('teamTaskTurnOwnsCurrentLifecycle') < claudeFinal.indexOf('readNewAssistantText'),
     'a stale Claude final must be rejected before transcript consumption')
   const codexFinal = /async function finalizeCodexTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
@@ -531,6 +537,17 @@ test('restart flushes settled deferred finals before idle re-adoption can fail t
   assert.match(helper, /deferredTeamProviderFinal\(session\)[\s\S]*pendingTeamProviderTurn\(session, deferred\)[\s\S]*continue/)
   assert.match(helper, /await flushDeferredTeamProviderFinal\(session, deferred\)/,
     'boot must await the durable final rather than scheduling it behind re-adoption')
+  assert.match(helper,
+    /const retained = new Set\(\)[\s\S]*deferredTeamProviderFinal\(session, deferred\)[\s\S]*retained\.add\(remaining\.taskId\)[\s\S]*return retained/,
+  'a transient flush failure must return a durable task fence')
+
+  const reconcile = daemon.slice(
+    daemon.indexOf('async function reconcileTeamTasks('),
+    daemon.indexOf('function startTeamReconciler('),
+  )
+  assert.match(reconcile,
+    /const deferredFinalFences = await flushSettledDeferredTeamProviderFinals\(\)[\s\S]*if \(deferredFinalFences\.has\(task\.id\)\) continue/,
+  'authority-loss reconciliation must not discard a durably captured final after a transient flush failure')
 })
 
 test('restored durable task bindings refresh poller lifecycle snapshots', () => {

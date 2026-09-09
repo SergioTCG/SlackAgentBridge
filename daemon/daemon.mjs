@@ -1195,6 +1195,7 @@ async function flushDeferredTeamProviderFinal(session, expected = null) {
 }
 
 async function flushSettledDeferredTeamProviderFinals() {
+  const retained = new Set()
   for (const session of Object.values(state.sessions || {})) {
     const deferred = deferredTeamProviderFinal(session)
     if (!deferred || pendingTeamProviderTurn(session, deferred)) continue
@@ -1207,7 +1208,10 @@ async function flushSettledDeferredTeamProviderFinals() {
       log('settled deferred team final flush failed', session.id.slice(0, 8),
         deferred.taskId, String(error?.message || error))
     }
+    const remaining = deferredTeamProviderFinal(session, deferred)
+    if (remaining && !pendingTeamProviderTurn(session, remaining)) retained.add(remaining.taskId)
   }
+  return retained
 }
 
 function scheduleDeferredTeamProviderFinal(session, expected = null) {
@@ -1238,6 +1242,11 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
   const finalization = (async () => {
     if (!teamTaskTurnOwnsCurrentLifecycle(session, teamTaskTurn)) {
       log('ignored stale Claude final before lifecycle mutation', session.id.slice(0, 8), teamTaskTurn?.providerWorkGeneration)
+      // Claude may emit Stop before its final transcript line is complete. If
+      // the lifecycle already advanced, settle that old line before moving the
+      // offset to the next generation marker; otherwise the newer finalizer can
+      // consume and report both generations together.
+      if (session.transcript) await waitTranscriptSettle(session.transcript)
       if (teamTaskTurn && discardStaleClaudeTeamTurnTranscript(session, teamTaskTurn)) saveStateNow(state)
       return false
     }
@@ -4979,16 +4988,15 @@ async function reconcileTeamTasks() {
         anomaly.activeTaskId, anomaly.taskIds?.join(',') || anomaly.taskId)
     }
     // A daemon crash can occur after provider submission was promoted but
-    // before its overtaking final was flushed. Resume only a settled exact
-    // boundary; unresolved staged input remains fail-closed until native proof.
-    for (const session of Object.values(state.sessions || {})) {
-      const deferred = deferredTeamProviderFinal(session)
-      if (deferred && !pendingTeamProviderTurn(session, deferred)) {
-        scheduleDeferredTeamProviderFinal(session, deferred)
-      }
-    }
+    // before its overtaking final was flushed. Consume settled exact boundaries
+    // synchronously before authority-loss checks. A transient Slack/state error
+    // retains a task fence for this sweep, so a recoverable captured final can
+    // never be discarded by provider-loss or restart-timeout reconciliation.
+    // Unresolved staged input remains fail-closed until native proof.
+    const deferredFinalFences = await flushSettledDeferredTeamProviderFinals()
     const tasks = Object.values(state.teamTasks || {}).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
     for (const task of tasks) {
+      if (deferredFinalFences.has(task.id)) continue
       const terminal = isTerminalTeamTask(task)
       // Tasks written by the first session-team implementation predate the
       // durable completion-delivery claim. Their terminal result was already

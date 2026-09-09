@@ -122,6 +122,9 @@ Notable changes to this project. Format based on
 - Restart recovery now flushes settled durable provider finals before idle
   re-adoption, preserves any final whose side effects still need retrying, and
   refreshes pre-existing Claude/Codex pollers after repairing task bindings.
+- Stale Claude Stop events now wait for transcript settlement before advancing
+  past their generation, and reconciliation fences a task while a durably
+  captured provider final remains pending after a transient flush failure.
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.
