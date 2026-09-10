@@ -31,6 +31,13 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex sessions resume again under Codex >= 0.154, which refuses a permission
+  override when resuming a remote (app-server) task ("Permission overrides are
+  not supported when resuming a remote task") and so crashed every bridge Codex
+  resume at startup. On a remote resume the launcher now applies the permission
+  posture to the app-server and strips the override from the resume client,
+  preserving Full Access while the resume proceeds; the direct fallback still
+  carries the override.
 - Fresh Codex automations no longer deadlock while waiting for a deferred
   `SessionStart`. The typed root App Server `thread/started` event can bootstrap
   only the exact pending automation through the existing fenced SessionStart

@@ -151,7 +151,36 @@ run_codex() {
     direct_codex "$@"
   }
 
-  codex app-server --listen ws://127.0.0.1:0 >"$app_log" 2>&1 & app_pid=$!
+  # Codex >= 0.154 refuses a permission-override flag when resuming a REMOTE
+  # (app-server) task: "Permission overrides are not supported when resuming a
+  # remote task." New remote tasks still accept it, and the direct fallback
+  # below accepts it too. So only on a remote resume: move the override off the
+  # client and onto the app-server, which sets the hosted task's permissions
+  # instead. The resumed session keeps the same posture
+  # (--yolo/--dangerously-bypass-approvals-and-sandbox -> Full Access) while the
+  # resume is allowed to proceed. Non-resume launches are left untouched.
+  app_policy_args=()
+  remote_args=("$@")
+  if [ "${1:-}" = "resume" ]; then
+    filtered=()
+    stripped_override=0
+    for arg in "$@"; do
+      case "$arg" in
+        --yolo|--dangerously-bypass-approvals-and-sandbox) stripped_override=1 ;;
+        *) filtered+=("$arg") ;;
+      esac
+    done
+    if [ "$stripped_override" = 1 ]; then
+      remote_args=("${filtered[@]}")
+      app_policy_args=(-c sandbox_mode=danger-full-access -c approval_policy=never)
+    fi
+  fi
+
+  if [ "${#app_policy_args[@]}" -gt 0 ]; then
+    codex app-server --listen ws://127.0.0.1:0 "${app_policy_args[@]}" >"$app_log" 2>&1 & app_pid=$!
+  else
+    codex app-server --listen ws://127.0.0.1:0 >"$app_log" 2>&1 & app_pid=$!
+  fi
   app_url="$(wait_for_url "$app_log" "$app_pid")" || fallback_to_direct "$@"
   node "$BRIDGE/scripts/codex-event-proxy.mjs" \
     --upstream "$app_url" --agent-pid "$app_pid" --tmux "$CCS_TMUX" >"$proxy_log" 2>&1 & proxy_pid=$!
@@ -160,7 +189,7 @@ run_codex() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  codex --remote "$proxy_url" "${codex_tui_args[@]}" "$@"
+  codex --remote "$proxy_url" "${codex_tui_args[@]}" "${remote_args[@]}"
 }
 
 run_pi() {
