@@ -102,6 +102,7 @@ const CODEX_FLAGS = new Set([
 const CODEX_VALUE_FLAGS = [
   '--model=', '--sandbox=', '--ask-for-approval=',
 ]
+const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
 
 // Pi's built-in tools are unrestricted by default. `--approve` controls only
 // project-local resources; `--safe` is consumed by `sab new pi` and enables the SAB
@@ -138,9 +139,10 @@ export function normalizeLaunchFlag(provider, flag) {
 
 // Validate an argv vector coming from a local HTTP client. Keep this in the
 // provider adapter so /spawn and durable automation cannot slowly diverge into
-// different remote-launch allowlists. Claude historically accepts model and
-// effort as two argv items; the other providers deliberately require inline
-// values so a value can never be reinterpreted as another option.
+// different remote-launch allowlists. Script clients may use Codex's familiar
+// `--model VALUE --effort VALUE` syntax; normalize those two strictly validated
+// pairs into the narrow native argv accepted by the provider. Arbitrary Codex
+// `--config` remains forbidden.
 export function normalizeRemoteLaunchFlags(provider, input) {
   if (!Array.isArray(input)) throw new Error('flags must be an array')
   if (input.length > 64) throw new Error('too many launch flags')
@@ -150,6 +152,26 @@ export function normalizeRemoteLaunchFlags(provider, input) {
       throw new Error('every launch flag must be a non-empty string')
     }
     const raw = input[i]
+    if (provider === 'codex' && (raw === '--model' || raw === '--effort')) {
+      const value = input[++i]
+      if (typeof value !== 'string' || !value || value.startsWith('-') || value.includes('\0') || value.length > 128) {
+        throw new Error(`missing or invalid value for ${raw}`)
+      }
+      if (raw === '--model') {
+        if (!MODEL_VALUE.test(value)) throw new Error(`invalid Codex model: ${value}`)
+        flags.push(`--model=${value}`)
+      } else {
+        if (!CODEX_EFFORTS.includes(value)) throw new Error(`invalid Codex effort: ${value}`)
+        flags.push('--config', `model_reasoning_effort=${JSON.stringify(value)}`)
+      }
+      continue
+    }
+    if (provider === 'codex' && raw.startsWith('--effort=')) {
+      const value = raw.slice('--effort='.length)
+      if (!CODEX_EFFORTS.includes(value)) throw new Error(`invalid Codex effort: ${value}`)
+      flags.push('--config', `model_reasoning_effort=${JSON.stringify(value)}`)
+      continue
+    }
     const normalized = normalizeLaunchFlag(provider, raw)
     if (!normalized) throw new Error(`flag not allowed: ${raw}`)
     if (provider === 'claude' && normalized.startsWith('--effort=')) {
@@ -158,7 +180,11 @@ export function normalizeRemoteLaunchFlags(provider, input) {
     }
     if (provider === 'claude' && normalized.startsWith('--model=')) {
       const value = normalized.slice('--model='.length)
-      if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) throw new Error(`invalid Claude model: ${value}`)
+      if (!MODEL_VALUE.test(value)) throw new Error(`invalid Claude model: ${value}`)
+    }
+    if (provider === 'codex' && normalized.startsWith('--model=')) {
+      const value = normalized.slice('--model='.length)
+      if (!MODEL_VALUE.test(value)) throw new Error(`invalid Codex model: ${value}`)
     }
     flags.push(normalized)
     if (provider === 'claude' && (normalized === '--model' || normalized === '--effort')) {
@@ -169,7 +195,7 @@ export function normalizeRemoteLaunchFlags(provider, input) {
       if (normalized === '--effort' && !['low', 'medium', 'high', 'max'].includes(value)) {
         throw new Error(`invalid Claude effort: ${value}`)
       }
-      if (normalized === '--model' && !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) {
+      if (normalized === '--model' && !MODEL_VALUE.test(value)) {
         throw new Error(`invalid Claude model: ${value}`)
       }
       flags.push(value)

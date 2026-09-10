@@ -60,6 +60,14 @@ test('event proxy forwards every frame and reports commentary plus completed fin
     await once(client, 'open')
     const [serverSocket] = await serverConnection
     const frames = [
+      { method: 'thread/started', params: { thread: {
+        id: 'thread-1', parentThreadId: null, cwd: '/Users/test/Code/worktree',
+        model: 'gpt-5.6-sol', reasoningEffort: 'xhigh',
+      } } },
+      { method: 'thread/started', params: { thread: {
+        id: 'thread-child', parentThreadId: 'thread-1', cwd: '/Users/test/Code/worktree',
+        model: 'gpt-5.6-sol', reasoningEffort: 'xhigh',
+      } } },
       { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { id: 'comment-1', type: 'agentMessage', phase: 'commentary', text: 'The remote job remains healthy.' } } },
       { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { id: 'final-1', type: 'agentMessage', phase: 'final_answer', text: 'Done.' } } },
       { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { id: 'command-1', type: 'commandExecution', command: 'git diff' } } },
@@ -78,17 +86,23 @@ test('event proxy forwards every frame and reports commentary plus completed fin
     ]
     const received = []
     client.on('message', data => received.push(JSON.parse(data.toString())))
-    for (const frame of frames.slice(0, 4)) serverSocket.send(JSON.stringify(frame))
-    await waitFor(() => deliveries.length === 1 && received.length === 4)
+    for (const frame of frames.slice(0, 6)) serverSocket.send(JSON.stringify(frame))
+    await waitFor(() => deliveries.length === 2 && received.length === 6)
     assert.equal(deliveries.some(delivery => delivery.url.startsWith('/codex/final')), false,
       'a final item must remain staged until its turn completes')
-    for (const frame of frames.slice(4)) serverSocket.send(JSON.stringify(frame))
+    for (const frame of frames.slice(6)) serverSocket.send(JSON.stringify(frame))
 
-    await waitFor(() => deliveries.length === 3 && received.length === frames.length)
+    await waitFor(() => deliveries.length === 4 && received.length === frames.length)
     assert.deepEqual(received, frames)
+    const bootstraps = deliveries.filter(delivery => delivery.url.startsWith('/codex/bootstrap'))
     const commentary = deliveries.find(delivery => delivery.url.startsWith('/codex/commentary'))
     const finals = deliveries.filter(delivery => delivery.url.startsWith('/codex/final'))
     assert.equal(commentary.provider, 'codex')
+    assert.equal(bootstraps.length, 1, 'subagent threads must not register as SAB sessions')
+    assert.match(bootstraps[0].url, /^\/codex\/bootstrap\?ppid=\d+&tmux=ccs-test$/)
+    assert.deepEqual(bootstraps[0].body, {
+      threadId: 'thread-1', cwd: '/Users/test/Code/worktree', model: 'gpt-5.6-sol', effort: 'xhigh',
+    })
     assert.match(commentary.url, /^\/codex\/commentary\?ppid=\d+&tmux=ccs-test$/)
     assert.deepEqual(commentary.body, {
       threadId: 'thread-1', turnId: 'turn-1', itemId: 'comment-1', text: 'The remote job remains healthy.',

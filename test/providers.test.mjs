@@ -9,7 +9,7 @@ import {
   PI_EXACT_SESSION_CONTROL_CAPABILITY, claudeModelPickerOptions,
   codexStatusRecoveryDecision, defaultNewFlagsFor, displayFlagsFor, executableCacheKey, isPathWithin,
   parsePiStreamCapabilities, piMutableControlAllowed,
-  isSupersededHook, normalizeLaunchFlag,
+  isSupersededHook, normalizeLaunchFlag, normalizeRemoteLaunchFlags,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
   submitTargetValidation, waitForCodexInterrupt,
@@ -87,6 +87,25 @@ test('Codex flags require an allowlisted switch or inline value', () => {
   assert.equal(normalizeLaunchFlag('codex', '--config=features.hooks=false'), null)
   assert.equal(normalizeLaunchFlag('codex', '--add-dir=/'), null)
   assert.equal(normalizeLaunchFlag('codex', '--dangerously-bypass-hook-trust'), null)
+})
+
+test('Codex remote launch flags safely normalize script-friendly model and effort pairs', () => {
+  assert.deepEqual(normalizeRemoteLaunchFlags('codex', [
+    '--model', 'gpt-5.6-sol', '--effort', 'xhigh', '--yolo',
+  ]), [
+    '--model=gpt-5.6-sol', '--config', 'model_reasoning_effort="xhigh"',
+    CODEX_DANGEROUS_FLAG,
+  ])
+  assert.deepEqual(normalizeRemoteLaunchFlags('codex', [
+    '--model=gpt-5.6-sol', '--effort=high',
+  ]), [
+    '--model=gpt-5.6-sol', '--config', 'model_reasoning_effort="high"',
+  ])
+  for (const flags of [
+    ['--model'], ['--model', '--search'], ['--model', 'bad model'],
+    ['--effort'], ['--effort', '--search'], ['--effort', 'extreme'],
+    ['--config', 'model_reasoning_effort="xhigh"'],
+  ]) assert.throws(() => normalizeRemoteLaunchFlags('codex', flags))
 })
 
 test('Pi flags separate project trust and bridge safe mode from unrestricted native tools', () => {

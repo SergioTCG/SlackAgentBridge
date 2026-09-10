@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { WebSocket, WebSocketServer } from 'ws'
 import {
+  codexAutomationBootstrapFromAppServerMessage,
   codexFinalFromAppServerMessage,
   commentaryFromAppServerMessage,
   finalAnswerItemFromAppServerMessage,
@@ -30,6 +31,8 @@ daemonUrl.searchParams.set('ppid', String(agentPid))
 daemonUrl.searchParams.set('tmux', tmux)
 const finalDaemonUrl = new URL(daemonUrl)
 finalDaemonUrl.pathname = '/codex/final'
+const bootstrapDaemonUrl = new URL(daemonUrl)
+bootstrapDaemonUrl.pathname = '/codex/bootstrap'
 const deliveries = new Map()
 let deliveryTail = Promise.resolve()
 let shuttingDown = false
@@ -38,6 +41,10 @@ let stableDeliveryFailure = null
 let resolveShutdownSignal
 const shutdownSignal = new Promise(resolve => { resolveShutdownSignal = resolve })
 const retryDelays = [0, 250, 1000, 3000, 7000, 15000]
+const bootstrapRetryDelays = [
+  0, 250, 1000, 3000, 7000, 15000,
+  30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000,
+]
 const SHUTDOWN_DRAIN_MS = 30000
 const pendingFinalAnswers = new Map()
 const MAX_PENDING_FINALS = 128
@@ -45,7 +52,7 @@ const MAX_PENDING_FINALS = 128
 async function waitForRetry(delay, label) {
   if (shuttingDown && label === 'commentary') return false
   if (!delay) return true
-  if (label === 'final') {
+  if (label === 'final' || label === 'bootstrap') {
     // Stable finals retain their real backoff even after SIGTERM. Collapsing
     // retries into a burst makes transient daemon/Slack pressure permanent.
     await new Promise(resolve => setTimeout(resolve, delay))
@@ -88,7 +95,7 @@ function deliver({ key, payload, endpoint, label }) {
   // exact order in which inspectFrame accepted them.
   const pending = deliveryTail.then(async () => {
     let lastFailure = null
-    for (const delay of retryDelays) {
+    for (const delay of label === 'bootstrap' ? bootstrapRetryDelays : retryDelays) {
       if (!(await waitForRetry(delay, label))) return
       try {
         const response = await postDelivery(endpoint, payload, label)
@@ -100,13 +107,14 @@ function deliver({ key, payload, endpoint, label }) {
       }
       if (shuttingDown && label === 'commentary') return
     }
-    const failure = new Error(`${label} delivery failed (${payload.itemId.slice(0, 12)}): ${String(lastFailure?.message || 'retry budget exhausted')}`)
+    const identity = String(payload.itemId || payload.threadId || 'unknown').slice(0, 12)
+    const failure = new Error(`${label} delivery failed (${identity}): ${String(lastFailure?.message || 'retry budget exhausted')}`)
     process.stderr.write(`sab Codex event proxy: ${failure.message}\n`)
-    if (label === 'final') throw failure
+    if (label === 'final' || label === 'bootstrap') throw failure
   })
   deliveries.set(key, pending)
   deliveryTail = pending.catch(error => {
-    if (label === 'final' && !stableDeliveryFailure) stableDeliveryFailure = error
+    if ((label === 'final' || label === 'bootstrap') && !stableDeliveryFailure) stableDeliveryFailure = error
   })
   void pending.then(
     () => { if (deliveries.get(key) === pending) deliveries.delete(key) },
@@ -142,6 +150,13 @@ function inspectFrame(data, isBinary) {
   if (isBinary) return
   try {
     const message = JSON.parse(data.toString('utf8'))
+    const bootstrap = codexAutomationBootstrapFromAppServerMessage(message)
+    if (bootstrap) void deliver({
+      key: `bootstrap:${bootstrap.threadId}`,
+      payload: bootstrap,
+      endpoint: bootstrapDaemonUrl,
+      label: 'bootstrap',
+    })
     const commentary = commentaryFromAppServerMessage(message)
     if (commentary) void deliver({
       key: `commentary:${commentary.threadId}\u0000${commentary.turnId}\u0000${commentary.itemId}`,

@@ -52,3 +52,25 @@ test('sab automation creates JSON without shell interpolation and encodes status
   assert.equal(status.status, 0, status.stderr)
   assert.equal(requests[1].url, `/automation/sessions/${encodeURIComponent('github:org/repo#1')}`)
 })
+
+test('sab automation validates and normalizes provider flags without contacting the daemon', async () => {
+  const result = await runCli([
+    'validate-flags', '--provider', 'codex', '--',
+    '--model', 'gpt-5.6-sol', '--effort', 'xhigh', '--yolo',
+  ], { ...process.env, SAB_AUTOMATION_URL: 'http://127.0.0.1:1' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), {
+    ok: true,
+    provider: 'codex',
+    flags: [
+      '--model=gpt-5.6-sol', '--config', 'model_reasoning_effort="xhigh"',
+      '--dangerously-bypass-approvals-and-sandbox',
+    ],
+  })
+
+  const invalid = await runCli([
+    'validate-flags', '--provider', 'codex', '--', '--effort', 'extreme',
+  ], process.env)
+  assert.equal(invalid.status, 2)
+  assert.match(invalid.stderr, /invalid Codex effort/)
+})

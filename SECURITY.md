@@ -58,6 +58,10 @@ accounts, and the Mac user running the daemon.
   Claude `--continue`, journals an exact tmux identity before launch, and
   refuses stop/archive if the provider, native session, tmux, or channel has
   been rebound. Never expose this port through SSH forwarding or an HTTP proxy.
+  `sab automation validate-flags` applies that same allowlist locally without
+  contacting the daemon or launching anything. Its Codex model and effort
+  shorthands are strictly validated before being translated; callers still
+  cannot supply arbitrary Codex configuration overrides.
 - **Invite before trust:** both automated collaborator setup and the manual
   status-panel picker call `conversations.invite` before changing the prompt
   allowlist. Invitation failure is visible and leaves that user untrusted;
@@ -176,10 +180,14 @@ accounts, and the Mac user running the daemon.
   length-capped, and converted to fixed-destination Slack blocks; arbitrary tool
   inputs are ignored. Answers still travel only to the authoritative session's
   existing tmux identity.
-- **Bounded Codex semantic egress:** the per-session App Server and transparent
+- **Bounded Codex App Server relay:** the per-session App Server and transparent
   event proxy bind only to random loopback ports. The proxy forwards every frame
-  unchanged to the TUI but submits only completed `agentMessage` commentary and
-  one `final_answer` after its exact successful `turn/completed` to port `8877`.
+  unchanged to the TUI but submits only completed `agentMessage` commentary,
+  one `final_answer` after its exact successful `turn/completed`, and a typed
+  root `thread/started` identity to port `8877`. That identity can bootstrap
+  only an exact pending automation after cwd, tmux, provider-root ancestry, and
+  lifecycle checks; child threads, ordinary sessions, and stopped or rebound
+  automations are no-ops or fail closed.
   Stop and App Server completion share one durable native-turn claim, so a late
   hook cannot duplicate the final. The daemon independently
   canonicalizes a retained npm App Server launcher only to its direct matching

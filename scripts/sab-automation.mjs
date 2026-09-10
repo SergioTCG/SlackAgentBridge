@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
+import { normalizeProvider, normalizeRemoteLaunchFlags } from '../daemon/providers.mjs'
 
 const BASE = String(process.env.SAB_AUTOMATION_URL || 'http://127.0.0.1:8877').replace(/\/$/, '')
 
@@ -10,6 +11,7 @@ function usage(message = '') {
     [--collaborator USER_ID ...] --prompt-file FILE|- -- [PROVIDER_FLAGS...]
   sab automation status EXTERNAL_KEY
   sab automation stop EXTERNAL_KEY [--archive]
+  sab automation validate-flags --provider claude|codex|pi -- [PROVIDER_FLAGS...]
 
 The prompt is read from a file (or stdin with -), then encoded as JSON without
 shell interpolation. SAB_AUTOMATION_URL may override the loopback base URL.\n`)
@@ -47,7 +49,23 @@ const args = process.argv.slice(2)
 const command = args.shift()
 if (!command || command === '--help' || command === '-h') usage()
 
-if (command === 'create') {
+if (command === 'validate-flags') {
+  let provider = null
+  let flags = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === '--') { flags = args.slice(i + 1); break }
+    if (arg === '--provider') { provider = requiredValue(args, i, arg); i++; continue }
+    usage(`unknown validate-flags option: ${arg}`)
+  }
+  provider = normalizeProvider(provider, '')
+  if (!provider) usage('validate-flags requires --provider claude|codex|pi')
+  try {
+    process.stdout.write(`${JSON.stringify({ ok: true, provider, flags: normalizeRemoteLaunchFlags(provider, flags) })}\n`)
+  } catch (error) {
+    usage(String(error?.message || error))
+  }
+} else if (command === 'create') {
   let externalKey = null
   let cwd = null
   let provider = null

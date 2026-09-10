@@ -63,6 +63,10 @@ loopback event proxy mirrors completed semantic commentary and uses a completed
 App Server turn as an exact final-answer fallback when Codex omits its Stop
 hook. It excludes commands, output, diffs, plans, reasoning, and deltas; Stop
 and App Server completion share a durable turn-level deduplication claim.
+For a newly launched automation only, the typed root `thread/started` event also
+supplies the native identity when that Codex release defers `SessionStart`; SAB
+still requires the exact pending automation cwd, tmux, and provider-process
+ancestry before adopting it. Child threads and ordinary sessions are ignored.
 The Codex runner keeps the correlated App Server alive through the proxy's
 bounded shutdown drain so a closing TUI cannot invalidate the final's ancestry
 proof before delivery.
@@ -462,6 +466,8 @@ sab automation create \
 
 sab automation status 'github:org/repo#123'
 sab automation stop 'github:org/repo#123' --archive
+sab automation validate-flags --provider codex -- \
+  --model gpt-5.6-sol --effort xhigh --yolo
 ```
 
 The loopback-only API at `127.0.0.1:8877` provides
@@ -471,6 +477,11 @@ idempotent. Creation journals before launch, correlates the exact tmux/native
 session/channel, invites and resolves every collaborator before whitelisting,
 and injects the initial prompt at most once without an artifact grant. Exact
 stop never delegates to bulk cleanup and archives only the correlated channel.
+`validate-flags` is local and side-effect free. It lets project automation
+validate and canonicalize the same provider argv before allocating its own
+worktrees, databases, or ports. Codex accepts both split and inline model/effort
+forms; arbitrary `--config` remains forbidden, while safe effort input is
+translated to Codex's native `model_reasoning_effort` override.
 
 ### Return generated files
 
