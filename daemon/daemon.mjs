@@ -35,6 +35,7 @@ import {
   commentaryFromAppServerMessage, releaseCodexCommentary, releaseCodexFinal,
 } from './codex-commentary.mjs'
 import { handleCodexFinalHttp } from './codex-final-http.mjs'
+import { handleCodexBootstrapHttp } from './codex-bootstrap-http.mjs'
 import {
   codexTerminalFailure, codexTerminalFailureDecision, recordCodexPromptTurnStart,
   recordCodexTransportTurnStart, resetCodexPollerEvidence,
@@ -2252,7 +2253,12 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     }
   }
   if (provider === 'codex' && ev === 'SessionStart') {
-    const effort = resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd })
+    // App Server's typed thread identity reports the actual effort selected by
+    // Codex. Prefer it over requested launch metadata so capacity fallback is
+    // visible without changing the durable resume intent.
+    const effort = ['minimal', ...CODEX_EFFORTS].includes(body.effort)
+      ? body.effort
+      : resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd })
     if (effort) session.effort = effort
   }
   const acct = provider === 'claude' ? safeAccount(account) : null
@@ -7605,6 +7611,10 @@ http.createServer(async (req, res) => {
   if (await handleTeamHttp(req, res, url, teamService)) return
   if (await handleAutomationHttp(req, res, url, automationLifecycle)) return
   if (await handleTerminalHttp(req, res, url, terminalControl)) return
+  if (await handleCodexBootstrapHttp(req, res, url, {
+    lifecycle: automationLifecycle, resolveAgentPid, codexAppServerProcessPid,
+    validProviderRootClaim, acceptHook: onHook, execFile, log,
+  })) return
   if (await handleCodexFinalHttp(req, res, url, {
     state, execFile, internalTurns, resolveAgentPid, codexAppServerProcessPid, validTmuxClaim,
     transitionForTarget, completePrivateTurn, finalizeCodexTurn, isNoSpaceError, log,

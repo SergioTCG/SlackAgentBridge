@@ -5,6 +5,7 @@ import {
   CODEX_COMMENTARY_MAX_CHARS,
   claimCodexFinal,
   claimCodexCommentary,
+  codexAutomationBootstrapFromAppServerMessage,
   codexFinalDisposition,
   codexFinalFromAppServerMessage,
   codexFinalLifecycleFingerprint,
@@ -15,6 +16,29 @@ import {
   releaseCodexFinal,
   releaseCodexCommentary,
 } from '../daemon/codex-commentary.mjs'
+
+test('only a root Codex thread/started notification is an automation bootstrap identity', () => {
+  const message = {
+    method: 'thread/started',
+    params: { thread: {
+      id: '01a-bootstrap', parentThreadId: null, cwd: '/Users/test/Code/worktree',
+      model: 'gpt-5.6-sol', reasoningEffort: 'xhigh',
+    } },
+  }
+  assert.deepEqual(codexAutomationBootstrapFromAppServerMessage(message), {
+    threadId: '01a-bootstrap', cwd: '/Users/test/Code/worktree',
+    model: 'gpt-5.6-sol', effort: 'xhigh',
+  })
+  assert.equal(codexAutomationBootstrapFromAppServerMessage({
+    ...message, params: { thread: { ...message.params.thread, parentThreadId: '01a-parent' } },
+  }), null)
+  assert.equal(codexAutomationBootstrapFromAppServerMessage({
+    ...message, params: { thread: { ...message.params.thread, cwd: 'relative/path' } },
+  }), null)
+  assert.equal(codexAutomationBootstrapFromAppServerMessage({
+    ...message, params: { thread: { ...message.params.thread, reasoningEffort: 'extreme' } },
+  }), null)
+})
 
 const completed = item => ({
   method: 'item/completed',

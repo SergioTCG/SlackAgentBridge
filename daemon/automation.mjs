@@ -172,6 +172,7 @@ export function createAutomationLifecycle({
     if (typeof fn !== 'function') throw new TypeError(`automation lifecycle requires ${name}()`)
   }
   const running = new Map()
+  const bootstrapRunning = new Map()
   const sessionRefs = new Map()
 
   const records = () => state.automations || {}
@@ -489,5 +490,52 @@ export function createAutomationLifecycle({
       record.provider === provider && ((sessionId && record.sessionId === sessionId) || (tmux && record.tmux === tmux))) || null
   }
 
-  return { create, status, stop, recover, reconcile, correlateSessionStart, consumeInitialPromptEcho, findForHook }
+  function codexBootstrapDisposition(bootstrap, tmux) {
+    const record = Object.values(records()).find(item => item.provider === 'codex' && item.tmux === tmux)
+    if (!record || stopRequested(record) || ['stopping', 'stopped'].includes(record.status)) return { disposition: 'ignore', record }
+    if (!bootstrap?.threadId || !bootstrap?.cwd || path.resolve(bootstrap.cwd) !== record.cwd) {
+      return { disposition: 'forbidden', record }
+    }
+    if (record.sessionId) {
+      return { disposition: record.sessionId === bootstrap.threadId ? 'duplicate' : 'forbidden', record }
+    }
+    if (!['launching', 'awaiting_session'].includes(record.status)) return { disposition: 'ignore', record }
+    return { disposition: 'accept', record }
+  }
+
+  async function acceptCodexBootstrap(bootstrap, tmux, accept) {
+    if (typeof accept !== 'function') throw new TypeError('Codex bootstrap requires an accept callback')
+    // Serialize the bootstrap decision by terminal, not by the proposed thread
+    // ID. A provider process should emit one root thread, but two conflicting
+    // identities arriving together must not both observe the automation as
+    // uncorrelated and race through SessionStart adoption.
+    const key = tmux
+    if (bootstrapRunning.has(key)) {
+      await bootstrapRunning.get(key)
+      return codexBootstrapDisposition(bootstrap, tmux).disposition
+    }
+    const initial = codexBootstrapDisposition(bootstrap, tmux)
+    if (initial.disposition !== 'accept') return initial.disposition
+    const pending = (async () => {
+      await accept(initial.record)
+    })()
+    bootstrapRunning.set(key, pending)
+    try {
+      await pending
+      const final = codexBootstrapDisposition(bootstrap, tmux).disposition
+      if (final === 'duplicate') return 'accepted'
+      // Hook handlers are intentionally failure-tolerant and may reject by
+      // returning early. Until durable automation correlation exists, ask the
+      // proxy to retry instead of acknowledging and losing the only identity
+      // event.
+      return final === 'accept' ? 'not_ready' : final
+    } finally {
+      if (bootstrapRunning.get(key) === pending) bootstrapRunning.delete(key)
+    }
+  }
+
+  return {
+    create, status, stop, recover, reconcile, correlateSessionStart,
+    consumeInitialPromptEcho, findForHook, acceptCodexBootstrap,
+  }
 }

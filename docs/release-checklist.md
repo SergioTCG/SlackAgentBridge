@@ -143,6 +143,11 @@
 - [ ] Automation duplicate create launches/prompts exactly once, survives daemon
       restart, invites before whitelisting, and exact repeated stop/archive does
       not mutate any other session or channel.
+- [ ] Launch a fresh Codex automation with its native SessionStart hook
+      suppressed. Confirm the exact root App Server thread identity binds the
+      pending tmux once, while a child thread, unrelated session, cwd mismatch,
+      daemon restart, and late duplicate cannot create another channel or
+      inject the prompt twice.
 - [ ] Create one session team with a coordinator and two provider-diverse
       workers. Confirm private role context, alias-only peer discovery, safe busy
       queueing, explicit interim reply, stable turn report, explicit release,

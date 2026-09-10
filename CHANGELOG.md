@@ -8,6 +8,8 @@ Notable changes to this project. Format based on
 
 ### Added
 
+- `sab automation validate-flags` provides project orchestrators with a
+  side-effect-free JSON-safe preflight using the canonical provider allowlist.
 - New session-team tasks now use explicit two-phase completion: bounded worker
   checkpoints declare pending gates, worker completion declares readiness, and
   an exact coordinator release is required before worker availability clears.
@@ -19,6 +21,9 @@ Notable changes to this project. Format based on
 
 ### Changed
 
+- Codex automation flags accept strictly validated split or inline model and
+  effort syntax; effort is translated to the narrow native configuration argv
+  without permitting arbitrary `--config` input.
 - A provider final or continuously observed hookless Codex idle surface is now
   a durable worker turn report, not implicit task completion. Coordinator
   follow-up invalidates an earlier readiness declaration, while pre-upgrade
@@ -26,6 +31,10 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Fresh Codex automations no longer deadlock while waiting for a deferred
+  `SessionStart`. The typed root App Server `thread/started` event can bootstrap
+  only the exact pending automation through the existing fenced SessionStart
+  path; native-hook races deduplicate and child/unrelated threads stay excluded.
 - Coordinator waits now return the actionable `awaiting_release` state instead
   of deadlocking the only turn authorized to release the worker.
 - Exact-generation Claude finalization is claimed before transcript settling,

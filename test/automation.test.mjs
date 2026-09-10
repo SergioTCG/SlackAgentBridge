@@ -119,6 +119,40 @@ test('restart correlates a SessionStart persisted before automation setup withou
   assert.equal(restarted.status(f.request.externalKey).status, 'active')
 })
 
+test('restart accepts a delayed Codex App Server identity and injects the prompt once', async t => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  f.request.provider = 'codex'
+  f.request.flags = ['--model', 'gpt-5.6-sol', '--effort', 'xhigh', '--yolo']
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  const restartQueue = []
+  const calls = { launch: 0, invite: 0, inject: 0 }
+  const restarted = createAutomationLifecycle({
+    state: f.state, home: f.root, persist: () => {}, schedule: fn => restartQueue.push(fn),
+    launch: async () => { calls.launch++ },
+    invite: async (_channel, userId) => { calls.invite++; return { name: userId, invitation: 'invited' } },
+    inject: async () => { calls.inject++ }, terminate: async () => {}, archive: async () => {},
+    notifyFailure: async () => {},
+  })
+  restarted.recover()
+  while (restartQueue.length) await restartQueue.shift()()
+  assert.equal(calls.launch, 0)
+
+  const bootstrap = { threadId: '01a-after-restart', cwd: f.cwd, model: 'gpt-5.6-sol', effort: 'xhigh' }
+  assert.equal(await restarted.acceptCodexBootstrap(bootstrap, automation.tmux, async () => {
+    restarted.correlateSessionStart({
+      id: bootstrap.threadId, tmux: automation.tmux, cwd: f.cwd, channel: 'CAUTO', provider: 'codex',
+    })
+  }), 'accepted')
+  while (restartQueue.length) await restartQueue.shift()()
+  assert.deepEqual(calls, { launch: 0, invite: 1, inject: 1 })
+  assert.equal(restarted.status(f.request.externalKey).status, 'active')
+  assert.equal(await restarted.acceptCodexBootstrap(bootstrap, automation.tmux, async () => {
+    assert.fail('late bootstrap must not repeat setup')
+  }), 'duplicate')
+})
+
 test('a stale claimed launch becomes an actionable failure without a retry', async t => {
   const f = fixture()
   t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
@@ -220,19 +254,104 @@ test('provider-specific flags and request fields use the remote launch allowlist
   ])
   assert.throws(() => validateAutomationRequest({ ...f.request, provider: 'codex', flags: ['--dsp'] }, { home: f.root }), AutomationRequestError)
   assert.deepEqual(
-    validateAutomationRequest({ ...f.request, provider: 'codex', flags: ['--yolo', '--model=gpt-5.6-sol'] }, { home: f.root }).flags,
-    ['--dangerously-bypass-approvals-and-sandbox', '--model=gpt-5.6-sol'],
+    validateAutomationRequest({
+      ...f.request, provider: 'codex',
+      flags: ['--yolo', '--model', 'gpt-5.6-sol', '--effort', 'xhigh'],
+    }, { home: f.root }).flags,
+    [
+      '--dangerously-bypass-approvals-and-sandbox', '--model=gpt-5.6-sol',
+      '--config', 'model_reasoning_effort="xhigh"',
+    ],
   )
   assert.throws(() => validateAutomationRequest({ ...f.request, collaborators: ['not-a-slack-id'] }, { home: f.root }), /collaborator/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--continue'] }, { home: f.root }), /independently owned/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--continue=true'] }, { home: f.root }), /independently owned/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--continue=false'] }, { home: f.root }), /independently owned/i)
-  assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--effort', 'xhigh'] }, { home: f.root }), /effort/i)
-  assert.throws(() => validateAutomationRequest({ ...f.request, flags: ['--effort=xhigh'] }, { home: f.root }), /effort/i)
+  assert.throws(() => validateAutomationRequest({ ...f.request, provider: 'codex', flags: ['--effort', 'extreme'] }, { home: f.root }), /effort/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, provider: undefined }, { home: f.root }), /provider/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, cwd: path.join(f.root, '..', 'escape') }, { home: f.root }), /cwd/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, externalKey: '.' }, { home: f.root }), /reserved/i)
   assert.throws(() => validateAutomationRequest({ ...f.request, externalKey: '..' }, { home: f.root }), /reserved/i)
+})
+
+test('Codex App Server bootstrap is accepted only for the exact pending automation', async t => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  f.request.provider = 'codex'
+  f.request.flags = ['--model', 'gpt-5.6-sol', '--effort', 'xhigh', '--yolo']
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  const accepted = []
+  const bootstrap = { threadId: '01a-bootstrap', cwd: f.cwd, model: 'gpt-5.6-sol', effort: 'xhigh' }
+
+  assert.equal(await f.lifecycle.acceptCodexBootstrap(bootstrap, automation.tmux, async record => {
+    accepted.push(record.externalKey)
+    f.lifecycle.correlateSessionStart({
+      id: bootstrap.threadId, tmux: automation.tmux, cwd: f.cwd, channel: 'CAUTO', provider: 'codex',
+    })
+  }), 'accepted')
+  assert.equal(await f.lifecycle.acceptCodexBootstrap(bootstrap, automation.tmux, async () => {
+    assert.fail('duplicate bootstrap must not be accepted twice')
+  }), 'duplicate')
+  assert.deepEqual(accepted, [f.request.externalKey])
+  assert.equal(await f.lifecycle.acceptCodexBootstrap(
+    { ...bootstrap, threadId: 'other', cwd: path.join(f.root, 'other') }, automation.tmux, async () => {},
+  ), 'forbidden')
+  assert.equal(await f.lifecycle.acceptCodexBootstrap(bootstrap, 'sab-unrelated', async () => {}), 'ignore')
+})
+
+test('Codex bootstrap remains retryable when a tolerant hook returns without correlation', async t => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  f.request.provider = 'codex'
+  f.request.flags = ['--yolo']
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  const bootstrap = { threadId: '01a-bootstrap', cwd: f.cwd, model: 'gpt-5.6-sol', effort: 'xhigh' }
+
+  assert.equal(await f.lifecycle.acceptCodexBootstrap(
+    bootstrap, automation.tmux, async () => {},
+  ), 'not_ready')
+  let retried = 0
+  assert.equal(await f.lifecycle.acceptCodexBootstrap(bootstrap, automation.tmux, async () => {
+    retried++
+    f.lifecycle.correlateSessionStart({
+      id: bootstrap.threadId, tmux: automation.tmux, cwd: f.cwd, channel: 'CAUTO', provider: 'codex',
+    })
+  }), 'accepted')
+  assert.equal(retried, 1)
+})
+
+test('conflicting concurrent Codex bootstrap identities serialize per tmux', async t => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  f.request.provider = 'codex'
+  f.request.flags = ['--yolo']
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  const firstBootstrap = {
+    threadId: '01a-bootstrap-first', cwd: f.cwd, model: 'gpt-5.6-sol', effort: 'xhigh',
+  }
+  let enterFirst
+  const firstEntered = new Promise(resolve => { enterFirst = resolve })
+  let releaseFirst
+  const firstRelease = new Promise(resolve => { releaseFirst = resolve })
+  const first = f.lifecycle.acceptCodexBootstrap(firstBootstrap, automation.tmux, async () => {
+    enterFirst()
+    await firstRelease
+    f.lifecycle.correlateSessionStart({
+      id: firstBootstrap.threadId, tmux: automation.tmux, cwd: f.cwd,
+      channel: 'CAUTO', provider: 'codex',
+    })
+  })
+  await firstEntered
+  const conflicting = f.lifecycle.acceptCodexBootstrap(
+    { ...firstBootstrap, threadId: '01a-bootstrap-conflict' }, automation.tmux,
+    async () => assert.fail('a conflicting identity must not race through adoption'),
+  )
+  releaseFirst()
+  assert.equal(await first, 'accepted')
+  assert.equal(await conflicting, 'forbidden')
 })
 
 test('stopped automation hooks are fenced only for their exact tmux identity', () => {

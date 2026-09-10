@@ -70,8 +70,9 @@ them.
 - `channel/server.mjs` implements the Claude Channels path. Claude hooks provide
   lifecycle and stable transcript/status integration.
 - `scripts/codex-event-proxy.mjs` transparently forwards the loopback App Server
-  WebSocket to the Codex TUI while extracting completed semantic commentary
-  and a completed-turn final fallback. Accepted commentary and finals are
+  WebSocket to the Codex TUI while extracting completed semantic commentary,
+  a completed-turn final fallback, and the root `thread/started` identity used
+  only to bootstrap an exact pending automation. Accepted stable events are
   serialized in App Server source order before entering the daemon, preventing
   a delayed earlier delivery from being overtaken and rejected as stale. Codex
   hooks remain authoritative for native identity and permissions; Stop and the
@@ -667,6 +668,10 @@ Automation endpoints are:
 - `GET /automation/sessions/:externalKey`
 - `POST /automation/sessions/:externalKey/stop`
 
+The local CLI also exposes side-effect-free `sab automation validate-flags`.
+It invokes the canonical provider adapter directly, allowing a project
+orchestrator to reject invalid argv before allocating project resources.
+
 Team endpoints are:
 
 - `GET /team/context`, `/team/peers`, and `/team/inbox`
@@ -686,6 +691,14 @@ and name resolution precede whitelisting and initial-prompt injection. The
 prompt is claimed at most once and receives no artifact grant. Exact stop
 revalidates every binding, revokes grants and handoff state, stops only the
 correlated process/tmux, and optionally archives only that immutable channel.
+Codex automation startup does not depend solely on a release-specific hook:
+the transparent proxy forwards a validated root App Server `thread/started`
+identity to `/codex/bootstrap`. The daemon accepts it only while the exact
+automation is `launching` or `awaiting_session`, with matching canonical cwd,
+tmux, and provider-root ancestry, then feeds it through the ordinary
+SessionStart/channel/invitation/prompt correlation path. Concurrent native-hook
+and App Server events deduplicate there. Unrelated sessions, stopped records,
+cwd mismatches, replacement identities, and child threads cannot adopt it.
 
 ## Installation and updates
 

@@ -5,6 +5,28 @@ export const CODEX_FINAL_MAX_CHARS = 256 << 10
 
 const validIdentity = value => typeof value === 'string' &&
   value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value)
+const validBootstrapCwd = value => typeof value === 'string' && value.startsWith('/') &&
+  value.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value)
+const validBootstrapEffort = value => value == null ||
+  ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value)
+
+// `thread/started` is the App Server's typed native-session identity event.
+// SAB uses it only to break the unattended automation bootstrap deadlock when
+// a Codex release defers its configured SessionStart hook. Child threads are
+// deliberately excluded so subagents can never register bridge sessions.
+export function codexAutomationBootstrapFromAppServerMessage(message) {
+  if (message?.method !== 'thread/started') return null
+  const thread = message.params?.thread
+  if (!thread || thread.parentThreadId !== null || !validIdentity(thread.id) ||
+      !validBootstrapCwd(thread.cwd) || !validBootstrapEffort(thread.reasoningEffort) ||
+      (thread.model != null && !validIdentity(thread.model))) return null
+  return {
+    threadId: thread.id,
+    cwd: thread.cwd,
+    model: thread.model || null,
+    effort: thread.reasoningEffort || null,
+  }
+}
 
 function boundedText(value, maxChars) {
   if (typeof value !== 'string') return null
