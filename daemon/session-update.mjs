@@ -147,6 +147,59 @@ export function shouldRetryDormantSessionWake({
   return Boolean(pending && !providerAlive && !waking && !updating && !draining)
 }
 
+// Startup-completion evidence is process-local, but provider processes can
+// survive a daemon restart. Snapshot only the exact bindings loaded at boot so
+// recovery may reconstruct that evidence once. Any SessionStart observed by
+// this daemon revokes the claim; a metadata failure in the current process must
+// therefore remain fail-closed until the owner's explicit retry.
+export function createBootSessionInputClaims(state) {
+  const claims = new WeakMap()
+  for (const session of Object.values(state?.sessions || {})) {
+    if (!session || typeof session !== 'object') continue
+    claims.set(session, {
+      id: session.id,
+      channel: session.channel,
+      pid: session.pid,
+      tmux: session.tmux,
+      provider: providerOf(session),
+    })
+  }
+  const matches = session => {
+    const claim = claims.get(session)
+    return Boolean(claim && session?.id === claim.id && session.channel === claim.channel &&
+      session.pid === claim.pid && session.tmux === claim.tmux && providerOf(session) === claim.provider)
+  }
+  return {
+    consume(session) {
+      if (!matches(session)) return false
+      claims.delete(session)
+      return true
+    },
+    revoke: session => claims.delete(session),
+  }
+}
+
+// A provider can remain alive after a provably failed tmux/channel write. The
+// retained queue must then be allowed to reacquire the ordered-input fence once
+// the exact authoritative surface is idle. Without this distinction, the
+// dormant-wake guard treats "PID exists" as success and strands the queue.
+export function shouldRecoverLiveSessionInput({
+  pending = false,
+  authoritative = false,
+  providerAlive = false,
+  tmuxAlive = false,
+  startupComplete = false,
+  surfaceReady = false,
+  waking = false,
+  updating = false,
+  draining = false,
+  scheduled = false,
+  retryReady = true,
+} = {}) {
+  return Boolean(pending && authoritative && providerAlive && tmuxAlive &&
+    startupComplete && surfaceReady && !waking && !updating && !draining && !scheduled && retryReady)
+}
+
 // Startup metadata is allowed to fail without trapping the session behind a
 // stale maintenance marker. An active drain retains exclusive ownership; a
 // surviving queue remains the direct-input fence but becomes explicitly

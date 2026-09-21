@@ -31,6 +31,10 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Concurrent Slack-to-provider deliveries now use isolated tmux buffers instead
+  of one server-global name, preventing one session from deleting or receiving
+  another session's prompt. A retained queue on an exact live, idle provider is
+  also reconciled automatically instead of remaining permanently fenced.
 - Codex sessions resume again under Codex >= 0.154, which refuses a permission
   override when resuming a remote (app-server) task ("Permission overrides are
   not supported when resuming a remote task") and so crashed every bridge Codex
