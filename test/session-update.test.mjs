@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  bulkUpdateBlockReason, createSessionReplacementHookTracker, drainSessionInputQueue, planBulkSessionUpdate,
+  bulkUpdateBlockReason, createBootSessionInputClaims, createSessionReplacementHookTracker,
+  drainSessionInputQueue, planBulkSessionUpdate,
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
-  shouldRetryDormantSessionWake,
+  shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake,
 } from '../daemon/session-update.mjs'
 import {
   artifactDeliveryInstruction, artifactGrantTokensFromPrompts, createArtifactGrantStore,
@@ -27,6 +28,24 @@ function stateFixture() {
     },
   }
 }
+
+test('boot startup claims are exact, one-shot, and revocable on current-process startup', () => {
+  const session = {
+    id: 'codex-id', provider: 'codex', channel: 'CCODEX', pid: 22, tmux: 'sab-codex',
+  }
+  let claims = createBootSessionInputClaims({ sessions: { 'codex-id': session } })
+  assert.equal(claims.consume(session), true)
+  assert.equal(claims.consume(session), false)
+
+  claims = createBootSessionInputClaims({ sessions: { 'codex-id': session } })
+  session.tmux = 'sab-replacement'
+  assert.equal(claims.consume(session), false)
+
+  session.tmux = 'sab-codex'
+  claims = createBootSessionInputClaims({ sessions: { 'codex-id': session } })
+  assert.equal(claims.revoke(session), true)
+  assert.equal(claims.consume(session), false)
+})
 
 test('bulk update plan includes only idle authoritative active sessions', () => {
   const state = stateFixture()
@@ -311,6 +330,31 @@ test('pending-only dormant input retries wake without weakening active maintenan
   assert.equal(shouldRetryDormantSessionWake({ pending: true, providerAlive: false, draining: true }), false)
   assert.equal(shouldRetryDormantSessionWake({ pending: true, providerAlive: true }), false)
   assert.equal(shouldRetryDormantSessionWake({ pending: false, providerAlive: false }), false)
+})
+
+test('a live idle provider self-heals retained input only on its exact ready surface', () => {
+  const ready = {
+    pending: true,
+    authoritative: true,
+    providerAlive: true,
+    tmuxAlive: true,
+    startupComplete: true,
+    surfaceReady: true,
+  }
+  assert.equal(shouldRecoverLiveSessionInput(ready), true)
+  for (const [name, value] of [
+    ['pending', false],
+    ['authoritative', false],
+    ['providerAlive', false],
+    ['tmuxAlive', false],
+    ['startupComplete', false],
+    ['surfaceReady', false],
+  ]) assert.equal(shouldRecoverLiveSessionInput({ ...ready, [name]: value }), false, name)
+  assert.equal(shouldRecoverLiveSessionInput({ ...ready, waking: true }), false)
+  assert.equal(shouldRecoverLiveSessionInput({ ...ready, updating: true }), false)
+  assert.equal(shouldRecoverLiveSessionInput({ ...ready, draining: true }), false)
+  assert.equal(shouldRecoverLiveSessionInput({ ...ready, scheduled: true }), false)
+  assert.equal(shouldRecoverLiveSessionInput({ ...ready, retryReady: false }), false)
 })
 
 test('startup failure releases a stranded maintenance marker while preserving queued input', () => {

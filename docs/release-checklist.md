@@ -125,6 +125,10 @@
 - [ ] A failed wake or SessionStart metadata operation preserves queued input,
       clears stale maintenance ownership, reports `/sab-update`, and a later
       owner message retries a truly dormant session without duplication.
+- [ ] Concurrent prompts to different sessions use isolated tmux buffers, and
+      a provably failed write to a still-live provider is drained after its
+      exact authoritative input surface returns idle without cross-session
+      delivery or a permanently queued owner turn.
 - [ ] A delayed failed SessionStart cannot clear a newer maintenance generation,
       including when the same session record was rebound to a new native ID.
 - [ ] `/sab-account` works only for Claude and `/sab-run` only for Pi.

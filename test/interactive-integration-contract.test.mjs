@@ -91,6 +91,29 @@ test('replacement startup drains all queued input before releasing direct delive
   assert.doesNotMatch(start, /updatingSessions\.delete\(sid\)/)
 })
 
+test('retained input on a live idle surface is reconciled instead of remaining in limbo', () => {
+  const blocker = /function liveSessionInputRecoveryBlocked\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(blocker, /qforms\.has/)
+  assert.match(blocker, /session\.teamActiveTaskId/)
+  assert.match(blocker, /codexTurnStartedAt/)
+  assert.match(blocker, /codexPollers\.has/)
+  const recovery = /async function recoverLiveSessionInputQueue\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(recovery, /shouldRecoverLiveSessionInput/)
+  assert.match(recovery, /completedSessionStartTmux/)
+  assert.match(recovery, /pendingSessionStartTmux/)
+  assert.match(recovery, /completedSessionStartTmux\.set\(expected\.id, expected\.tmux\)/)
+  assert.match(recovery, /targetStartupState/)
+  assert.match(recovery, /validProviderRootClaim/)
+  assert.match(recovery, /bootSessionInputClaims\.consume\(session\)/)
+  assert.ok(recovery.split('liveSessionInputRecoveryBlocked').length >= 3,
+    'interactive and active-turn fences must be rechecked after awaited authority proofs')
+  assert.match(recovery, /scheduleSessionInputDrain/)
+  const completion = /async function completeAuthoritativeSessionStart\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(completion, /bootSessionInputClaims\.revoke\(session\)/,
+    'a startup handled by this daemon must revoke boot-only reconstruction before metadata can fail')
+  assert.match(daemon, /setInterval\(async \(\) => \{[\s\S]*recoverLiveSessionInputQueues/)
+})
+
 test('replacement input drain ownership follows the session object across identity changes', () => {
   assert.match(daemon, /const sessionInputDrainOwners = new WeakSet\(\)/)
   const drain = /function scheduleSessionInputDrain\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''

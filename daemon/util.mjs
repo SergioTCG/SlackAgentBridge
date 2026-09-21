@@ -214,11 +214,23 @@ export async function tmuxInterrupt(tname, provider = 'claude') {
 // Inject a full message into the session's input box as a bracketed paste,
 // then submit. Unlike channel events (rendered as a ~50-char summary line),
 // this shows the complete message in the terminal exactly as if typed.
-export async function tmuxPaste(tname, text) {
-  await execFile('tmux', ['set-buffer', '-b', 'sab-inject', text])
-  await execFile('tmux', ['paste-buffer', '-p', '-d', '-b', 'sab-inject', '-t', tname])
-  await sleep(300)
-  await execFile('tmux', ['send-keys', '-t', tname, 'Enter'])
+let tmuxPasteBufferSequence = 0
+export async function tmuxPaste(tname, text, { run = execFile, pause = sleep } = {}) {
+  // tmux buffers are server-global, not session-local. A shared `sab-inject`
+  // name let simultaneous sessions overwrite or delete each other's payloads.
+  // A process-scoped monotonic identity makes the set/paste/delete transaction
+  // private even when many sessions receive input in the same event-loop tick.
+  const buffer = `sab-inject-${process.pid}-${++tmuxPasteBufferSequence}`
+  let created = false
+  try {
+    await run('tmux', ['set-buffer', '-b', buffer, text])
+    created = true
+    await run('tmux', ['paste-buffer', '-p', '-b', buffer, '-t', tname])
+  } finally {
+    if (created) await run('tmux', ['delete-buffer', '-b', buffer]).catch(() => {})
+  }
+  await pause(300)
+  await run('tmux', ['send-keys', '-t', tname, 'Enter'])
 }
 
 export async function tmuxSendCommand(tname, slashCommand) {

@@ -212,9 +212,20 @@ Replacement startup keeps direct input closed while Slack metadata is refreshed.
 One ordered drain is the sole queue consumer: provider launch arguments and
 Claude/Pi stream attachment cannot remove or reorder prompts. It remains active
 until every queued prompt, including prompts arriving during the drain, reaches
-the exact replacement input surface. Drain ownership follows the stable session
-record across native identity replacement, so competing lifecycle and Pi-stream
-callbacks cannot start consumers under the old and new ids. A Pi stream can
+the exact replacement input surface. Each concurrent tmux paste uses a private
+server buffer, so one session cannot overwrite or delete another session's
+payload. If a transport failure leaves input queued while the provider remains
+alive, SAB revalidates the exact PID, tmux, channel binding, completed startup,
+and idle input surface before reacquiring the ordered drain; it never treats a
+live PID alone as proof that delivery succeeded. After a daemon restart, the
+process-local startup proof may be reconstructed only for an exact binding
+snapshotted at daemon boot, from provider-root ancestry plus the authoritative
+persisted channel/session/tmux binding. That one-shot boot claim is revoked as
+soon as the current daemon observes SessionStart, so a metadata failure in this
+process remains fail-closed and cannot be mistaken for restart recovery. Drain
+ownership follows the stable session record across native identity replacement,
+so competing lifecycle and Pi-stream callbacks cannot start consumers under the
+old and new ids. A Pi stream can
 schedule that drain only after the exact SessionStart has completed its Slack
 metadata work. A failed delivery restores the undelivered tail; a failed wake
 or metadata setup releases only the exact opaque fence generation acquired by

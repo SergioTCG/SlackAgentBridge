@@ -139,9 +139,10 @@ import { createNodeRegistry } from './node-registry.mjs'
 import { readNodeListenerConfiguration } from './node-runtime.mjs'
 import { createCoordinatorNodeTransport, listenForNodeConnections } from './node-transport.mjs'
 import {
-  bulkUpdateBlockReason, createSessionReplacementHookTracker, drainSessionInputQueue, planBulkSessionUpdate,
+  bulkUpdateBlockReason, createBootSessionInputClaims, createSessionReplacementHookTracker,
+  drainSessionInputQueue, planBulkSessionUpdate,
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
-  shouldRetryDormantSessionWake,
+  shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake,
 } from './session-update.mjs'
 import {
   applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
@@ -176,6 +177,7 @@ const { web } = slackRuntime
 const syncTopic = createTopicSync(web)
 const artifactGrants = createArtifactGrantStore()
 const state = loadState()
+const bootSessionInputClaims = createBootSessionInputClaims(state)
 const isNoSpaceError = error => error?.code === 'ENOSPC' || /no space left on device/i.test(String(error?.message || error))
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
 if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
@@ -304,6 +306,7 @@ const restarting = new Set() // session ids intentionally restarting (suppress t
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
 const drainingSessionInput = new Set() // exact sessions serially flushing input queued across a wake/restart
 const sessionInputDrainOwners = new WeakSet() // stable session objects reserve one scheduler across native id replacement
+const sessionInputRecoveryAfter = new WeakMap() // stable session objects back off after a failed automatic retry
 const sessionReplacementHooks = createSessionReplacementHookTracker()
 const sessionInputDrainPrompts = sessionReplacementHooks // stable session object → exact queue remainder temporarily owned by its drain
 const sessionInputFenceOwners = new Map() // native id → opaque owner; stale async failures cannot release a newer fence
@@ -1999,8 +2002,10 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
           await sleep(500)
         },
       })
+      sessionInputRecoveryAfter.delete(session)
     } catch (error) {
       log('queued input drain failed closed', session.id.slice(0, 8), String(error?.message || error))
+      sessionInputRecoveryAfter.set(session, Date.now() + 5 * 60 * 1000)
       recoverSessionInputFence(session.id, {
         pendingBySession: pendingBySid,
         updatingSessionIds: updatingSessions,
@@ -2018,9 +2023,112 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
   return true
 }
 
+// Heal a retained queue against an already-live provider only after proving
+// that the same authoritative startup owns an idle input surface. This covers
+// transient tmux transport failures without restarting the provider and keeps
+// stale/rebound sessions, active turns, and interactive prompts fail-closed.
+function liveSessionInputRecoveryBlocked(session) {
+  return Boolean(qforms.has(session.id) || hasPendingPerm(session) || activeTransition(session.channel) ||
+    switchingSids.has(session.id) || internalTurns.has(session.id) || session.teamActiveTaskId ||
+    session.codexTurnStartedAt || session.piTurnStartedAt || pollers.has(session.id) ||
+    codexPollers.has(session.id) || piPollers.has(session.id))
+}
+
+async function recoverLiveSessionInputQueue(session) {
+  if (!session?.id || !pendingBySid.get(session.id)?.length) return false
+  const expected = {
+    id: session.id,
+    channel: session.channel,
+    pid: session.pid,
+    tmux: session.tmux,
+    provider: providerOf(session),
+  }
+  const authoritative = Boolean(expected.channel && state.sessions?.[expected.id] === session &&
+    state.channels?.[expected.channel] === expected.id)
+  const providerAlive = Boolean(expected.pid && pidAlive(expected.pid))
+  let startupComplete = Boolean(expected.tmux && completedSessionStartTmux.get(expected.id) === expected.tmux)
+  const waking = resurrectInFlight.has(expected.id) || restarting.has(expected.id)
+  const updating = updatingSessions.has(expected.id)
+  const draining = drainingSessionInput.has(expected.id)
+  const scheduled = sessionInputDrainOwners.has(session)
+  const retryReady = Date.now() >= (sessionInputRecoveryAfter.get(session) || 0)
+  if (!authoritative || !providerAlive || waking || updating || draining || scheduled ||
+      pendingSessionStartTmux.has(expected.id) ||
+      liveSessionInputRecoveryBlocked(session)) return false
+
+  const exactTmuxAlive = await tmuxAlive(expected.tmux)
+  let surfaceReady = false
+  if (exactTmuxAlive) {
+    if (expected.provider === 'pi') surfaceReady = streams.has(expected.pid)
+    else surfaceReady = targetStartupState(expected.provider, await tmuxCapture(expected.tmux)) === 'ready'
+  }
+  if (!(await validProviderRootClaim(expected.pid, expected.tmux, expected.provider))) return false
+
+  // The startup-completion map is intentionally process-local. A provider and
+  // tmux can survive a daemon restart, so reconstruct that proof lazily only
+  // for an exact binding which existed when this daemon booted, and only after
+  // ancestry and channel authority have both been revalidated. A SessionStart
+  // observed by this process revokes that one-shot boot claim before metadata
+  // work starts, so its failure can never be mistaken for restart recovery.
+  if (!startupComplete) {
+    if (pendingSessionStartTmux.has(expected.id) || session.id !== expected.id ||
+        session.channel !== expected.channel || session.pid !== expected.pid || session.tmux !== expected.tmux ||
+        state.sessions?.[expected.id] !== session || state.channels?.[expected.channel] !== expected.id ||
+        !bootSessionInputClaims.consume(session)) return false
+    completedSessionStartTmux.set(expected.id, expected.tmux)
+    startupComplete = true
+  }
+
+  if (!shouldRecoverLiveSessionInput({
+    pending: Boolean(pendingBySid.get(expected.id)?.length),
+    authoritative,
+    providerAlive,
+    tmuxAlive: exactTmuxAlive,
+    startupComplete,
+    surfaceReady,
+    waking,
+    updating,
+    draining,
+    scheduled,
+    retryReady,
+  })) return false
+
+  // Every awaited proof above can race a provider replacement. Revalidate the
+  // complete binding immediately before synchronously reserving the drain.
+  if (session.id !== expected.id || session.channel !== expected.channel || session.pid !== expected.pid ||
+      session.tmux !== expected.tmux || providerOf(session) !== expected.provider ||
+      state.sessions?.[expected.id] !== session || state.channels?.[expected.channel] !== expected.id ||
+      completedSessionStartTmux.get(expected.id) !== expected.tmux ||
+      pendingSessionStartTmux.has(expected.id) ||
+      !pendingBySid.get(expected.id)?.length || !pidAlive(expected.pid) ||
+      resurrectInFlight.has(expected.id) || restarting.has(expected.id) ||
+      updatingSessions.has(expected.id) || drainingSessionInput.has(expected.id) ||
+      sessionInputDrainOwners.has(session) || liveSessionInputRecoveryBlocked(session)) return false
+  const scheduledRecovery = scheduleSessionInputDrain(session, expected.provider, expected.tmux, 0)
+  if (scheduledRecovery) log('recovering retained input on live idle surface', expected.id.slice(0, 8), expected.tmux)
+  return scheduledRecovery
+}
+
+let liveSessionInputRecoveryRunning = false
+async function recoverLiveSessionInputQueues() {
+  if (liveSessionInputRecoveryRunning) return
+  liveSessionInputRecoveryRunning = true
+  try {
+    const candidates = Object.values(state.sessions || {}).filter(session =>
+      session?.id && pendingBySid.get(session.id)?.length)
+    await Promise.allSettled(candidates.map(recoverLiveSessionInputQueue))
+  } finally {
+    liveSessionInputRecoveryRunning = false
+  }
+}
+
 async function completeAuthoritativeSessionStart(session, provider, source) {
   const sid = session.id
   const tmux = session.tmux || ''
+  // From this point forward the current process owns startup completion. Even
+  // if Slack metadata later fails, the boot-only reconstruction path must not
+  // submit preserved input behind that failure.
+  bootSessionInputClaims.revoke(session)
   if (completedSessionStartTmux.get(sid) === tmux || pendingSessionStartTmux.get(sid) === tmux) return false
   pendingSessionStartTmux.set(sid, tmux)
   // Install the input fence synchronously, before any Slack API await below.
@@ -3944,8 +4052,9 @@ async function injectText(session, text, options = {}) {
     pendingBySid.set(session.id, [...queued, item])
     await post(session.channel, updating || draining
       ? '⏸️ Provider maintenance is in progress — queued this message for the resumed session.'
-      : '⏸️ Earlier input is still queued — added this message behind it and retrying the dormant session when possible.')
-    if (shouldRetryDormantSessionWake({
+      : '⏸️ Earlier input is still queued — added this message behind it and reconciling the exact provider surface.')
+    const liveRecovery = providerAlive && await recoverLiveSessionInputQueue(session)
+    if (!liveRecovery && shouldRetryDormantSessionWake({
       pending: true,
       providerAlive,
       waking: resurrectInFlight.has(session.id),
@@ -4068,6 +4177,7 @@ async function injectText(session, text, options = {}) {
   const q = pendingBySid.get(session.id) || []
   pendingBySid.set(session.id, [...q, delivered])
   if (!alive) await resurrect(session, delivered)
+  else await recoverLiveSessionInputQueue(session)
 }
 
 // Fetch a Slack file with the bot token. Slack redirects url_private to its file
@@ -8572,6 +8682,12 @@ setInterval(async () => {
     }
   }
 }, 30000)
+
+// Input transport failures are independent from process liveness. A live,
+// authoritative provider which has returned to its idle prompt can safely
+// reacquire the ordered queue without waiting for another owner message.
+setInterval(() => recoverLiveSessionInputQueues().catch(error =>
+  log('live input queue recovery failed', String(error?.message || error))), 5000).unref?.()
 
 // Interactive `/model` and `/reasoning` changes can happen while Codex is
 // idle, when the turn status poller is intentionally absent. Reconcile only
