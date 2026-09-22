@@ -31,6 +31,13 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Slack prompts are no longer mirrored back into their own channel. Claude Code
+  wraps a multi-line bracketed paste in a `<pasted_content …>` envelope before
+  its `UserPromptSubmit` hook fires, so an injected prompt stopped matching the
+  text the bridge remembered injecting; the bridge read its own injection as
+  local typing and echoed the whole prompt, artifact-delivery preamble included.
+  Echo detection now compares the unwrapped payload, and only a complete
+  envelope is unwrapped.
 - Concurrent Slack-to-provider deliveries now use isolated tmux buffers instead
   of one server-global name, preventing one session from deleting or receiving
   another session's prompt. A retained queue on an exact live, idle provider is
@@ -180,6 +187,15 @@ Notable changes to this project. Format based on
 - The production lockfile now resolves Hono 4.13.7, clearing the path-traversal,
   form-nesting denial-of-service, and query-fragment advisories reported against
   the earlier transitive release.
+
+### Security
+
+- Artifact upload grants are redacted at the Slack boundary. A grant is a
+  bearer capability for the same conversation it uploads to; the prompt-echo
+  defect published live grants into session channels, including one shared with
+  a collaborator. Outbound Slack text now has `--grant <token>` replaced with
+  `--grant [redacted]`, so no present or future path that republishes prompt
+  text can hand out a usable capability.
 
 ## [2.1.0] — 2026-09-08
 

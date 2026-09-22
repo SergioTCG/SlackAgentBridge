@@ -6,7 +6,8 @@ import path from 'node:path'
 import {
   ARTIFACT_GRANT_TTL_MS, artifactDeliveryInstruction, artifactGrantTokensFromPrompts,
   createArtifactGrantStore,
-  fulfillArtifactUpload, resolveArtifactFiles, slackArtifactUploadOptions,
+  fulfillArtifactUpload, redactArtifactGrants, resolveArtifactFiles,
+  slackArtifactUploadOptions,
 } from '../daemon/artifacts.mjs'
 
 function fixture() {
@@ -252,4 +253,24 @@ test('Slack upload options derive their immutable destination and thread from th
   assert.equal('thread_ts' in many, false)
   assert.equal('file' in many, false)
   assert.deepEqual(many.file_uploads.map(file => file.filename), ['a.png', 'b.png'])
+})
+
+const FAKE_GRANT = 'TESTGRANT0123456789abcdefGHIJKL'
+
+// A grant is a bearer capability for the same channel it uploads to. The Slack
+// boundary redacts it so no outbound path — a prompt echo, a provider response
+// quoting its own instructions, a future republisher — can publish a live one.
+test('artifact grants are redacted from Slack-bound text', () => {
+  const echoed = `💬 *You (terminal):*\n${artifactDeliveryInstruction(FAKE_GRANT)}`
+  const redacted = redactArtifactGrants(echoed)
+  assert.ok(!redacted.includes(FAKE_GRANT), 'the grant must not survive redaction')
+  assert.ok(redacted.includes('--grant [redacted]'))
+  assert.ok(redacted.includes('[Slack Agent Bridge artifact delivery]'), 'surrounding text is preserved')
+})
+
+test('grant redaction covers the inline form and leaves ordinary text alone', () => {
+  assert.equal(redactArtifactGrants(`sab upload --grant=${FAKE_GRANT} -- a.txt`), 'sab upload --grant=[redacted] -- a.txt')
+  assert.equal(redactArtifactGrants('no capability here'), 'no capability here')
+  assert.equal(redactArtifactGrants(''), '')
+  assert.equal(redactArtifactGrants(null), '')
 })
