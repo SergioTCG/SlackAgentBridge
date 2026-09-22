@@ -12,6 +12,7 @@ import {
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
   spawnSession, clearKillOnClose, execFile, availableModels, tmuxTitle, safeAccount,
   tmuxClientPids, openTmuxTerminal, closeTmuxTerminal,
+  unwrapPastedContent,
 } from './util.mjs'
 import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } from './slackout.mjs'
 import {
@@ -43,7 +44,8 @@ import {
 import { codexFooterSettings, shouldPromoteCodexFooter } from './codex-footer.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, artifactGrantTokensFromPrompts,
-  createArtifactGrantStore, fulfillArtifactUpload, slackArtifactUploadOptions,
+  createArtifactGrantStore, fulfillArtifactUpload, redactArtifactGrants,
+  slackArtifactUploadOptions,
 } from './artifacts.mjs'
 import {
   codexProjectUsage, codexSessionUsage, codexTokenSnapshot, formatCodexWorkingStatus,
@@ -283,12 +285,12 @@ const pendingSpawnChannels = new Map() // tmux → Slack channel that requested 
 const injectedRecently = new Map()
 function rememberInjected(sid, text) {
   const a = injectedRecently.get(sid) || []
-  a.push({ text: text.trim(), at: Date.now() })
+  a.push({ text: unwrapPastedContent(text), at: Date.now() })
   injectedRecently.set(sid, a.slice(-10))
 }
 function forgetInjected(sid, text) {
   const a = injectedRecently.get(sid) || []
-  const wanted = String(text || '').trim()
+  const wanted = unwrapPastedContent(text)
   const index = a.findLastIndex(item => item.text === wanted)
   if (index >= 0) a.splice(index, 1)
   if (a.length) injectedRecently.set(sid, a)
@@ -296,7 +298,7 @@ function forgetInjected(sid, text) {
 }
 function consumeInjected(sid, prompt) {
   const a = injectedRecently.get(sid) || []
-  const p = prompt.trim()
+  const p = unwrapPastedContent(prompt)
   const i = a.findIndex(x => x.text === p && Date.now() - x.at < 120000)
   if (i >= 0) { a.splice(i, 1); return true }
   return false
@@ -427,7 +429,10 @@ const inviteSlackCollaborator = (channel, userId) => inviteAndResolveCollaborato
 const collaborators = ch => state.whitelist[ch] || {}
 const whitelistedName = (ch, userId) => collaborators(ch)[userId] || null
 async function postSlackMessage(channel, payload, { waitForBump = true } = {}) {
-  const result = await enqueue(channel, () => web.chat.postMessage({ channel, ...payload }))
+  const safe = typeof payload?.text === 'string'
+    ? { ...payload, text: redactArtifactGrants(payload.text) }
+    : payload
+  const result = await enqueue(channel, () => web.chat.postMessage({ channel, ...safe }))
   const reanchor = bumpStatusForChannel(channel, result?.ts)
   if (waitForBump) await reanchor
   else reanchor.catch(error => log('deferred status bump error', String(error?.message || error)))
@@ -438,6 +443,7 @@ function post(channel, text) {
 }
 const MAX_INLINE = 6000 // longer responses upload as a file instead of many messages
 async function postMd(channel, md, { waitForBump = true, reanchor = true } = {}) {
+  md = redactArtifactGrants(md)
   if (md.length > MAX_INLINE) {
     let activityTs = null
     let posted = false

@@ -226,6 +226,17 @@ export function artifactDeliveryInstruction(token) {
   ].join('\n')
 }
 
+// A grant is a bearer capability for one Slack conversation. It is placed in the
+// agent's prompt by design, but must never travel back out to Slack: a prompt
+// echo, a provider response quoting its own instructions, or any future path
+// that republishes prompt text would otherwise publish a live upload capability
+// into the very channel it uploads to. Redact at the Slack boundary so no single
+// caller has to remember.
+const ARTIFACT_GRANT_MENTION = /(--grant[=\s]+)([A-Za-z0-9_-]{8,})/g
+export function redactArtifactGrants(text) {
+  return String(text ?? '').replace(ARTIFACT_GRANT_MENTION, '$1[redacted]')
+}
+
 const ARTIFACT_UPLOAD_COMMAND = /^sab upload --grant ([A-Za-z0-9_-]+) -- FILE_PATH \[FILE_PATH \.\.\.\]\r?$/gm
 
 // Queued Pi prompts keep private capability context separate from visible text;

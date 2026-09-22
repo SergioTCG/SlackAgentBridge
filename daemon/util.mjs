@@ -369,3 +369,22 @@ export async function availableModels(bin) {
   }
   return models
 }
+
+// Claude Code wraps a multi-line bracketed paste in a `<pasted_content id="…">`
+// envelope before its UserPromptSubmit hook fires, so a prompt the bridge
+// injected from Slack is not byte-identical to the text it remembered
+// injecting. Compare echo candidates on the unwrapped payload: otherwise the
+// bridge mistakes its own injection for local typing and mirrors the whole
+// prompt — artifact-delivery preamble included — back into the channel.
+const PASTED_OPEN = /^<pasted_content(?:\s+[^>]*)?>\r?\n?/
+const PASTED_CLOSE = /\r?\n?<\/pasted_content(?:\s+[^>]*)?>$/
+export function unwrapPastedContent(text) {
+  let value = String(text ?? '').trim()
+  // Only unwrap a complete envelope, and bound the depth so a crafted prompt
+  // cannot turn this into unbounded work.
+  for (let depth = 0; depth < 4; depth++) {
+    if (!PASTED_OPEN.test(value) || !PASTED_CLOSE.test(value)) break
+    value = value.replace(PASTED_OPEN, '').replace(PASTED_CLOSE, '').trim()
+  }
+  return value
+}
