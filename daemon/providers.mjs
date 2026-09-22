@@ -11,6 +11,13 @@ const PROVIDER_META = Object.freeze({
   pi: Object.freeze({ label: 'Pi', command: 'pi' }),
 })
 
+// `/sab-update <provider>` targets. People name the product ("claude-code"),
+// while the internal provider id stays `claude`; the bare id is accepted too.
+const UPDATE_TARGETS = Object.freeze({ 'claude-code': 'claude', claude: 'claude', codex: 'codex', pi: 'pi' })
+export function updateTargetProvider(value) {
+  return UPDATE_TARGETS[String(value || '').toLowerCase()] || null
+}
+
 export function normalizeProvider(value, fallback = 'claude') {
   const provider = String(value || fallback).toLowerCase()
   return PROVIDERS.includes(provider) ? provider : null

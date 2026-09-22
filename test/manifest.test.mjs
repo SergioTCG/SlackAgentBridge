@@ -52,7 +52,7 @@ test('managed-run and terminal controls are available through SAB', () => {
   assert.match(terminal.usage_hint, /open-all/)
   assert.match(terminal.usage_hint, /close-all/)
   const update = commands.find(item => item.command === '/sab-update')
-  assert.equal(update.usage_hint, '[current | all]')
+  assert.equal(update.usage_hint, '[current | all | claude-code | codex | pi]')
   const team = commands.find(item => item.command === '/sab-team')
   assert.match(team.usage_hint, /permissions/)
   assert.match(team.usage_hint, /drain/)

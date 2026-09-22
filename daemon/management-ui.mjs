@@ -158,10 +158,23 @@ export function updatePickerBlocks({ sessionId = null } = {}) {
       danger: true,
     }),
   }))
+  // A provider-scoped sweep restarts only that provider's idle sessions and
+  // updates only that provider's CLI. Kept in its own block so each actions
+  // block stays within Slack's element budget.
+  const providerElements = [['Claude Code', 'claude'], ['Codex', 'codex'], ['Pi', 'pi']]
+    .map(([label, action]) => button(`Update ${label} sessions`, 'update', target, action, {
+      confirm: confirmation({
+        title: `Update ${label} sessions?`,
+        body: `Eligible idle ${label} sessions restart onto the current CLI and resume. Busy and protected sessions are skipped; other providers are untouched.`,
+        confirm: 'Update',
+      }),
+    }))
   return [
     { type: 'header', text: { type: 'plain_text', text: 'Provider maintenance' } },
     { type: 'section', text: { type: 'mrkdwn', text: 'Updates preserve each session’s latest known model, effort, flags, account, cwd, and native conversation identity.' } },
     { type: 'actions', block_id: `sab_update_${target}`, elements },
+    { type: 'section', text: { type: 'mrkdwn', text: 'Or update a single provider:' } },
+    { type: 'actions', block_id: `sab_update_provider_${target}`, elements: providerElements },
   ]
 }
 

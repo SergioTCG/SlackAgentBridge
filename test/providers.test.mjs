@@ -9,7 +9,7 @@ import {
   PI_EXACT_SESSION_CONTROL_CAPABILITY, claudeModelPickerOptions,
   codexStatusRecoveryDecision, defaultNewFlagsFor, displayFlagsFor, executableCacheKey, isPathWithin,
   parsePiStreamCapabilities, piMutableControlAllowed,
-  isSupersededHook, normalizeLaunchFlag, normalizeRemoteLaunchFlags,
+  isSupersededHook, normalizeLaunchFlag, normalizeRemoteLaunchFlags, updateTargetProvider,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
   submitTargetValidation, waitForCodexInterrupt,
@@ -422,4 +422,17 @@ test('home path containment rejects sibling-prefix escapes', () => {
   assert.equal(isPathWithin('/Users/test', '/Users/test/Code/project'), true)
   assert.equal(isPathWithin('/Users/test', '/Users/test-other/project'), false)
   assert.equal(isPathWithin('/Users/test', '/Users/test/../other'), false)
+})
+
+// `/sab-update <provider>` accepts the product name people use. `all`,
+// `current`, and anything unknown must never be mistaken for a provider scope.
+test('update targets map product names to provider ids and reject everything else', () => {
+  assert.equal(updateTargetProvider('claude-code'), 'claude')
+  assert.equal(updateTargetProvider('Claude-Code'), 'claude')
+  assert.equal(updateTargetProvider('claude'), 'claude')
+  assert.equal(updateTargetProvider('codex'), 'codex')
+  assert.equal(updateTargetProvider('pi'), 'pi')
+  for (const value of ['all', 'current', 'here', '', null, undefined, 'gpt', 'claude-codex']) {
+    assert.equal(updateTargetProvider(value), null, `${value} is not a provider scope`)
+  }
 })

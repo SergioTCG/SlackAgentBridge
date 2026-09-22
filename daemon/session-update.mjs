@@ -29,10 +29,14 @@ export function bulkUpdateBlockReason(session, {
   return null
 }
 
-export function planBulkSessionUpdate(state, { pidAlive, ...context }) {
+export function planBulkSessionUpdate(state, { pidAlive, provider = null, ...context }) {
   const eligible = []
   const skipped = []
   for (const session of activeTerminalSessions(state, { pidAlive })) {
+    // A provider-scoped sweep leaves other providers' sessions out entirely:
+    // they are out of scope rather than skipped, so its report stays about the
+    // provider that was asked for, and only that provider's CLI is updated.
+    if (provider && providerOf(session) !== provider) continue
     const reason = bulkUpdateBlockReason(session, { ...context, automations: state.automations })
     if (reason) skipped.push({ session, reason })
     else eligible.push(session)
