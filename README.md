@@ -248,7 +248,7 @@ A session channel always acts on its authoritative provider.
 | `/sab-model [model]` | Choose or change this session's model |
 | `/sab-effort [level]` | Choose or change reasoning/thinking effort |
 | `/sab-flags [flags]` | Show or replace allowlisted launch flags |
-| `/sab-update [current\|all]` | Choose an update interactively, or update this/all eligible sessions directly |
+| `/sab-update [current\|all\|claude-code\|codex\|pi]` | Choose an update interactively, or update this session, all eligible sessions, or one provider's eligible sessions directly |
 | `/sab-stop` | Interrupt the current turn without ending the session |
 | `/sab-switch <claude\|codex\|pi> [new]` | Hand this channel to another native provider leg |
 | `/sab-kill [here\|session-id]` | End one exact provider process and keep its channel resumable |
@@ -317,7 +317,10 @@ ownership, delegated worker task, or restart already in progress, and reports
 every skip or failure.
 Each represented provider CLI is updated once; every eligible native session is
 then resumed with its existing cwd, identity, account, model, effort, and launch
-flags. Messages arriving during the relaunch are queued for that same session.
+flags. `/sab-update claude-code`, `/sab-update codex`, and `/sab-update pi` run
+the same sweep for a single provider: only that provider's CLI is updated and
+only its sessions restart, while other providers' sessions are left out of scope
+entirely rather than reported as skipped. Messages arriving during the relaunch are queued for that same session.
 If the provider replaces its native identity during maintenance, the queue and
 restart fences follow only that verified in-place rebind. Direct input reopens
 only after the shared ordered drain submits all queued prompts, including later

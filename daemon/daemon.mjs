@@ -21,6 +21,7 @@ import {
   codexFlagsWithoutInitialPrompt, codexModelFromArgs, codexPermissionDecision, codexStatusRecoveryDecision,
   defaultNewFlagsFor, displayFlagsFor, executableCacheKey,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, normalizeRemoteLaunchFlags,
+  updateTargetProvider,
   parsePiStreamCapabilities, parseSlackCommand, piMutableControlAllowed,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   submitTargetValidation, switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
@@ -3842,11 +3843,11 @@ function bulkUpdateReport({ providers, results, initiallySkipped }) {
   return lines.join('\n')
 }
 
-async function updateAllSessions(channel) {
+async function updateAllSessions(channel, { provider = null } = {}) {
   if (bulkUpdateRunning) return post(channel, '⏳ A bridge-wide session update is already running. Wait for its final report before retrying.')
   bulkUpdateRunning = true
   try {
-    const plan = planBulkSessionUpdate(state, { pidAlive, ...bulkUpdateContext() })
+    const plan = planBulkSessionUpdate(state, { pidAlive, ...bulkUpdateContext(), provider })
     const eligible = []
     const initiallySkipped = [...plan.skipped]
     for (const session of plan.eligible) {
@@ -3858,8 +3859,11 @@ async function updateAllSessions(channel) {
     }
 
     const providerCount = new Set(eligible.map(providerOf)).size
+    const scope = provider
+      ? `*Updating ${eligible.length} idle ${providerLabel(provider)} session${eligible.length === 1 ? '' : 's'}*. `
+      : `*Updating ${eligible.length} idle active session${eligible.length === 1 ? '' : 's'}* across ${providerCount} provider${providerCount === 1 ? '' : 's'}. `
     await post(channel,
-      `🧰 *Updating ${eligible.length} idle active session${eligible.length === 1 ? '' : 's'}* across ${providerCount} provider${providerCount === 1 ? '' : 's'}. ` +
+      `🧰 ${scope}` +
       `${initiallySkipped.length} session${initiallySkipped.length === 1 ? ' was' : 's were'} skipped safely; each result will be listed when the sweep finishes.`)
 
     const result = await runBulkSessionUpdate(eligible, {
@@ -7103,7 +7107,7 @@ function commandHelp(provider = null) {
   return '*Slack Agent Bridge commands* — type `/sab-` to autocomplete; omit arguments on management commands for interactive controls.' + context + '\n' +
     '`/sab-new <claude|codex|pi> [folder] [flags]` — choose or start a headless session\n' +
     '`/sab-model [model]` · `/sab-effort [level]` · `/sab-flags [flags]` — choose, inspect, or change the active provider\n' +
-    '`/sab-update [current|all]` · `/sab-stop` · `/sab-kill` — choose an update, interrupt, or end\n' +
+    '`/sab-update [current|all|claude-code|codex|pi]` · `/sab-stop` · `/sab-kill` — choose an update, interrupt, or end\n' +
     '`/sab-switch <claude|codex|pi> [new]` — hand this channel to another provider\n' +
     '`/sab-status [provider]` · `/sab-usage [provider] …` — current session or control-channel overview\n' +
     '`/sab-terminal [open|close|list|open-all|close-all]` — manage optional Ghostty viewports\n' +
@@ -7545,10 +7549,12 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     }
     const all = rest.length === 1 && rest[0].toLowerCase() === 'all'
     const current = rest.length === 1 && ['current', 'here'].includes(rest[0].toLowerCase())
-    if (!all && !current) return post(channel, 'Usage: `/sab-update [current|all]`')
+    const scopedProvider = rest.length === 1 ? updateTargetProvider(rest[0]) : null
+    if (!all && !current && !scopedProvider) return post(channel, 'Usage: `/sab-update [current|all|claude-code|codex|pi]`')
     if (all) return updateAllSessions(channel)
+    if (scopedProvider) return updateAllSessions(channel, { provider: scopedProvider })
     const session = sessionByChannel(channel)
-    if (!session) return post(channel, 'Use `/sab-update` in a session channel, or `/sab-update all` to update every idle active session.')
+    if (!session) return post(channel, 'Use `/sab-update` in a session channel, `/sab-update all` to update every idle active session, or `/sab-update claude-code|codex|pi` for one provider.')
     return updateAndRestart(session, { expectedSessionId })
   }
   if (name === 'flags') {
@@ -8280,7 +8286,8 @@ async function handleAppHomeAction(body, action, parsed) {
   }
 
   if (parsed.kind === 'update') {
-    if ((session && parsed.action !== 'current') || (!session && parsed.action !== 'all')) {
+    const bulk = parsed.action === 'all' || Boolean(updateTargetProvider(parsed.action))
+    if ((session && parsed.action !== 'current') || (!session && !bulk)) {
       return publishAppHome(userId, { sessionId: session?.id, notice: '⚠️ Invalid update control.' })
     }
     await dispatch('update', [parsed.action], destination, null, {
@@ -8411,7 +8418,8 @@ async function handleManagementAction(body, action, parsed) {
   }
 
   if (parsed.kind === 'update') {
-    if (!['current', 'all'].includes(parsed.action) || (!session && parsed.action === 'current')) {
+    const bulk = parsed.action === 'all' || Boolean(updateTargetProvider(parsed.action))
+    if (!(parsed.action === 'current' || bulk) || (!session && parsed.action === 'current')) {
       return post(channel, '❌ Invalid update control.')
     }
     return dispatch('update', [parsed.action], channel, null, {

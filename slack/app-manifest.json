@@ -18,7 +18,7 @@
       { "command": "/sab-model", "description": "Show or set the active session's model", "usage_hint": "[model id or alias]", "should_escape": false },
       { "command": "/sab-effort", "description": "Show or set the active session's reasoning effort", "usage_hint": "[level]", "should_escape": false },
       { "command": "/sab-flags", "description": "Show or change the active session's launch flags", "usage_hint": "[provider flags]", "should_escape": false },
-      { "command": "/sab-update", "description": "Choose or run a safe provider update", "usage_hint": "[current | all]", "should_escape": false },
+      { "command": "/sab-update", "description": "Choose or run a safe provider update", "usage_hint": "[current | all | claude-code | codex | pi]", "should_escape": false },
       { "command": "/sab-stop", "description": "Interrupt the active session's running turn", "should_escape": false },
       { "command": "/sab-switch", "description": "Hand this channel to another provider", "usage_hint": "<claude | codex | pi> [new]", "should_escape": false },
       { "command": "/sab-kill", "description": "End one exact session while keeping its channel resumable", "usage_hint": "[here | session id]", "should_escape": false },

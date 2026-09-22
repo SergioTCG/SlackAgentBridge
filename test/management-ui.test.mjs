@@ -14,6 +14,7 @@ import {
   terminalPickerBlocks,
   updatePickerBlocks,
 } from '../daemon/management-ui.mjs'
+import { updateTargetProvider } from '../daemon/providers.mjs'
 
 const SID = '01a01234-5678-7abc-8def-0123456789ab'
 
@@ -111,4 +112,18 @@ test('team close is coordinator-only and confirmed', () => {
   assert.match(close.confirm.title.text, /close/i)
   assert.equal(parseManagementActionId(close.action_id).binding, 'team_old')
   assert.ok(actions.some(action => parseManagementActionId(action.action_id)?.action === 'drain'))
+})
+
+// Each provider sweep restarts sessions, so it must be confirmed like
+// update-all, and the chooser must offer exactly the three supported scopes.
+test('provider-scoped update buttons are confirmed and map to known providers', () => {
+  for (const blocks of [updatePickerBlocks({ sessionId: SID }), updatePickerBlocks()]) {
+    const buttons = blocks.filter(block => block.type === 'actions').flatMap(block => block.elements)
+    const scoped = buttons.filter(button => updateTargetProvider(parseManagementActionId(button.action_id)?.action))
+    assert.deepEqual(scoped.map(button => parseManagementActionId(button.action_id).action).sort(), ['claude', 'codex', 'pi'])
+    for (const button of scoped) {
+      assert.ok(button.confirm, 'a provider sweep restarts sessions and must be confirmed')
+      assert.match(button.confirm.title.text, /update/i)
+    }
+  }
 })

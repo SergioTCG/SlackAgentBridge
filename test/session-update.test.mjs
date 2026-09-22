@@ -417,3 +417,32 @@ test('native replacement transfers exact input-fence ownership', () => {
   assert.equal(owners.get('new-session'), owner)
   assert.equal(updating.has('new-session'), true)
 })
+
+// A provider-scoped sweep considers only that provider's sessions. Other
+// providers are out of scope rather than skipped, so they neither restart nor
+// clutter the scoped report — and only the selected CLI is updated.
+test('a provider-scoped bulk plan considers only that provider’s sessions', () => {
+  const context = { pidAlive: () => true, busySessionIds: new Set(['codex-id']) }
+  const claude = planBulkSessionUpdate(stateFixture(), { ...context, provider: 'claude' })
+  assert.deepEqual(claude.eligible.map(session => session.id), ['claude-id'])
+  assert.deepEqual(claude.skipped, [], 'other providers are out of scope, not skipped')
+
+  const codex = planBulkSessionUpdate(stateFixture(), { ...context, provider: 'codex' })
+  assert.deepEqual(codex.eligible.map(session => session.id), [])
+  assert.deepEqual(codex.skipped.map(item => [item.session.id, item.reason]), [
+    ['codex-id', 'turn in progress'],
+    ['automation-id', 'automation-owned session'],
+  ])
+
+  const pi = planBulkSessionUpdate(stateFixture(), { ...context, provider: 'pi' })
+  assert.deepEqual(pi.eligible.map(session => session.id), ['pi-id'])
+  assert.deepEqual(pi.skipped, [])
+})
+
+test('the provider option leaves an unscoped bulk plan unchanged', () => {
+  const context = { pidAlive: () => true, busySessionIds: new Set(['codex-id']) }
+  const unscoped = planBulkSessionUpdate(stateFixture(), context)
+  const explicitNull = planBulkSessionUpdate(stateFixture(), { ...context, provider: null })
+  assert.deepEqual(explicitNull.eligible.map(session => session.id), unscoped.eligible.map(session => session.id))
+  assert.deepEqual(explicitNull.skipped.map(item => item.session.id), unscoped.skipped.map(item => item.session.id))
+})

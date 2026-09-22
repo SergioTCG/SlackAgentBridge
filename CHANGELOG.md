@@ -8,6 +8,11 @@ Notable changes to this project. Format based on
 
 ### Added
 
+- `/sab-update claude-code`, `/sab-update codex`, and `/sab-update pi` run the
+  maintenance sweep for a single provider: only that provider's CLI is updated
+  and only its eligible idle sessions restart and resume, with the same safety
+  checks as `/sab-update all`. The update chooser offers the same three scopes
+  as confirmed buttons. `claude` is accepted as an alias for `claude-code`.
 - `sab automation validate-flags` provides project orchestrators with a
   side-effect-free JSON-safe preflight using the canonical provider allowlist.
 - New session-team tasks now use explicit two-phase completion: bounded worker
