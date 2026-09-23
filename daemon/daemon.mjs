@@ -42,7 +42,7 @@ import {
   codexTerminalFailure, codexTerminalFailureDecision, recordCodexPromptTurnStart,
   recordCodexTransportTurnStart, resetCodexPollerEvidence,
 } from './codex-terminal.mjs'
-import { codexFooterSettings, shouldPromoteCodexFooter } from './codex-footer.mjs'
+import { codexFooterSettings, codexSettingsMismatch, shouldPromoteCodexFooter } from './codex-footer.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, artifactGrantTokensFromPrompts,
   createArtifactGrantStore, fulfillArtifactUpload, redactArtifactGrants,
@@ -1946,8 +1946,10 @@ async function validProviderRootClaim(pid, tname, provider) {
 async function reportCodexModelMismatch(session) {
   if (!session?.channel || providerOf(session) !== 'codex') return
   const actualEffort = sessionMeta.get(session.id)?.effort || session.effort
-  const modelMismatch = session.requestedModel && session.model && session.requestedModel !== session.model
-  const effortMismatch = session.requestedEffort && actualEffort && session.requestedEffort !== actualEffort
+  const { model: modelMismatch, effort: effortMismatch } = codexSettingsMismatch({
+    requestedModel: session.requestedModel, model: session.model,
+    requestedEffort: session.requestedEffort, effort: actualEffort,
+  })
   if (modelMismatch || effortMismatch) {
     const mismatch = `${session.requestedModel || session.model}->${session.model || 'unknown'} / ${session.requestedEffort || actualEffort || 'unknown'}->${actualEffort || 'unknown'}`
     if (session.modelMismatch === mismatch) return

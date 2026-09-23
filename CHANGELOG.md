@@ -36,6 +36,12 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Codex no longer reports a false model mismatch when its footer renders the
+  model title-cased (`GPT-6-Sol`) while the requested id is lowercase
+  (`gpt-6-sol`). Footer models are stored lowercase, like efforts already
+  were, and requested-vs-running settings are compared case-insensitively.
+  A genuinely different model or effort, such as a capacity fallback, is
+  still reported.
 - Slack prompts are no longer mirrored back into their own channel. Claude Code
   wraps a multi-line bracketed paste in a `<pasted_content …>` envelope before
   its `UserPromptSubmit` hook fires, so an injected prompt stopped matching the
