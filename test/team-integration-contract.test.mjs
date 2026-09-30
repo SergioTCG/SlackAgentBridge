@@ -195,6 +195,7 @@ test('an interrupted automatic coordinator wake is recovered without uncertain r
 test('automatic continuation recovers a hookless idle Codex coordinator without replaying backlog', () => {
   assert.match(daemon, /validProviderRootClaim\(expected\.pid, expected\.tmux, 'codex'\)/)
   assert.match(daemon, /observeIdleCodexCoordinator\(coordinator/)
+  assert.match(daemon, /observeIdleCodexCoordinator\(coordinator, \{\s*ready:[^\n]+\n\s*pane,/)
   assert.match(daemon, /stopPoller\(coordinator\)[\s\S]*clearTeamTurn\(coordinator\)[\s\S]*clearTeamInputReservation\(coordinator\)/)
   assert.match(daemon, /coalesceContinuations\(team\)[\s\S]*claimContinuation\(team\)/)
   assert.match(daemon, /Team continuation is queued while the coordinator remains busy/)
@@ -202,6 +203,7 @@ test('automatic continuation recovers a hookless idle Codex coordinator without 
 
 test('hookless resumed Codex workers release stale owner fences before queued dispatch', () => {
   assert.match(daemon, /observeIdleCodexTurn\(session,/)
+  assert.match(daemon, /observeIdleCodexTurn\(session, \{[\s\S]*?\n\s*pane,\n\s*previous: p\.idleObservation/)
   assert.match(daemon, /allowDelegatedTask: true/)
   assert.match(daemon, /Codex delegated task fallback completed with warning \(Stop hook missing\)/)
   assert.match(daemon, /omitted its acknowledgement and completion hooks[\s\S]*did not replay it/)

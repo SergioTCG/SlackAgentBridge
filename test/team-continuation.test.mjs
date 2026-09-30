@@ -10,6 +10,8 @@ import {
   claimTeamTask, claimTeamTaskForSession, createTeam, createTeamTask, failTeamTask, markTeamTaskRunning,
 } from '../daemon/teams.mjs'
 
+const idleSurface = { pane: 'Ready.\n› Ask Codex to do anything\ngpt-6-sol · ~/Code/Barrique' }
+
 test('continuations remain disabled by default and duplicate events are idempotent', () => {
   const team = { id: 'team_1' }
   assert.equal(queueContinuation(team, { taskId: 'task_1' }).created, false)
@@ -156,30 +158,63 @@ test('idle Codex coordinator release requires aged fences and two identical read
     teamTurn: { actor: 'owner', startedAt: new Date(1000).toISOString() },
     teamInputReservation: { source: 'slack', acceptedAt: new Date(2000).toISOString() },
   }
-  const early = observeIdleCodexCoordinator(session, { ready: true, now: 10_000 })
+  const early = observeIdleCodexCoordinator(session, { ...idleSurface, ready: true, now: 10_000 })
   assert.equal(early.action, 'wait')
-  const first = observeIdleCodexCoordinator(session, { ready: true, now: 20_000 })
+  const first = observeIdleCodexCoordinator(session, { ...idleSurface, ready: true, now: 20_000 })
   assert.equal(first.action, 'confirm')
   const second = observeIdleCodexCoordinator(session, {
-    ready: true, now: 25_000, previous: first.observation,
+    ...idleSurface, ready: true, now: 25_000, previous: first.observation,
   })
   assert.equal(second.action, 'release')
 
   session.pid = 456
   assert.equal(observeIdleCodexCoordinator(session, {
-    ready: true, now: 25_000, previous: first.observation,
+    ...idleSurface, ready: true, now: 25_000, previous: first.observation,
   }).action, 'confirm')
   session.pid = 123
 
   session.teamTurn.startedAt = new Date(24_000).toISOString()
   assert.equal(observeIdleCodexCoordinator(session, {
-    ready: true, now: 25_000, previous: first.observation,
+    ...idleSurface, ready: true, now: 25_000, previous: first.observation,
   }).action, 'wait')
   session.teamActiveTaskId = 'task_running'
   assert.equal(observeIdleCodexCoordinator(session, { ready: true, now: 50_000 }).action, 'reset')
   delete session.teamActiveTaskId
   assert.equal(observeIdleCodexCoordinator(session, { ready: false, now: 50_000 }).action, 'reset')
-  assert.equal(observeIdleCodexCoordinator({ teamTurn: {} }, { ready: true, now: 50_000 }).action, 'blocked')
+  assert.equal(observeIdleCodexCoordinator({ teamTurn: {} }, { ...idleSurface, ready: true, now: 50_000 }).action, 'blocked')
+})
+
+test('Codex idle release requires an unchanged surface, not merely an unchanged session', () => {
+  const session = {
+    id: 'coordinator', pid: 123, tmux: 'sab-coordinator',
+    teamTurn: { actor: 'owner', startedAt: new Date(1000).toISOString() },
+    teamInputReservation: { source: 'slack', acceptedAt: new Date(1000).toISOString() },
+    codexTurnStartedAt: 1000,
+  }
+  const snapshot = structuredClone(session)
+  const first = observeIdleCodexTurn(session, { ...idleSurface, ready: true, now: 20_000 })
+  const changed = observeIdleCodexTurn(session, {
+    pane: `New tool output.\n${idleSurface.pane}`, ready: true, now: 25_000,
+    previous: first.observation,
+  })
+  assert.equal(changed.action, 'confirm')
+  assert.equal(observeIdleCodexTurn(session, {
+    pane: `More tool output.\n${idleSurface.pane}`, ready: true, now: 30_000,
+    previous: changed.observation,
+  }).action, 'confirm')
+  assert.equal(observeIdleCodexTurn(session, {
+    pane: `New tool output.\n${idleSurface.pane}`, ready: true, now: 30_000,
+    previous: changed.observation,
+  }).action, 'release')
+  assert.equal(observeIdleCodexTurn(session, { ready: true, now: 40_000 }).action, 'reset')
+  assert.equal(observeIdleCodexTurn(session, { pane: '', ready: true, now: 40_000 }).action, 'reset')
+  assert.deepEqual(session, snapshot, 'observation cannot mint or mutate authority')
+  assert.equal(JSON.stringify(changed.observation).includes('New tool output'), false)
+  const unrelated = { ...session, id: 'other', pid: 456, tmux: 'sab-other' }
+  assert.equal(observeIdleCodexTurn(unrelated, {
+    pane: `New tool output.\n${idleSurface.pane}`, ready: true, now: 30_000,
+    previous: changed.observation,
+  }).action, 'confirm')
 })
 
 test('hookless resumed worker releases stale owner busy state and claims only the fresh queued task', () => {
@@ -219,10 +254,10 @@ test('hookless resumed worker releases stale owner busy state and claims only th
   worker.tmux = 'sab-worker-new'
   worker.teamInputReservation = { source: 'provider', acceptedAt: new Date(1000).toISOString() }
   worker.codexTurnStartedAt = 1000
-  const first = observeIdleCodexTurn(worker, { ready: true, now: 20_000 })
+  const first = observeIdleCodexTurn(worker, { ...idleSurface, ready: true, now: 20_000 })
   assert.equal(first.action, 'confirm')
   const second = observeIdleCodexTurn(worker, {
-    ready: true, now: 25_000, previous: first.observation,
+    ...idleSurface, ready: true, now: 25_000, previous: first.observation,
   })
   assert.equal(second.action, 'release')
 
@@ -246,10 +281,10 @@ test('hookless resumed worker releases stale owner busy state and claims only th
 
 test('idle observation can opt into an exact provider-only or delegated fence', () => {
   const provider = { id: 'provider', pid: 12, tmux: 'sab-provider', codexTurnStartedAt: 1000 }
-  assert.equal(observeIdleCodexTurn(provider, { ready: true, now: 20_000, allowProviderTurn: true }).action, 'confirm')
+  assert.equal(observeIdleCodexTurn(provider, { ...idleSurface, ready: true, now: 20_000, allowProviderTurn: true }).action, 'confirm')
   const worker = { ...provider, teamActiveTaskId: 'task_1' }
   assert.equal(observeIdleCodexTurn(worker, {
-    ready: true, now: 20_000, allowProviderTurn: true, allowDelegatedTask: true,
+    ...idleSurface, ready: true, now: 20_000, allowProviderTurn: true, allowDelegatedTask: true,
   }).action, 'confirm')
   assert.equal(observeIdleCodexTurn(worker, { ready: true, now: 20_000 }).action, 'reset')
 })

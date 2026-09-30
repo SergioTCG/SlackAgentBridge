@@ -618,7 +618,9 @@ uses its extension event. The two Codex sources atomically claim the same native
 turn before Slack delivery. Codex turns that omit `UserPromptSubmit` are tracked from the
 successful bridge injection, and a rendered `Working (...)` footer allows
 restart re-adoption when the timestamp was lost. Two unchanged idle-surface
-observations can release an owner turn. For an exact delegated turn observed
+observations can release an owner turn. That proof includes a digest of the
+actual visible pane, so changing tool output cannot satisfy it; working timers
+and wrapped interrupt hints remain busy. No terminal text is retained. For an exact delegated turn observed
 continuously by the live poller, they complete that task with an explicit
 warning and never fabricate or replay a final. An already-idle delegated task
 discovered only during boot still fails closed. Deduplication fences hook

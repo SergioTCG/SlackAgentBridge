@@ -238,6 +238,21 @@ Press enter to continue`
   assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
 })
 
+test('Codex idle recovery ignores conversational mentions of working timers', () => {
+  for (const text of [
+    'User: Please explain the line Working (21s)',
+    '• The previous turn showed Working (8m 1s)',
+    '• Working (21s) means an elapsed timer.',
+    'The old status line was:\n• Working (21s)\nThat was only an example.',
+    'The old status line was:\n• Working (21s)\n• That was only an example at ~/Code/Barrique',
+  ]) {
+    const pane = `${text}\n` +
+      '› Ask Codex to do anything\ngpt-5.6-sol xhigh · ~/Code/Barrique'
+    assert.equal(targetStartupState('codex', pane), 'ready', text)
+    assert.equal(codexStatusRecoveryDecision({}, pane), 'clear', text)
+  }
+})
+
 test('Codex target readiness identifies the blocking startup update chooser', () => {
   const update = `A new Codex version is available\n` +
     `› 1. Update now (runs npm install -g @openai/codex)\n` +
@@ -255,6 +270,33 @@ test('Codex target readiness ignores blank rows below the UI in a tall terminal'
 gpt-5.6-sol xhigh · ~/Code/Barrique${'\n'.repeat(40)}`
 
   assert.equal(targetStartupState('codex', ready), 'ready')
+})
+
+test('Codex working footers never count as idle when interrupt hints wrap or disappear', () => {
+  for (const status of [
+    '• Working (21s)',
+    '*•* *Working* (8m 1s)',
+    '• Working (21s · esc to\n  interrupt)',
+    '• Waiting for background terminal (21s · f12\n  to interrupt)',
+  ]) {
+    const pane = `${status}\n› Ask Codex to do anything\n` +
+      'gpt-5.6-sol xhigh · ~/Code/Barrique'
+    assert.equal(targetStartupState('codex', pane), 'starting', status)
+    assert.equal(codexStatusRecoveryDecision({}, pane), 'resume', status)
+  }
+  const idle = 'Ready.\n› Ask Codex to do anything\n' +
+    'gpt-5.6-sol xhigh · ~/Code/Barrique'
+  for (const pane of [
+    '• Working (21s)\n\n──────\n› Ask Codex to do anything\ngpt-5.6-sol xhigh · ~/Code/Barrique',
+    '› queued input\n• Working (21s)\ngpt-5.6-sol xhigh · ~/Code/Barrique',
+    '• Working (21s)\ngpt-5.6-sol xhigh · ~/Code/Barrique',
+    '• Working (21s)\n› queued input\ngpt-5.6-sol xhigh · ~/Code/Barrique' + '\n'.repeat(40),
+  ]) {
+    assert.equal(targetStartupState('codex', pane), 'starting', pane)
+    assert.equal(codexStatusRecoveryDecision({}, pane), 'resume', pane)
+  }
+  assert.equal(targetStartupState('codex', idle), 'ready')
+  assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
 })
 
 test('Codex interrupt reconciliation accepts the normal Stop hook', async () => {

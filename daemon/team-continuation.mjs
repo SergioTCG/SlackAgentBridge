@@ -135,6 +135,7 @@ const parsedTimestamp = value => {
 // coordinator continuation recovery and ordinary worker-turn recovery.
 export function observeIdleCodexTurn(session, {
   ready = false,
+  pane = null,
   previous = null,
   // A provider turn may outlive its Slack/team fences after a daemon restart.
   // Callers that already possess the exact Codex turn timestamp may observe
@@ -148,7 +149,8 @@ export function observeIdleCodexTurn(session, {
   graceMs = TEAM_CONTINUATION_IDLE_GRACE_MS,
   confirmations = TEAM_CONTINUATION_IDLE_CONFIRMATIONS,
 } = {}) {
-  if (!ready || (session?.teamActiveTaskId && !allowDelegatedTask) || (!session?.teamTurn && !session?.teamInputReservation &&
+  if (!ready || typeof pane !== 'string' || !pane.trim() || pane.length > (256 << 10) ||
+      (session?.teamActiveTaskId && !allowDelegatedTask) || (!session?.teamTurn && !session?.teamInputReservation &&
       !(allowProviderTurn && session?.codexTurnStartedAt))) {
     return { action: 'reset', observation: null }
   }
@@ -159,10 +161,16 @@ export function observeIdleCodexTurn(session, {
   ].filter(Number.isFinite)
   if (!timestamps.length) return { action: 'blocked', observation: null }
   const latestAt = Math.max(...timestamps)
+  // Compare the actual visible surface, not only the session identity. Active
+  // tool output can repaint a temporarily ready-looking footer while the turn
+  // is still executing. Retain only its digest; never store terminal content.
+  const surface = pane.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '').trimEnd()
+  const surfaceKey = crypto.createHash('sha256').update(surface).digest('hex')
   const fingerprint = [
     session.id || '', session.pid || '', session.tmux || '',
     session.teamTurn?.startedAt || '', session.teamInputReservation?.acceptedAt || '',
     session.codexTurnStartedAt || '',
+    surfaceKey,
   ].join('|')
   if (now - latestAt < Math.max(0, Number(graceMs) || 0)) {
     return { action: 'wait', observation: { fingerprint, count: 0, latestAt } }
