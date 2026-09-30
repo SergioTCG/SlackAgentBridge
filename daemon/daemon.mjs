@@ -928,6 +928,7 @@ function startCodexPoller(session) {
         // already painted its input footer. Leave the permission relay in
         // control until Codex emits its lifecycle completion.
         ready: targetStartupState('codex', pane) === 'ready' && !hasPendingPerm(session),
+        pane,
         previous: p.idleObservation,
         allowProviderTurn: true,
         allowDelegatedTask: true,
@@ -4449,6 +4450,7 @@ async function reconcileIdleCodexCoordinator(team, coordinator) {
 
   const decision = observeIdleCodexCoordinator(coordinator, {
     ready: targetStartupState('codex', pane) === 'ready',
+    pane,
     previous: teamCoordinatorIdleProof.get(team.id),
   })
   if (decision.observation) teamCoordinatorIdleProof.set(team.id, decision.observation)

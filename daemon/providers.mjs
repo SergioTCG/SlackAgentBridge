@@ -356,6 +356,9 @@ const stripTerminalControls = value => String(value || '')
   .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
   .replace(/\r/g, '')
 
+const codexVisibleWork = lines => /(?:esc|ctrl-c|f12)\s+to\s+interrupt/i.test(lines.join('\n')) ||
+  lines.some(line => /\bWorking\b[^\n]*\(\s*\d+(?:h|m|s)\b/i.test(line))
+
 // A tmux session exists before an interactive agent is ready to accept input.
 // Inspect only the visible bottom of the pane: trust text may remain above the
 // live Codex UI in scrollback, while the model/effort/path footer proves that
@@ -368,7 +371,7 @@ export function targetStartupState(provider, pane) {
   if (provider === 'codex') {
     const prompt = lines.some(line => /^\s*[›❯>]\s/.test(line))
     const footer = lines.some(line => /[·•].*(?:~\/|\/)[^\s]*/.test(line))
-    if (prompt && footer && !/(?:esc|ctrl-c|f12) to interrupt/i.test(visible)) return 'ready'
+    if (prompt && footer && !codexVisibleWork(lines)) return 'ready'
     if (/do you trust|trust the (?:contents|directory|folder|workspace|project)|(?:review|trust|approve|enable).{0,80}hooks?/i.test(visible)) return 'trust'
     // This is the interactive chooser, not the passive "Run codex update"
     // notice. SAB-managed launches suppress it, but recognizing the exact
@@ -394,10 +397,7 @@ export function codexStatusRecoveryDecision(session, pane) {
   // screens are not work.
   const visible = stripTerminalControls(pane)
   const tail = visible.split('\n').slice(-16)
-  const tailText = tail.join('\n')
-  return /(?:esc|ctrl-c|f12) to interrupt/i.test(tailText) ||
-    tail.some(line => /\bWorking\b.*\(\s*\d+(?:h|m|s)\b/i.test(line))
-    ? 'resume' : 'clear'
+  return codexVisibleWork(tail) ? 'resume' : 'clear'
 }
 
 // Codex normally emits Stop when a turn finishes, but an operator interrupt can

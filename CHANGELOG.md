@@ -36,6 +36,12 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Hookless Codex idle recovery no longer treats a working timer with a missing
+  or wrapped interrupt hint as an idle input surface. Repeated idle proof now
+  also compares a digest of the actual visible pane, so changing tool output
+  cannot satisfy the unchanged-surface requirement or revoke an active owner
+  turn. No terminal text is retained and the exact-process authorization and
+  explicit worker-release gates remain unchanged.
 - Codex no longer reports a false model mismatch when its footer renders the
   model title-cased (`GPT-6-Sol`) while the requested id is lowercase
   (`gpt-6-sol`). Footer models are stored lowercase, like efforts already

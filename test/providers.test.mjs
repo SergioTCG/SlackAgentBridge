@@ -257,6 +257,24 @@ gpt-5.6-sol xhigh · ~/Code/Barrique${'\n'.repeat(40)}`
   assert.equal(targetStartupState('codex', ready), 'ready')
 })
 
+test('Codex working footers never count as idle when interrupt hints wrap or disappear', () => {
+  for (const status of [
+    '• Working (21s)',
+    '*•* *Working* (8m 1s)',
+    '• Working (21s · esc to\n  interrupt)',
+    '• Waiting for background terminal (21s · f12\n  to interrupt)',
+  ]) {
+    const pane = `${status}\n› Ask Codex to do anything\n` +
+      'gpt-5.6-sol xhigh · ~/Code/Barrique'
+    assert.equal(targetStartupState('codex', pane), 'starting', status)
+    assert.equal(codexStatusRecoveryDecision({}, pane), 'resume', status)
+  }
+  const idle = 'Ready.\n› Ask Codex to do anything\n' +
+    'gpt-5.6-sol xhigh · ~/Code/Barrique'
+  assert.equal(targetStartupState('codex', idle), 'ready')
+  assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
+})
+
 test('Codex interrupt reconciliation accepts the normal Stop hook', async () => {
   const session = { codexTurnStartedAt: 100 }
   const result = await waitForCodexInterrupt(session, {

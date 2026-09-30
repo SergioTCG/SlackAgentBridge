@@ -239,7 +239,9 @@ produce another wake while a real later state transition still can. If the same 
 active long enough to spend its current dispatch budget, the queued event may
 instead be claimed to establish the next bounded continuation budget; SAB
 persists that claim before creating another task. A resumed Codex TUI that omits lifecycle hooks is reconciled only after
-two unchanged, exact-process idle observations and a grace period. SAB then
+two unchanged, exact-process idle observations and a grace period. The proof
+compares a digest of the visible pane, never retaining its text; changing tool
+output resets it. Working timers and wrapped interrupt hints are not idle. SAB then
 clears the stale coordinator fence and proceeds without scraping a final answer
 or assigning a worker result. A genuine busy wait is reported once after one
 minute and continues to retry safely.
