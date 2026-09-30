@@ -356,21 +356,37 @@ const stripTerminalControls = value => String(value || '')
   .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
   .replace(/\r/g, '')
 
-const codexVisibleWork = lines => /(?:esc|ctrl-c|f12)\s+to\s+interrupt/i.test(lines.join('\n')) ||
-  lines.some(line => /^\s*(?:[*•·]\s*)*Working\*?\s*\(\s*\d+(?:h|m|s)\b[^)]*\)\s*$/i.test(line))
+const terminalSurfaceLines = pane => {
+  const rendered = stripTerminalControls(pane).split('\n')
+  while (rendered.length && !rendered.at(-1).trim()) rendered.pop()
+  return rendered.slice(-16)
+}
+
+const codexPromptRow = line => /^\s*[›❯>]\s/.test(line)
+const codexFooterRow = line => /[·•].*(?:~\/|\/)[^\s]*/.test(line)
+const codexVisibleWork = lines => {
+  if (/(?:esc|ctrl-c|f12)\s+to\s+interrupt/i.test(lines.join('\n'))) return true
+  const promptIndex = lines.findLastIndex(codexPromptRow)
+  return lines.some((line, index) => {
+    if (!/^\s*(?:[*•·]\s*)*Working\*?\s*\(\s*\d+(?:h|m|s)\b[^)]*\)\s*$/i.test(line)) return false
+    // A timer belongs to the live input/footer surface, not earlier conversation.
+    const trailing = lines.slice(index + 1, promptIndex > index ? promptIndex : undefined)
+      .filter(row => row.trim() && !/^\s*[─━╌┄┈]+\s*$/.test(row))
+    if (promptIndex > index) return trailing.length === 0
+    return trailing.every(row => codexFooterRow(row) || /^\s*\d+% context left\b/.test(row))
+  })
+}
 
 // A tmux session exists before an interactive agent is ready to accept input.
 // Inspect only the visible bottom of the pane: trust text may remain above the
 // live Codex UI in scrollback, while the model/effort/path footer proves that
 // the normal input surface has materialized.
 export function targetStartupState(provider, pane) {
-  const rendered = stripTerminalControls(pane).split('\n')
-  while (rendered.length && !rendered.at(-1).trim()) rendered.pop()
-  const lines = rendered.slice(-16)
+  const lines = terminalSurfaceLines(pane)
   const visible = lines.join('\n')
   if (provider === 'codex') {
-    const prompt = lines.some(line => /^\s*[›❯>]\s/.test(line))
-    const footer = lines.some(line => /[·•].*(?:~\/|\/)[^\s]*/.test(line))
+    const prompt = lines.some(codexPromptRow)
+    const footer = lines.some(codexFooterRow)
     if (prompt && footer && !codexVisibleWork(lines)) return 'ready'
     if (/do you trust|trust the (?:contents|directory|folder|workspace|project)|(?:review|trust|approve|enable).{0,80}hooks?/i.test(visible)) return 'trust'
     // This is the interactive chooser, not the passive "Run codex update"
@@ -395,9 +411,7 @@ export function codexStatusRecoveryDecision(session, pane) {
   // whose timestamp was lost. A rendered Working footer is equally strong:
   // Codex only shows it while a turn is executing. Generic startup/trust
   // screens are not work.
-  const visible = stripTerminalControls(pane)
-  const tail = visible.split('\n').slice(-16)
-  return codexVisibleWork(tail) ? 'resume' : 'clear'
+  return codexVisibleWork(terminalSurfaceLines(pane)) ? 'resume' : 'clear'
 }
 
 // Codex normally emits Stop when a turn finishes, but an operator interrupt can
