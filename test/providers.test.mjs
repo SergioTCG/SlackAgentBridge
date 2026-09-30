@@ -238,6 +238,19 @@ Press enter to continue`
   assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
 })
 
+test('Codex idle recovery ignores conversational mentions of working timers', () => {
+  for (const text of [
+    'User: Please explain the line Working (21s)',
+    '• The previous turn showed Working (8m 1s)',
+    '• Working (21s) means an elapsed timer.',
+  ]) {
+    const pane = `${text}\nCodex: It is an elapsed timer.\n` +
+      '› Ask Codex to do anything\ngpt-5.6-sol xhigh · ~/Code/Barrique'
+    assert.equal(targetStartupState('codex', pane), 'ready', text)
+    assert.equal(codexStatusRecoveryDecision({}, pane), 'clear', text)
+  }
+})
+
 test('Codex target readiness identifies the blocking startup update chooser', () => {
   const update = `A new Codex version is available\n` +
     `› 1. Update now (runs npm install -g @openai/codex)\n` +

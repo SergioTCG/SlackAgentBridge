@@ -357,7 +357,7 @@ const stripTerminalControls = value => String(value || '')
   .replace(/\r/g, '')
 
 const codexVisibleWork = lines => /(?:esc|ctrl-c|f12)\s+to\s+interrupt/i.test(lines.join('\n')) ||
-  lines.some(line => /\bWorking\b[^\n]*\(\s*\d+(?:h|m|s)\b/i.test(line))
+  lines.some(line => /^\s*(?:[*•·]\s*)*Working\*?\s*\(\s*\d+(?:h|m|s)\b[^)]*\)\s*$/i.test(line))
 
 // A tmux session exists before an interactive agent is ready to accept input.
 // Inspect only the visible bottom of the pane: trust text may remain above the
