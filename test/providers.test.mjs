@@ -143,6 +143,31 @@ test('Claude resume args preserve the latest model and effort', () => {
   assert.deepEqual(resumeArgsFor({ id: 'abc' }), ['--dangerously-skip-permissions', '--resume', 'abc'])
 })
 
+// Claude records its model and effort only when its status line first reports
+// in. A resume before that must not drop the settings it was launched with.
+test('Claude resume falls back to launch settings until a selection is recorded', () => {
+  assert.deepEqual(resumeArgsFor({
+    id: 'abc', launchFlags: '--dangerously-skip-permissions --chrome --model claude-opus-5-5[1m] --effort max',
+  }), ['--dangerously-skip-permissions', '--chrome', '--model', 'claude-opus-5-5[1m]', '--effort', 'max', '--resume', 'abc'])
+  assert.deepEqual(resumeArgsFor({
+    id: 'abc', launchFlags: '--chrome --model=claude-opus-5-5[1m] --effort=max',
+  }), ['--chrome', '--model', 'claude-opus-5-5[1m]', '--effort', 'max', '--resume', 'abc'])
+})
+
+test('a recorded Claude setting wins, and each setting falls back independently', () => {
+  assert.deepEqual(resumeArgsFor({
+    id: 'abc', launchFlags: '--chrome --model fable --effort max', model: 'opus',
+  }), ['--chrome', '--model', 'opus', '--effort', 'max', '--resume', 'abc'])
+  assert.deepEqual(resumeArgsFor({
+    id: 'abc', launchFlags: '--chrome --model fable --effort max', effort: 'low',
+  }), ['--chrome', '--model', 'fable', '--effort', 'low', '--resume', 'abc'])
+})
+
+test('a dangling Claude launch flag is ignored rather than consuming the resume id', () => {
+  assert.deepEqual(resumeArgsFor({ id: 'abc', launchFlags: '--chrome --model' }), ['--chrome', '--resume', 'abc'])
+  assert.deepEqual(resumeArgsFor({ id: 'abc', launchFlags: '--chrome --effort=' }), ['--chrome', '--resume', 'abc'])
+})
+
 test('Codex resume args use the subcommand and preserve provider settings', () => {
   const session = {
     id: 'thr-123', provider: 'codex',
