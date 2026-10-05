@@ -264,15 +264,25 @@ export function resumeArgsFor(session, {
   const toks = displayFlagsFor(session)
   if (provider === 'claude') {
     const keep = []
+    // Claude reports its model and effort only through the status line, so a
+    // fresh session has nothing recorded until its first use. The latest
+    // recorded selection still wins; until one exists, resume with the values
+    // the session was launched with instead of silently dropping them.
+    let launchModel = null
+    let launchEffort = null
     for (let i = 0; i < toks.length; i++) {
       const t = toks[i]
-      if (t === '--effort' || t === '--model') { i++; continue }
-      if (t.startsWith('--effort=') || t.startsWith('--model=')) continue
+      if (t === '--model') { launchModel = toks[i + 1] || launchModel; i++; continue }
+      if (t === '--effort') { launchEffort = toks[i + 1] || launchEffort; i++; continue }
+      if (t.startsWith('--model=')) { launchModel = t.slice('--model='.length) || launchModel; continue }
+      if (t.startsWith('--effort=')) { launchEffort = t.slice('--effort='.length) || launchEffort; continue }
       keep.push(t)
     }
     if (!keep.length) keep.push(...String(defaultClaudeFlags).split(/\s+/).filter(Boolean))
-    if (session.model) keep.push('--model', session.model)
-    if (session.effort) keep.push('--effort', session.effort)
+    const model = session.model || launchModel
+    const effort = session.effort || launchEffort
+    if (model) keep.push('--model', model)
+    if (effort) keep.push('--effort', effort)
     return [...keep, '--resume', session.id]
   }
 

@@ -36,6 +36,12 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A Claude session restarted before its first use no longer loses its model
+  and effort. Claude reports them only through its status line, so a fresh
+  session has none recorded, and resume dropped the launch flags' `--model`
+  and `--effort` in favour of those missing values. Resume now falls back to
+  the launch settings until a selection is recorded; a recorded selection
+  still wins.
 - Hookless Codex idle recovery no longer treats a working timer with a missing
   or wrapped interrupt hint as an idle input surface. Repeated idle proof now
   also compares a digest of the actual visible pane, so changing tool output
