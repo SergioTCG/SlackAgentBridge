@@ -92,6 +92,19 @@ export const acceptHookSettings = (event, isRestarting) =>
 export const isSupersededHook = (event, storedPid, eventPid) =>
   event !== 'SessionStart' && Boolean(storedPid) && Number(storedPid) !== Number(eventPid)
 
+// Claude Code submits background-command, subagent and Monitor results, and
+// some reminders, as prompts of its own. It does so even mid-turn while it
+// drains queued notifications, and UserPromptSubmit carries no origin field.
+// Only the leading envelope that Claude Code writes identifies them. Typed
+// prompts and slash commands arrive as raw text, pasted text inside
+// `<pasted_content>`, Slack channel messages inside `<channel>`, and peer
+// messages in their own envelopes, so none of those match.
+const CLAUDE_INTERNAL_PROMPT = /^<(?:task-notification|system-reminder)>/
+export function isProviderInternalPrompt(provider, prompt) {
+  return normalizeProvider(provider) === 'claude' &&
+    CLAUDE_INTERNAL_PROMPT.test(String(prompt || '').trimStart())
+}
+
 const CLAUDE_FLAGS = new Set([
   '--dangerously-skip-permissions', '--chrome', '--continue', '--model', '--effort',
 ])

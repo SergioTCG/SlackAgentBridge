@@ -20,7 +20,8 @@ import {
   claudeModelPickerOptions,
   codexFlagsWithoutInitialPrompt, codexModelFromArgs, codexPermissionDecision, codexStatusRecoveryDecision,
   defaultNewFlagsFor, displayFlagsFor, executableCacheKey,
-  isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, normalizeRemoteLaunchFlags,
+  isPathWithin, isProviderInternalPrompt, isSupersededHook, normalizeLaunchFlag, normalizeProvider,
+  normalizeRemoteLaunchFlags,
   updateTargetProvider,
   parsePiStreamCapabilities, parseSlackCommand, piMutableControlAllowed,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
@@ -99,7 +100,7 @@ import {
   providerTurnForTaskLifecycle,
   refreshTeamProviderPollerTurn, releaseDeferredTeamProviderFinalClaim,
   retireTeamProviderTurn, stageTeamProviderTurn,
-  teamProviderPollerObservationCurrent,
+  teamProviderPollerObservationCurrent, unacknowledgedPromptTeamEffect,
 } from './team-provider-turn.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
@@ -2566,8 +2567,11 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       consumeInjected(sid, p)
       return
     }
-    const teamTaskId = taskMarker(p)
-    const promptTeamTurn = providerPromptTurnMarker(p)
+    // A provider notification is never a delegated-task delivery, even when its
+    // payload quotes a task envelope (for example a Monitor tailing team output).
+    const providerInternal = isProviderInternalPrompt(provider, p)
+    const teamTaskId = providerInternal ? null : taskMarker(p)
+    const promptTeamTurn = providerInternal ? null : providerPromptTurnMarker(p)
     // Snapshot the exact task generation represented by this native prompt
     // before any Slack audit await can let a coordinator follow-up advance the
     // mutable task journal underneath this hook.
@@ -2667,13 +2671,19 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
         promptTeamTurn.providerWorkGeneration, 'current', teamTaskProviderWorkGeneration(task))
     } else if (teamTaskId && session.teamActiveTaskId && teamTaskId !== session.teamActiveTaskId) {
       await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
-    } else if (session.teamActiveTaskId && p && !automationEcho && !injected) {
-      await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
-    } else if (p && !automationEcho && !injected) {
-      // Local terminal input and uncorrelated provider prompts do not inherit a
-      // prior Slack owner's lateral team authority.
-      clearTeamTurn(session)
-      saveStateNow(state)
+    } else {
+      const localPromptEffect = unacknowledgedPromptTeamEffect({
+        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal,
+      })
+      if (localPromptEffect === 'fail_task') {
+        await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
+      } else if (localPromptEffect === 'revoke_turn') {
+        // Local terminal input and uncorrelated prompts do not inherit a prior
+        // Slack owner's lateral team authority. Provider notifications that
+        // Claude Code submits mid-turn keep the current turn's authority.
+        clearTeamTurn(session)
+        saveStateNow(state)
+      }
     }
     // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
     // system-injected content (task notifications, reminders, local-command echoes).

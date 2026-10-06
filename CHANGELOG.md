@@ -36,6 +36,16 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Claude background-command, subagent, and Monitor notifications no longer
+  fail a worker's delegated team task or revoke a coordinator's team-turn
+  authority. Claude Code submits these notifications through
+  `UserPromptSubmit`, also mid-turn. SAB treated them as local terminal input,
+  so a worker's task failed while the worker kept working, and a coordinator's
+  next `sab team send` or `continue` call was refused. A notification is
+  recognized only by the leading envelope that Claude Code writes, and it is
+  never treated as a delegated-task delivery. Typed prompts, typed slash
+  commands, pasted text, Slack channel messages, and Codex and Pi prompts
+  still fail or revoke as before.
 - A Claude session restarted before its first use no longer loses its model
   and effort. Claude reports them only through its status line, so a fresh
   session has none recorded, and resume dropped the launch flags' `--model`
