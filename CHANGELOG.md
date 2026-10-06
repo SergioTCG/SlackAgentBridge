@@ -52,6 +52,19 @@ Notable changes to this project. Format based on
   and `--effort` in favour of those missing values. Resume now falls back to
   the launch settings until a selection is recorded; a recorded selection
   still wins.
+- Team instructions and coordinator messages larger than about 16 KB are
+  delivered again; team messages may be up to 24 KiB.
+  - tmux carries each command in one message of at most 16 KiB, so staging the
+    paste buffer with `set-buffer` failed with "command too long" for anything
+    larger. SAB treated that rejection as an uncertain delivery: the worker
+    never saw the task, which failed about five minutes later with "Delivery
+    became uncertain".
+  - SAB now streams the paste buffer to tmux on stdin. This has no such limit,
+    and it keeps the payload out of the process list and out of tmux error
+    text in the daemon log.
+  - A tmux failure before anything is pasted now fails a delegated task at once
+    with its cause, or defers a coordinator message for retry.
+  - A failure after the paste stays uncertain and is never retried.
 - Hookless Codex idle recovery no longer treats a working timer with a missing
   or wrapped interrupt hint as an idle input surface. Repeated idle proof now
   also compares a digest of the actual visible pane, so changing tool output

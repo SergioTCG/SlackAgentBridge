@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  TEAM_MESSAGE_MAX_BYTES,
   TeamError,
   activeTeamForChannel,
   addTeamWorker,
@@ -28,6 +29,7 @@ import {
   createTeamTask,
   delegatedTaskPrompt,
   deferCoordinatorTaskMessageDelivery,
+  failTeamTask,
   markTeamTaskRunning,
   publicTeamTask,
   reconcileTeamSessionBindings,
@@ -1432,4 +1434,39 @@ test('filtered inbox pages retain instruction and expose an opaque older-page cu
   assert.deepEqual(tasksPageForChannel(state, 'C-MASTER', {
     target: 'parallel-2', status: ['queued'], since: new Date(1001).toISOString(),
   }).tasks.map(task => task.id), ['task_page_3', 'task_page_1'])
+})
+
+test('team instructions are bounded at send time by UTF-8 bytes, with a clear rejection', () => {
+  const { state, team } = fixture()
+  let text = ''
+  while (Buffer.byteLength(text + 'Ä→✓-') <= TEAM_MESSAGE_MAX_BYTES) text += 'Ä→✓-'
+  text += 'x'.repeat(TEAM_MESSAGE_MAX_BYTES - Buffer.byteLength(text))
+  assert.equal(Buffer.byteLength(text), TEAM_MESSAGE_MAX_BYTES)
+  const send = (body, requestId) => createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'sid-master', sourceProvider: 'claude',
+    target: 'parallel-1', text: body, requestId, now: 2000,
+  })
+  assert.equal(send(text, 'at-limit').created, true)
+  assert.throws(() => send(`${text}x`, 'one-byte-over'), error => error instanceof TeamError &&
+    error.code === 'message_too_large' && error.status === 413 &&
+    error.message === `Team messages may be at most ${TEAM_MESSAGE_MAX_BYTES} bytes.`)
+})
+
+test('an expired uncertain dispatch is never revived by a late provider acknowledgement', () => {
+  const { state, team } = fixture()
+  const session = { id: 'sid-worker-1', channel: 'C-WORKER-1' }
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'sid-master', sourceProvider: 'claude',
+    target: 'parallel-1', text: 'Large instruction.', requestId: 'uncertain-1', id: 'task_uncertain', now: 2000,
+  })
+  claimTeamTaskForSession(state, task.id, session, { targetProvider: 'claude', now: 3000 })
+  // The reconciler releases a claim that never produced a provider marker.
+  delete session.teamActiveTaskId
+  failTeamTask(state, task.id,
+    'Delivery became uncertain before the provider acknowledged the delegated turn; SAB did not retry it to avoid duplicate work.',
+    { now: 3000 + 5 * 60 * 1000 })
+  assert.throws(() => markTeamTaskRunning(state, task.id, { now: 3000 + 6 * 60 * 1000 }),
+    error => error.code === 'task_not_dispatching')
+  assert.equal(state.teamTasks[task.id].status, 'failed')
+  assert.equal(session.teamActiveTaskId, undefined)
 })

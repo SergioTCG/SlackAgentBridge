@@ -692,3 +692,30 @@ test('nested provider utilities are not registered as SAB sessions', () => {
   assert.match(daemon, /validProviderRootClaim/)
   assert.match(daemon, /rejected nested provider claim/)
 })
+
+test('only a provably unstaged tmux write fails delegated input as undelivered', () => {
+  const injection = daemon.slice(daemon.indexOf('async function injectText('), daemon.indexOf('async function downloadSlackFile('))
+  assert.equal(injection.split('await tmuxPaste(').length, 2, 'one tmux transport attempt per injection')
+  const transportCatch = injection.slice(injection.indexOf('await tmuxPaste('),
+    injection.indexOf('// Only a provably failed tmux write'))
+  assert.match(transportCatch,
+    /if \(expectedTeamTurn && !e\?\.inputNotDelivered\) \{[\s\S]*?throw uncertainTeamProviderInput\(/,
+    'a write that may have reached the provider stays uncertain and is never retried')
+  assert.match(transportCatch,
+    /forgetInjected\(session\.id, delivered\)\s*if \(expectedTeamTurn\) \{[\s\S]*?discardExpectedTeamTurn\(\)\s*throw new TeamError\('provider_input_rejected'/,
+    'an unstaged delegated write releases its staged turn and fails definitively')
+  assert.ok(transportCatch.indexOf("throw new TeamError('provider_input_rejected'") <
+    transportCatch.indexOf('falling back to channel event'),
+  'exact delegated input must never reach a second transport')
+
+  const dispatchBody = /async function dispatchTeamTask\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(dispatchBody,
+    /if \(error\?\.providerInputUncertain\) \{[\s\S]*?return true\s*\}\s*delete target\.teamActiveTaskId[\s\S]*?failTeamTask\(state, task\.id, `Provider injection failed:/,
+    'a definite injection failure fails the task immediately instead of expiring as uncertain')
+
+  const coordinatorMessage = /async function injectCoordinatorTaskMessageOnce\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.equal(coordinatorMessage.split('await tmuxPaste(').length, 2, 'one coordinator-message transport attempt')
+  assert.match(coordinatorMessage,
+    /if \(!error\?\.inputNotDelivered\) throw error\s*forgetInjected\(expected\.sid, prompt\)\s*throw knownUndeliveredTeamMessage\(error\.message\)/,
+    'an unstaged coordinator message is a known non-delivery, safe to defer and retry')
+})

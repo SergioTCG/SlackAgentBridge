@@ -514,3 +514,40 @@ test('an in-flight poller observation cannot be retagged to a newer task generat
   assert.equal(teamProviderPollerObservationCurrent(poller,
     beginTeamProviderPollerObservation(poller)), true)
 })
+
+test('an unstaged tmux write leaves nothing to acknowledge; an uncertain one is acknowledged once', () => {
+  const prompt = [
+    '<sab-team-task id="task_large" team="team_one" generation="1" source="coordinator">',
+    '[Slack Agent Bridge delegated task]',
+    '</sab-team-task>',
+    'A 24 KiB instruction body.',
+  ].join('\n')
+  const marker = providerPromptTurnMarker(prompt)
+  const turn = { taskId: 'task_large', providerWorkGeneration: 1 }
+  const acknowledges = session => providerPromptAcknowledgesTask(session, {
+    taskId: 'task_large', currentGeneration: 1, promptTurn: marker,
+    submittedTurn: pendingTeamProviderTurn(session, marker), prompt,
+    pending: Boolean(pendingTeamProviderTurn(session, marker)),
+  })
+
+  // tmux rejected the payload before any paste: the staged generation is
+  // discarded, so even a forged or delayed prompt cannot claim the task.
+  const rejected = {}
+  stageTeamProviderTurn(rejected, turn, { now: 1000, prompt })
+  assert.equal(discardPendingTeamProviderTurn(rejected, turn), true)
+  assert.equal(pendingTeamProviderTurn(rejected, marker), null)
+  assert.equal(acknowledges(rejected), false)
+
+  // The paste may have reached the provider before tmux failed: the staged
+  // generation survives restart, and its late exact prompt promotes it once.
+  const uncertain = JSON.parse(JSON.stringify((() => {
+    const session = {}
+    stageTeamProviderTurn(session, turn, { now: 1000, prompt })
+    return session
+  })()))
+  assert.equal(acknowledges(uncertain), true)
+  assert.deepEqual(activatePendingTeamProviderTurn(uncertain, turn, { acceptedAt: 1200 }), turn)
+  assert.equal(activatePendingTeamProviderTurn(uncertain, turn, { acceptedAt: 1300 }), null,
+    'a repeated hook must not promote the same delivery twice')
+  assert.equal(pendingTeamProviderTurn(uncertain, marker), null)
+})

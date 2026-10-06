@@ -214,7 +214,11 @@ Claude/Pi stream attachment cannot remove or reorder prompts. It remains active
 until every queued prompt, including prompts arriving during the drain, reaches
 the exact replacement input surface. Each concurrent tmux paste uses a private
 server buffer, so one session cannot overwrite or delete another session's
-payload. If a transport failure leaves input queued while the provider remains
+payload. The payload reaches that buffer on stdin (`tmux load-buffer -`), never
+as a command argument. tmux carries each command in one message of at most
+16 KiB, and argv is visible in the process list. A tmux failure before the
+paste proves that nothing reached the provider; a failure after it is
+uncertain. If a transport failure leaves input queued while the provider remains
 alive, SAB revalidates the exact PID, tmux, channel binding, completed startup,
 and idle input surface before reacquiring the ordered drain; it never treats a
 live PID alone as proof that delivery succeeded. After a daemon restart, the
