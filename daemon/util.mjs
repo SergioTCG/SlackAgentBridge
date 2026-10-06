@@ -211,23 +211,47 @@ export async function tmuxInterrupt(tname, provider = 'claude') {
   await execFile('tmux', ['send-keys', '-t', tname, provider === 'codex' ? 'F12' : 'Escape'])
 }
 
+// A tmux client sends each command to its server as one message of at most
+// 16 KiB, so `set-buffer <text>` rejects larger input with "command too long"
+// (and puts the payload in the process list and in the error text). Reading
+// the buffer from stdin has no such bound and keeps the payload out of argv.
+export function tmuxLoadBuffer(buffer, text, { spawnProcess = spawn } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawnProcess('tmux', ['load-buffer', '-b', buffer, '-'], { stdio: ['pipe', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', chunk => { if (stderr.length < 2000) stderr += chunk })
+    child.on('error', reject)
+    child.on('close', code => code === 0
+      ? resolve()
+      : reject(new Error(`tmux load-buffer exited ${code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)))
+    // An early tmux exit closes the pipe; its status is reported by `close`.
+    child.stdin.on('error', () => {})
+    child.stdin.end(String(text))
+  })
+}
+
 // Inject a full message into the session's input box as a bracketed paste,
 // then submit. Unlike channel events (rendered as a ~50-char summary line),
 // this shows the complete message in the terminal exactly as if typed.
 let tmuxPasteBufferSequence = 0
-export async function tmuxPaste(tname, text, { run = execFile, pause = sleep } = {}) {
+export async function tmuxPaste(tname, text, { run = execFile, load = tmuxLoadBuffer, pause = sleep } = {}) {
   // tmux buffers are server-global, not session-local. A shared `sab-inject`
   // name let simultaneous sessions overwrite or delete each other's payloads.
-  // A process-scoped monotonic identity makes the set/paste/delete transaction
+  // A process-scoped monotonic identity makes the load/paste/delete transaction
   // private even when many sessions receive input in the same event-loop tick.
   const buffer = `sab-inject-${process.pid}-${++tmuxPasteBufferSequence}`
-  let created = false
   try {
-    await run('tmux', ['set-buffer', '-b', buffer, text])
-    created = true
+    await load(buffer, text)
+  } catch (cause) {
+    await run('tmux', ['delete-buffer', '-b', buffer]).catch(() => {})
+    // Nothing was pasted or submitted: the provider cannot have seen this input.
+    throw Object.assign(new Error(`tmux could not stage the input: ${String(cause?.message || cause)}`),
+      { cause, inputNotDelivered: true })
+  }
+  try {
     await run('tmux', ['paste-buffer', '-p', '-b', buffer, '-t', tname])
   } finally {
-    if (created) await run('tmux', ['delete-buffer', '-b', buffer]).catch(() => {})
+    await run('tmux', ['delete-buffer', '-b', buffer]).catch(() => {})
   }
   await pause(300)
   await run('tmux', ['send-keys', '-t', tname, 'Enter'])

@@ -225,7 +225,8 @@ reply`. The latter proves that work was accepted when a prompt hook is missing,
 restores Codex status tracking, and survives restart; it never substitutes for
 a stable turn report. A daemon restart may deliver a still-queued task, but it never
 retries a genuinely uncertain claim. That trades a visible failure for duplicate
-work. If the claimed envelope was waiting in an in-memory provider queue, SAB
+work. A tmux rejection before anything is pasted is not uncertain: the task
+fails at once with its cause, and no later prompt can acknowledge it. If the claimed envelope was waiting in an in-memory provider queue, SAB
 removes that exact marker before reporting failure so a later reconnect cannot
 execute it.
 

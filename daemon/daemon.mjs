@@ -4150,7 +4150,7 @@ async function injectText(session, text, options = {}) {
       tmuxAccepted = true
     }
     catch (e) {
-      if (expectedTeamTurn) {
+      if (expectedTeamTurn && !e?.inputNotDelivered) {
         // tmuxPaste has multiple subprocess boundaries; a rejection may occur
         // after paste-buffer or Enter already reached the provider. An exact
         // delegated task therefore fails closed instead of trying SSE too.
@@ -4158,6 +4158,14 @@ async function injectText(session, text, options = {}) {
           'The delegated tmux write outcome is uncertain. SAB retained the task reservation and will not retry another transport.', e)
       }
       forgetInjected(session.id, delivered)
+      if (expectedTeamTurn) {
+        // tmux rejected the payload before any paste, so the provider cannot
+        // have seen it and no late acknowledgement can follow. Fail now with
+        // the cause instead of holding an uncertain claim until it expires.
+        discardExpectedTeamTurn()
+        throw new TeamError('provider_input_rejected',
+          `${String(e.message).slice(0, 500)}. Nothing reached the provider.`, 502)
+      }
       log('tmux paste failed, falling back to channel event', String(e))
     }
     // Only a provably failed tmux write may reach the secondary input surface.
@@ -5017,9 +5025,16 @@ async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, 
     return activeTurn
   }
   // This is deliberately one transport attempt. tmuxPaste can become
-  // uncertain after its buffer or Enter side effect; falling back to a channel
-  // stream would risk submitting the same coordinator instruction twice.
-  await tmuxPaste(expected.tmux, prompt)
+  // uncertain after its paste or Enter side effect; falling back to a channel
+  // stream would risk submitting the same coordinator instruction twice. A
+  // payload tmux could not even stage provably never reached the provider.
+  try {
+    await tmuxPaste(expected.tmux, prompt)
+  } catch (error) {
+    if (!error?.inputNotDelivered) throw error
+    forgetInjected(expected.sid, prompt)
+    throw knownUndeliveredTeamMessage(error.message)
+  }
   if (!coordinatorTaskMessageTargetMatches(task, target, expected)) {
     throw new TeamError('target_authority_lost',
       'The worker changed while the coordinator message was being submitted; delivery is uncertain.', 409)
