@@ -87,7 +87,10 @@ Only an owner-initiated coordinator turn receives bounded dispatch authority.
 A collaborator prompt deliberately clears that authority. A worker receives
 only the ability to reply to the one active task bound to that exact native
 session. Local terminal input, session replacement, interruption, team removal,
-and provider switching revoke or invalidate stale authority.
+and provider switching revoke or invalidate stale authority. Claude Code's own
+background-command, subagent, and Monitor notifications are not local input.
+Claude Code submits them as prompts, even mid-turn, but they neither revoke the
+current turn's authority nor replace a worker's delegated turn.
 
 ## Agent-facing CLI
 
