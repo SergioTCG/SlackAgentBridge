@@ -145,6 +145,12 @@ channels and injecting it into the same authoritative worker session. Retries
 need the same request ID and content. Delivery is rejected while the worker has
 an open question or permission prompt, because that is not a safe text-input
 surface. An uncertain provider-side message is reported and never replayed.
+A provider may queue a delivered message behind its running turn and submit it
+minutes later. The prompt hook then still recognizes the message as the
+bridge's own input, by the digest journaled for the exact task, session,
+channel and current work generation, even after a daemon restart. A matching
+tag alone is never trusted. An older generation is ignored, and altered or
+misaddressed text remains local input.
 If Pi has no connected input stream, no provider write has occurred: the
 message remains pending and the reconciler submits it once after the exact
 authoritative stream reconnects.

@@ -5,6 +5,7 @@ import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
   claimDeferredTeamProviderFinal, clearDeferredTeamProviderFinal, deferPendingTeamProviderFinal,
   deferredTeamProviderFinal, discardPendingTeamProviderTurn, hasTeamProviderTurnTracking,
+  journaledTeamProviderPrompt,
   pendingTeamProviderTurn, providerPromptTurnMarker, providerTurnForCompletion,
   providerPromptAcknowledgesTask, providerTurnForTaskLifecycle,
   refreshTeamProviderPollerTurn, releaseDeferredTeamProviderFinalClaim,
@@ -552,3 +553,26 @@ test('an unstaged tmux write leaves nothing to acknowledge; an uncertain one is 
   assert.equal(pendingTeamProviderTurn(uncertain, marker), null)
 })
 
+test('journaled prompt provenance needs the exact digest and grants no generation', () => {
+  const prompt = generation => [
+    `<sab-team-message task="task_one" generation="${generation}" source="coordinator">`,
+    `Instruction for generation ${generation}.`,
+    '</sab-team-message>',
+  ].join('\n')
+  const session = {}
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 1 }, { now: 1000, prompt: prompt(1) })
+  activateTeamProviderTurn(session, { startedAt: 1000 })
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 2 }, { now: 2000, prompt: prompt(2) })
+  activateTeamProviderTurn(session, { startedAt: 2000 })
+  stageTeamProviderTurn(session, { taskId: 'task_one', providerWorkGeneration: 3 }, { now: 3000, prompt: prompt(3) })
+  const recovered = JSON.parse(JSON.stringify(session))
+
+  assert.deepEqual(journaledTeamProviderPrompt(recovered, prompt(1)), { taskId: 'task_one', providerWorkGeneration: 1 })
+  assert.deepEqual(journaledTeamProviderPrompt(recovered, prompt(2)), { taskId: 'task_one', providerWorkGeneration: 2 })
+  assert.deepEqual(journaledTeamProviderPrompt(recovered, `  ${prompt(3)}\n`), { taskId: 'task_one', providerWorkGeneration: 3 })
+  assert.equal(journaledTeamProviderPrompt(recovered, prompt(2).replace('Instruction', 'Changed')), null)
+  assert.equal(journaledTeamProviderPrompt(recovered, prompt(4)), null)
+  assert.equal(journaledTeamProviderPrompt(recovered, ''), null)
+  assert.equal(journaledTeamProviderPrompt(null, prompt(1)), null)
+  assert.equal(recovered.teamProviderTurn.providerWorkGeneration, 2, 'a lookup never changes the journal')
+})

@@ -471,3 +471,19 @@ export function teamTaskTurnOwnsLifecycle(state, session, expected) {
     task.targetChannel === session.channel &&
     teamTaskProviderWorkGeneration(task) === expected.providerWorkGeneration)
 }
+
+// Every delegated prompt the bridge submits is journaled with a digest of its
+// exact text. A hook carrying that text is the bridge's own input, even after
+// the in-memory injected-text record expired or the daemon restarted. This
+// proves provenance only; it never makes an older generation current.
+export function journaledTeamProviderPrompt(session, prompt) {
+  const digest = promptDigest(prompt)
+  if (!session || !digest) return null
+  const journal = [
+    session.teamProviderTurnPending,
+    session.teamProviderTurn,
+    ...(Array.isArray(session.teamProviderTurnHistory) ? session.teamProviderTurnHistory : []),
+  ]
+  const entry = journal.find(item => item?.promptHash && item.promptHash === digest)
+  return entry ? publicTurn(normalizedTurn(entry, entry.startedAt || entry.stagedAt)) : null
+}

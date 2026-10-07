@@ -460,6 +460,12 @@ Task delivery is journal-first:
    and leaves `session.teamActiveTaskId` intact. Coordinator follow-ups are
    serialized in durable acceptance order; a coordinator release is persisted
    without being reclassified as an authenticated worker continuation event.
+   The prompt hook recognizes the bridge's own task and message prompts first
+   by a short-lived in-memory record of injected text. Once that expires, or
+   after a restart, it uses the digest persisted in the provider-turn journal.
+   Only an exact current-generation match for the bound task, session and
+   channel is acknowledged. Neither path counts as local terminal input or is
+   mirrored as typing.
 6. A worker checkpoint atomically replaces the complete bounded pending-gate
    set. A completion declaration is rejected while any gate remains. Once the
    worker declares readiness with the work generation from its current

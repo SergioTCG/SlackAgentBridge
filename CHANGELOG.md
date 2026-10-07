@@ -36,6 +36,24 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A coordinator message whose prompt hook arrives late no longer fails the
+  delegated task as local terminal input.
+  - Codex queues a message delivered during a running turn and submits it
+    later. Once the hook arrived after the 120-second in-memory record of
+    injected text, or after a daemon restart, SAB authenticated the message
+    against its persisted journal but then still classified it as local input.
+    The task failed with "A local terminal prompt replaced the delegated worker
+    turn".
+  - An authenticated current-generation message is now settled as bridge
+    input. It no longer revokes the worker's task or appears in Slack as
+    terminal typing.
+  - Journal matching now also accepts Claude Code's `<pasted_content>` paste
+    envelope, so Claude task and message prompts are recognized after a
+    restart as well.
+  - A matching tag alone is still never trusted.
+  - Stale generations are ignored.
+  - Terminated tasks are not resumed.
+  - Genuine local input still ends the delegated turn.
 - Claude background-command, subagent, and Monitor notifications no longer
   fail a worker's delegated team task or revoke a coordinator's team-turn
   authority. Claude Code submits these notifications through

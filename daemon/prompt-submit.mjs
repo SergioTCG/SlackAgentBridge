@@ -4,10 +4,11 @@ import {
   teamTaskProviderWorkGeneration,
 } from './teams.mjs'
 import {
-  activatePendingTeamProviderTurn, activateTeamProviderTurn,
+  activatePendingTeamProviderTurn, activateTeamProviderTurn, journaledTeamProviderPrompt,
   pendingTeamProviderTurn, providerPromptAcknowledgesTask, providerPromptTurnMarker,
   retireTeamProviderTurn, unacknowledgedPromptTeamEffect,
 } from './team-provider-turn.mjs'
+import { unwrapPastedContent } from './util.mjs'
 
 // UserPromptSubmit: decide whether a native prompt is the bridge's own input
 // (a delegated task, a coordinator message, a Slack injection) or local input,
@@ -47,6 +48,9 @@ export function createPromptSubmitHandler({
     const providerInternal = isProviderInternalPrompt(provider, p)
     const teamTaskId = providerInternal ? null : taskMarker(p)
     const promptTeamTurn = providerInternal ? null : providerPromptTurnMarker(p)
+    // The journal holds a digest of the exact text the bridge submitted; Claude
+    // Code may wrap that pasted text in a <pasted_content> envelope.
+    const deliveredPrompt = unwrapPastedContent(p)
     // Snapshot the exact task generation represented by this native prompt
     // before any Slack audit await can let a coordinator follow-up advance the
     // mutable task journal underneath this hook.
@@ -55,6 +59,9 @@ export function createPromptSubmitHandler({
       : null
     const submittedTeamTaskTurn = pendingPromptTeamTurn ||
       currentTeamTaskProviderTurn(session, body)
+    // Provenance only: a journaled prompt is the bridge's own input even after
+    // the injected-text record expired, but it authorizes nothing by itself.
+    const journaledDelivery = journaledTeamProviderPrompt(session, deliveredPrompt)
     const injected = consumeInjected(sid, p)
     const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
     const acknowledgesTask = providerPromptAcknowledgesTask(session, {
@@ -67,7 +74,7 @@ export function createPromptSubmitHandler({
         (task ? teamTaskProviderWorkGeneration(task) : null),
       promptTurn: promptTeamTurn,
       submittedTurn: submittedTeamTaskTurn,
-      prompt: p,
+      prompt: deliveredPrompt,
       injected,
       pending: Boolean(pendingPromptTeamTurn),
     })
@@ -137,12 +144,22 @@ export function createPromptSubmitHandler({
         await updateTeamTaskAudit(task)
       }
       catch (error) { log('team task prompt acknowledgement rejected', teamTaskId, String(error?.message || error)) }
+    } else if (acknowledgedTurn && !teamTaskId) {
+      // An authenticated coordinator message for the current generation is the
+      // bridge's own input even when its hook arrives after the injected-text
+      // record expired (a provider may queue it behind a running turn) or after
+      // a daemon restart. The acknowledgement above already settled it; it
+      // never replaces the delegated turn or ends the worker's authority.
+      if (!injected) {
+        log('acknowledged journaled coordinator message', acknowledgedTurn.taskId,
+          acknowledgedTurn.providerWorkGeneration)
+      }
     } else if (staleSameTaskPrompt) {
       // Provider hooks may be delayed beyond the in-memory injected-text cache
       // or a daemon restart. An older exact generation for this same task is
       // system input, not a local owner prompt and not authority for the newer
       // work. Ignore it without changing either lifecycle.
-      log('ignored stale team prompt acknowledgement', teamTaskId,
+      log('ignored stale team prompt acknowledgement', promptTeamTurn.taskId,
         promptTeamTurn.providerWorkGeneration, 'current', teamTaskProviderWorkGeneration(task))
     } else if (teamTaskId && session.teamActiveTaskId && teamTaskId !== session.teamActiveTaskId) {
       await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
@@ -160,9 +177,11 @@ export function createPromptSubmitHandler({
         saveStateNow(state)
       }
     }
-    // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
-    // system-injected content (task notifications, reminders, local-command echoes).
-    if (p && !automationEcho && !injected && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
+    // Mirror only genuine typing: skip the bridge's own input, recognized by its
+    // injected-text record or, once that expires, its persisted team journal,
+    // and system-injected content (task notifications, reminders, echoes).
+    if (p && !automationEcho && !injected && !acknowledgedTurn && !journaledDelivery &&
+        !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
