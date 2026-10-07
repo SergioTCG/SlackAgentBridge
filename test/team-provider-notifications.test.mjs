@@ -169,10 +169,9 @@ test('bridge injections and automation echoes keep their existing semantics', ()
 })
 
 test('the prompt hook routes provider notifications through the shared guard', () => {
-  const promptHook = daemon.slice(
-    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
-    daemon.indexOf("if (ev === 'PreToolUse')"),
-  )
+  const handlerModule = fs.readFileSync(new URL('../daemon/prompt-submit.mjs', import.meta.url), 'utf8')
+  const promptHook = handlerModule.slice(handlerModule.indexOf('return async function handlePromptSubmit('))
+  assert.match(daemon, /if \(ev === 'UserPromptSubmit'\) \{\s*await handlePromptSubmit\(\{ session, sid, provider, body, targetClaim \}\)/)
   const classify = promptHook.indexOf('const providerInternal = isProviderInternalPrompt(provider, p)')
   assert.ok(classify > 0, 'the prompt hook must classify provider notifications')
   // A notification can quote a task envelope (a Monitor tailing team output);

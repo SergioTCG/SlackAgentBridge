@@ -12,7 +12,7 @@ import {
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
   spawnSession, clearKillOnClose, execFile, availableModels, tmuxTitle, safeAccount,
   tmuxClientPids, openTmuxTerminal, closeTmuxTerminal,
-  unwrapPastedContent,
+  createInjectedTextCache,
 } from './util.mjs'
 import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } from './slackout.mjs'
 import {
@@ -20,7 +20,7 @@ import {
   claudeModelPickerOptions,
   codexFlagsWithoutInitialPrompt, codexModelFromArgs, codexPermissionDecision, codexStatusRecoveryDecision,
   defaultNewFlagsFor, displayFlagsFor, executableCacheKey,
-  isPathWithin, isProviderInternalPrompt, isSupersededHook, normalizeLaunchFlag, normalizeProvider,
+  isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider,
   normalizeRemoteLaunchFlags,
   updateTargetProvider,
   parsePiStreamCapabilities, parseSlackCommand, piMutableControlAllowed,
@@ -93,15 +93,13 @@ import {
 } from './team-message-delivery.mjs'
 import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
-  claimDeferredTeamProviderFinal, clearDeferredTeamProviderFinal,
+  boundTeamTaskProviderTurn, claimDeferredTeamProviderFinal, clearDeferredTeamProviderFinal,
   deferPendingTeamProviderFinal, deferredTeamProviderFinal,
-  discardPendingTeamProviderTurn, pendingTeamProviderTurn, providerPromptAcknowledgesTask,
-  providerPromptTurnMarker,
-  providerTurnForTaskLifecycle,
+  discardPendingTeamProviderTurn, pendingTeamProviderTurn,
   refreshTeamProviderPollerTurn, releaseDeferredTeamProviderFinalClaim,
-  retireTeamProviderTurn, stageTeamProviderTurn,
-  teamProviderPollerObservationCurrent, unacknowledgedPromptTeamEffect,
+  stageTeamProviderTurn, teamProviderPollerObservationCurrent, teamTaskTurnOwnsLifecycle,
 } from './team-provider-turn.mjs'
+import { createPromptSubmitHandler } from './prompt-submit.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
 import {
@@ -113,15 +111,16 @@ import {
   appendTeamTaskReply,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
-  acknowledgeCoordinatorTaskMessageDelivery, beginCoordinatorTaskMessageDelivery,
+  beginCoordinatorTaskMessageDelivery,
   completeCoordinatorTaskMessageDelivery, closeTeam,
   consumeCoordinatorDispatch, coordinatorPromptContext,
-  createTeam, createTeamTask, delegatedTaskPrompt, failTeamTask, markTeamTaskRunning, normalizeTeamAlias,
+  coordinatorTaskMessagePrompt, createTeam, createTeamTask, delegatedTaskPrompt, failTeamTask, markTeamTaskRunning,
+  normalizeTeamAlias,
   isActiveTeamTask, isTerminalTeamTask, isWorkerBoundTeamTask, publicTeamTask, reconcileTeamSessionBindings,
   deferCoordinatorTaskMessageDelivery, releaseTeamTask, removeTeamWorker, replaceQueuedTeamTask, reportTeamTaskTurn,
   requestTeamTaskCompletion,
   resolveTeamPeer, setTeamDispatchMode,
-  setTeamWorkerFiles, taskMarker, tasksForChannel, tasksPageForChannel, teamById, teamContext,
+  setTeamWorkerFiles, tasksForChannel, tasksPageForChannel, teamById, teamContext,
   teamDispatchMode, teamMutationForRequest, teamTask, teamTaskDeliverySettled, teamTaskForRequest,
   teamTaskCompletionPolicy, teamTaskProviderWorkGeneration, teamTaskReleaseReady,
   withoutDelegatedTaskPrompt,
@@ -284,27 +283,10 @@ const piControlWaiters = new Map() // request id → bounded settings/status com
 const pendingSpawnChannels = new Map() // tmux → Slack channel that requested a not-yet-registered Pi spawn
 
 // sid → texts injected from Slack, awaiting their UserPromptSubmit echo (dedup)
-const injectedRecently = new Map()
-function rememberInjected(sid, text) {
-  const a = injectedRecently.get(sid) || []
-  a.push({ text: unwrapPastedContent(text), at: Date.now() })
-  injectedRecently.set(sid, a.slice(-10))
-}
-function forgetInjected(sid, text) {
-  const a = injectedRecently.get(sid) || []
-  const wanted = unwrapPastedContent(text)
-  const index = a.findLastIndex(item => item.text === wanted)
-  if (index >= 0) a.splice(index, 1)
-  if (a.length) injectedRecently.set(sid, a)
-  else injectedRecently.delete(sid)
-}
-function consumeInjected(sid, prompt) {
-  const a = injectedRecently.get(sid) || []
-  const p = unwrapPastedContent(prompt)
-  const i = a.findIndex(x => x.text === p && Date.now() - x.at < 120000)
-  if (i >= 0) { a.splice(i, 1); return true }
-  return false
-}
+const injectedText = createInjectedTextCache()
+function rememberInjected(sid, text) { injectedText.remember(sid, text) }
+function forgetInjected(sid, text) { injectedText.forget(sid, text) }
+function consumeInjected(sid, prompt) { return injectedText.consume(sid, prompt) }
 // ---- Claude Code binary: version, update, model list ------------------------
 const restarting = new Set() // session ids intentionally restarting (suppress the "ended" notice)
 const updatingSessions = new Set() // sessions whose provider binary/relaunch maintenance is in progress
@@ -1148,16 +1130,7 @@ function stopPoller(session, { preserveCodexTurn = false } = {}) {
 const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel === session.channel)
 
 function currentTeamTaskProviderTurn(session, body = null) {
-  const taskId = session?.teamActiveTaskId
-  const task = taskId ? state.teamTasks?.[taskId] : null
-  if (!task || task.targetSessionId !== session.id || task.targetChannel !== session.channel) return null
-  const tracked = providerTurnForTaskLifecycle(session, {
-    taskId,
-    providerWorkGeneration: teamTaskProviderWorkGeneration(task),
-    providerTurnId: body?.turn_id || null,
-    observedAt: body?.observed_at || null,
-  })
-  return tracked ? Object.freeze(tracked) : null
+  return boundTeamTaskProviderTurn(state, session, body)
 }
 
 function claudePendingTeamTurnEvidence(session, expected, observedAt) {
@@ -1310,13 +1283,7 @@ function scheduleDeferredTeamProviderFinal(session, expected = null) {
 }
 
 function teamTaskTurnOwnsCurrentLifecycle(session, expected) {
-  const taskId = session?.teamActiveTaskId || null
-  if (!taskId) return expected == null
-  if (!expected || expected.taskId !== taskId) return false
-  const task = state.teamTasks?.[taskId]
-  return Boolean(task && task.targetSessionId === session.id &&
-    task.targetChannel === session.channel &&
-    teamTaskProviderWorkGeneration(task) === expected.providerWorkGeneration)
+  return teamTaskTurnOwnsLifecycle(state, session, expected)
 }
 
 // Mirror a turn's final assistant text and clear its live status. Called by the
@@ -1747,12 +1714,6 @@ async function readoptStatus() {
     }
   }
   saveState(state)
-}
-
-// System-injected prompts (task notifications, reminders, local-command echoes)
-// arrive via UserPromptSubmit but aren't genuine typing — don't mirror them.
-function isSystemPrompt(p) {
-  return /SYSTEM NOTIFICATION|task-notification|<system-reminder>|<command-name>|<local-command|Caveat: The messages below/i.test(p)
 }
 
 // ---- transcript mirroring ---------------------------------------------------
@@ -2561,140 +2522,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     return
   }
   if (ev === 'UserPromptSubmit') {
-    const p = (body.prompt || '').trim()
-    const automationEcho = automationLifecycle.consumeInitialPromptEcho(sid, p)
-    if (targetClaim || internalTurns.has(session.id)) {
-      consumeInjected(sid, p)
-      return
-    }
-    // A provider notification is never a delegated-task delivery, even when its
-    // payload quotes a task envelope (for example a Monitor tailing team output).
-    const providerInternal = isProviderInternalPrompt(provider, p)
-    const teamTaskId = providerInternal ? null : taskMarker(p)
-    const promptTeamTurn = providerInternal ? null : providerPromptTurnMarker(p)
-    // Snapshot the exact task generation represented by this native prompt
-    // before any Slack audit await can let a coordinator follow-up advance the
-    // mutable task journal underneath this hook.
-    const pendingPromptTeamTurn = promptTeamTurn
-      ? pendingTeamProviderTurn(session, promptTeamTurn)
-      : null
-    const submittedTeamTaskTurn = pendingPromptTeamTurn ||
-      currentTeamTaskProviderTurn(session, body)
-    const injected = consumeInjected(sid, p)
-    const task = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
-    const acknowledgesTask = providerPromptAcknowledgesTask(session, {
-      taskId: task?.id,
-      // Provider delivery advances the task journal only after the transport
-      // callback settles. An earlier exact prompt hook is itself the durable
-      // acceptance proof, so compare it with its staged generation rather than
-      // the still-preceding task projection.
-      currentGeneration: pendingPromptTeamTurn?.providerWorkGeneration ??
-        (task ? teamTaskProviderWorkGeneration(task) : null),
-      promptTurn: promptTeamTurn,
-      submittedTurn: submittedTeamTaskTurn,
-      prompt: p,
-      injected,
-      pending: Boolean(pendingPromptTeamTurn),
-    })
-    const acknowledgedTurn = task && task.targetSessionId === session.id &&
-      task.targetChannel === session.channel && acknowledgesTask &&
-      submittedTeamTaskTurn?.taskId === task.id
-      ? submittedTeamTaskTurn
-      : null
-    const staleSameTaskPrompt = Boolean(task && promptTeamTurn?.taskId === task.id &&
-      Number.isSafeInteger(promptTeamTurn.providerWorkGeneration) &&
-      promptTeamTurn.providerWorkGeneration < teamTaskProviderWorkGeneration(task))
-    let acknowledgedCoordinatorMessage = null
-    if (acknowledgedTurn) {
-      // An uncertain tmux delivery may leave only the pending generation for
-      // this hook to recover. Promote and persist it before channel/audit I/O:
-      // a fast Stop during either await must see the accepted exact turn.
-      const activation = {
-        providerTurnId: body.turn_id || null,
-        startedAt: body.observed_at || Date.now(),
-        acceptedAt: body.observed_at || Date.now(),
-      }
-      const activeTurn = pendingPromptTeamTurn
-        ? activatePendingTeamProviderTurn(session, pendingPromptTeamTurn, activation)
-        : activateTeamProviderTurn(session, { turn: acknowledgedTurn, ...activation })
-      acknowledgedCoordinatorMessage = acknowledgeCoordinatorTaskMessageDelivery(state, task.id, {
-        targetSessionId: session.id,
-        providerWorkGeneration: acknowledgedTurn.providerWorkGeneration,
-        now: activation.startedAt,
-      })
-      refreshTeamTaskPoller(session, activeTurn)
-      const acknowledgedTurnStillCurrent = Boolean(activeTurn &&
-        activeTurn.taskId === acknowledgedTurn.taskId &&
-        activeTurn.providerWorkGeneration === acknowledgedTurn.providerWorkGeneration &&
-        teamTaskTurnOwnsCurrentLifecycle(session, acknowledgedTurn))
-      // Codex Stop/App Server completion can race the Slack audit below. Start
-      // and persist its lifecycle now so that finalization may clear this exact
-      // turn. A delayed prompt hook must not recreate a final already claimed,
-      // retag a newer generation, or use handler wall-clock time as its start.
-      if (provider === 'codex' && acknowledgedTurnStillCurrent &&
-          ['dispatching', 'running'].includes(task.status) &&
-          !codexFinalAlreadyClaimed(session, body.turn_id)) {
-        beginCodexTurn(session, activation.startedAt, body.turn_id || null)
-      }
-      saveStateNow(state)
-      scheduleDeferredTeamProviderFinal(session, activeTurn)
-      if (acknowledgedCoordinatorMessage?.message) {
-        // This in-memory proof is deliberately recorded only after the atomic
-        // state write. A racing transport error may trust it; locally mutated
-        // `delivered` fields whose persistence failed are not sufficient.
-        persistedCoordinatorMessageAcks.add(acknowledgedCoordinatorMessage.message)
-      }
-    } else if (p && !session.teamActiveTaskId && retireTeamProviderTurn(session)) {
-      saveStateNow(state)
-    }
-    if (p && !acknowledgedTurn && !promptTeamTurn &&
-        !(teamTaskId && session.teamActiveTaskId === teamTaskId)) reserveTeamInput(session, 'provider')
-    const ch = session.channel || (await ensureChannel(session))
-    if (acknowledgedCoordinatorMessage?.created) {
-      await updateTeamTaskAudit(task).catch(error =>
-        log('team coordinator message acknowledgement audit deferred', task.id, String(error?.message || error)))
-    }
-    if (acknowledgedTurn && teamTaskId && session.teamActiveTaskId === teamTaskId) {
-      try {
-        const task = markTeamTaskRunning(state, teamTaskId)
-        teamTurnProof.add(session.id)
-        saveStateNow(state)
-        await updateTeamTaskAudit(task)
-      }
-      catch (error) { log('team task prompt acknowledgement rejected', teamTaskId, String(error?.message || error)) }
-    } else if (staleSameTaskPrompt) {
-      // Provider hooks may be delayed beyond the in-memory injected-text cache
-      // or a daemon restart. An older exact generation for this same task is
-      // system input, not a local owner prompt and not authority for the newer
-      // work. Ignore it without changing either lifecycle.
-      log('ignored stale team prompt acknowledgement', teamTaskId,
-        promptTeamTurn.providerWorkGeneration, 'current', teamTaskProviderWorkGeneration(task))
-    } else if (teamTaskId && session.teamActiveTaskId && teamTaskId !== session.teamActiveTaskId) {
-      await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
-    } else {
-      const localPromptEffect = unacknowledgedPromptTeamEffect({
-        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal,
-      })
-      if (localPromptEffect === 'fail_task') {
-        await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
-      } else if (localPromptEffect === 'revoke_turn') {
-        // Local terminal input and uncorrelated prompts do not inherit a prior
-        // Slack owner's lateral team authority. Provider notifications that
-        // Claude Code submits mid-turn keep the current turn's authority.
-        clearTeamTurn(session)
-        saveStateNow(state)
-      }
-    }
-    // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
-    // system-injected content (task notifications, reminders, local-command echoes).
-    if (p && !automationEcho && !injected && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
-      await post(ch, `💬 *You (terminal):*\n${p}`)
-    }
-    if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
-    else if (provider === 'codex' && !acknowledgedTurn && !promptTeamTurn &&
-        !codexFinalAlreadyClaimed(session, body.turn_id)) {
-      beginCodexTurn(session, body.observed_at || Date.now(), body.turn_id || null)
-    }
+    await handlePromptSubmit({ session, sid, provider, body, targetClaim })
     return
   }
   if (ev === 'PreToolUse') {
@@ -5127,13 +4955,7 @@ async function performCoordinatorTaskMessageDelivery(task, message) {
       inheritProviderTurnId: !message.resumesTask,
     }
     const providerTurnStartedAt = Date.now()
-    const providerPrompt = [
-      `<sab-team-message task="${task.id}" generation="${providerTurn.providerWorkGeneration}" source="coordinator">`,
-      '[Slack Agent Bridge coordinator message for your active delegated task]',
-      `Provider work generation: ${providerTurn.providerWorkGeneration}. If this completes the task, use \`sab team complete --task ${task.id} --generation ${providerTurn.providerWorkGeneration} --stdin\` before your final answer.`,
-      message.text,
-      '</sab-team-message>',
-    ].join('\n')
+    const providerPrompt = coordinatorTaskMessagePrompt(task, message)
     stageTeamProviderTurn(target, providerTurn, {
       now: providerTurnStartedAt,
       prompt: providerPrompt,
@@ -7753,6 +7575,29 @@ function startAutomationReconciler() {
 
 const terminalControl = createTerminalControl({
   state, executionNodes,
+})
+
+const handlePromptSubmit = createPromptSubmitHandler({
+  state,
+  automationLifecycle,
+  internalTurns,
+  consumeInjected,
+  currentTeamTaskProviderTurn,
+  teamTaskTurnOwnsCurrentLifecycle,
+  refreshTeamTaskPoller,
+  codexFinalAlreadyClaimed,
+  beginCodexTurn,
+  scheduleDeferredTeamProviderFinal,
+  persistedCoordinatorMessageAcks,
+  reserveTeamInput,
+  ensureChannel,
+  updateTeamTaskAudit,
+  teamTurnProof,
+  failTeamTaskForSession,
+  startPoller,
+  saveStateNow,
+  post,
+  log,
 })
 
 // ---- HTTP (hooks in, SSE out) ----------------------------------------------

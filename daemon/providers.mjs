@@ -105,6 +105,12 @@ export function isProviderInternalPrompt(provider, prompt) {
     CLAUDE_INTERNAL_PROMPT.test(String(prompt || '').trimStart())
 }
 
+// System-injected prompts (task notifications, reminders, local-command echoes)
+// arrive via UserPromptSubmit but aren't genuine typing — don't mirror them.
+export function isSystemPrompt(p) {
+  return /SYSTEM NOTIFICATION|task-notification|<system-reminder>|<command-name>|<local-command|Caveat: The messages below/i.test(p)
+}
+
 const CLAUDE_FLAGS = new Set([
   '--dangerously-skip-permissions', '--chrome', '--continue', '--model', '--effort',
 ])

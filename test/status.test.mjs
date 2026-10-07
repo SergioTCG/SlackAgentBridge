@@ -6,7 +6,8 @@ import { createStatusMessages, recoverCodexTurnStartedAt } from '../daemon/statu
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 
 test('automation prompt echoes suppress mirroring without bypassing turn tracking', () => {
-  const block = /if \(ev === 'UserPromptSubmit'\) \{([\s\S]*?)\n  \}\n  if \(ev === 'PreToolUse'\)/.exec(daemon)?.[1] || ''
+  const promptHook = fs.readFileSync(new URL('../daemon/prompt-submit.mjs', import.meta.url), 'utf8')
+  const block = promptHook.slice(promptHook.indexOf('return async function handlePromptSubmit('))
   assert.match(block, /const automationEcho = automationLifecycle\.consumeInitialPromptEcho/)
   assert.doesNotMatch(block, /consumeInitialPromptEcho\([^\n]+\)\) return/)
   assert.match(block, /if \(provider === 'claude'\) startPoller\(session\)/)
