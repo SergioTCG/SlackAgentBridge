@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { unwrapPastedContent } from '../daemon/util.mjs'
+import { createInjectedTextCache, unwrapPastedContent } from '../daemon/util.mjs'
 import { artifactDeliveryInstruction } from '../daemon/artifacts.mjs'
 
 const FAKE_GRANT = 'TESTGRANT0123456789abcdefGHIJKL'
@@ -41,4 +41,27 @@ test('incomplete envelopes are not unwrapped', () => {
 test('nested envelopes unwrap to the payload within a bounded depth', () => {
   const nested = '<pasted_content id="a">\n<pasted_content id="b">\npayload\n</pasted_content id="b">\n</pasted_content id="a">'
   assert.equal(unwrapPastedContent(nested), 'payload')
+})
+
+test('injected-text records match unwrapped echoes once and expire after two minutes', () => {
+  let clock = 0
+  const cache = createInjectedTextCache({ now: () => clock })
+  const injected = 'Run the approved checks.\nThen report.'
+  cache.remember('sid', injected)
+  assert.equal(cache.consume('sid', `<pasted_content id="a1">\n${injected}\n</pasted_content id="a1">`), true)
+  assert.equal(cache.consume('sid', injected), false, 'each injection is consumed once')
+
+  cache.remember('sid', injected)
+  clock = 119_999
+  assert.equal(cache.consume('sid', injected), true)
+  cache.remember('sid', injected)
+  clock += 120_000
+  assert.equal(cache.consume('sid', injected), false, 'a record older than the TTL is not evidence')
+
+  cache.remember('sid', 'first')
+  cache.remember('sid', 'second')
+  cache.forget('sid', 'second')
+  assert.equal(cache.consume('sid', 'second'), false)
+  assert.equal(cache.consume('sid', 'first'), true)
+  assert.equal(cache.consume('other', 'first'), false, 'records are per session')
 })

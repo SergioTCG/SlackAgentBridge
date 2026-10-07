@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
+// The UserPromptSubmit handler the daemon delegates to.
+const promptHookModule = fs.readFileSync(new URL('../daemon/prompt-submit.mjs', import.meta.url), 'utf8')
 const cli = fs.readFileSync(new URL('../scripts/sab-team.mjs', import.meta.url), 'utf8')
 const claudeHook = fs.readFileSync(new URL('../hooks/hook.sh', import.meta.url), 'utf8')
 const teamModules = ['teams.mjs', 'team-auth.mjs', 'team-files.mjs', 'team-http.mjs']
@@ -39,7 +41,7 @@ test('team task injection is journal-first and uncertain claims are not replayed
   assert.match(daemon, /startTeamReconciler\(\) \/\/ status adoption must fence workers/)
   const dispatchBody = /async function dispatchTeamTask\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.doesNotMatch(dispatchBody, /markTeamTaskRunning/)
-  assert.match(daemon, /teamTaskId && session\.teamActiveTaskId === teamTaskId[\s\S]*markTeamTaskRunning/)
+  assert.match(promptHookModule, /teamTaskId && session\.teamActiveTaskId === teamTaskId[\s\S]*markTeamTaskRunning/)
   assert.match(daemon, /providerInputUncertain[\s\S]*refusing retry/)
   const injection = daemon.slice(daemon.indexOf('async function injectText('), daemon.indexOf('async function downloadSlackFile('))
   const tmuxWrite = injection.indexOf('await tmuxPaste')
@@ -83,7 +85,7 @@ test('team lifecycle recovery cannot rebind, lose finals, or fence a worker inde
   assert.match(daemon, /InputError[\s\S]*clearTeamInputReservation\(session\)/)
   assert.match(daemon, /dispatchClaimedAt[\s\S]*discardQueuedTeamTaskPrompt\(target, task\.id\)/)
   assert.match(daemon, /abandonedInput = clearTeamInputReservation\(s\)/)
-  assert.match(daemon, /markTeamTaskRunning\(state, teamTaskId\)[\s\S]*updateTeamTaskAudit\(task\)/)
+  assert.match(promptHookModule, /markTeamTaskRunning\(state, teamTaskId\)[\s\S]*updateTeamTaskAudit\(task\)/)
 })
 
 test('hookless successful workers report with warning and cannot race an authenticated final', () => {
@@ -107,7 +109,7 @@ test('team task control is journal-first, exact-task scoped, and drain-aware', (
 })
 
 test('restart re-adoption proves active turns but fails closed for already-idle historical tasks', () => {
-  const readopt = daemon.slice(daemon.indexOf('async function readoptStatus('), daemon.indexOf('function isSystemPrompt('))
+  const readopt = daemon.slice(daemon.indexOf('async function readoptStatus('), daemon.indexOf('// ---- transcript mirroring'))
   const piReadopt = readopt.slice(readopt.indexOf("providerOf(s) === 'pi'"), readopt.indexOf("providerOf(s) === 'codex'"))
   assert.doesNotMatch(piReadopt, /teamTurnProof\.add|startPiPoller/)
   assert.match(piReadopt, /awaiting post-restart Pi activity proof/)
@@ -139,7 +141,7 @@ test('reviewed lifecycle races revalidate exact state at the last safe boundary'
   assert.ok(claim > 0)
   assert.ok(continuation.lastIndexOf("teamDispatchMode(team) === 'draining'", claim) > 0)
 
-  const readopt = daemon.slice(daemon.indexOf('async function readoptStatus('), daemon.indexOf('function isSystemPrompt('))
+  const readopt = daemon.slice(daemon.indexOf('async function readoptStatus('), daemon.indexOf('// ---- transcript mirroring'))
   assert.match(readopt, /const idleTask = readoptedTeamTaskFingerprint\(s\)[\s\S]*releaseIdleReadoptedTeamTaskIfStillIdle/)
   assert.doesNotMatch(readopt, /releaseIdleReadoptedTeamTaskIfStillIdle\(s[\s\S]*clearTeamInputReservation\(s\)/)
   assert.match(daemon, /function releaseIdleReadoptedTeamTaskIfStillIdle[\s\S]*validProviderRootClaim[\s\S]*readoptedTeamTaskStillIdle[\s\S]*clearTeamTurn[\s\S]*clearTeamInputReservation/)
@@ -279,10 +281,7 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon, /stageTeamProviderTurn\(target,[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*activateTeamProviderTurn\(target[\s\S]*ensureCodexTurnStarted\(target/)
   assert.match(daemon, /currentTeamTaskProviderTurn\(session, body\)/)
-  const promptHook = daemon.slice(
-    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
-    daemon.indexOf("if (ev === 'PreToolUse')"),
-  )
+  const promptHook = promptHookModule.slice(promptHookModule.indexOf('return async function handlePromptSubmit('))
   const submittedTurnSnapshot = promptHook.indexOf('const submittedTeamTaskTurn =')
   const recoveredTurnActivation = promptHook.indexOf('activateTeamProviderTurn(session')
   const auditAwait = promptHook.indexOf('await updateTeamTaskAudit(task)')
@@ -353,10 +352,7 @@ test('App Server finals defer behind unresolved Codex team input', () => {
 })
 
 test('delayed older-generation team prompt hooks cannot fail newer work', () => {
-  const promptHook = daemon.slice(
-    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
-    daemon.indexOf("if (ev === 'PreToolUse')"),
-  )
+  const promptHook = promptHookModule.slice(promptHookModule.indexOf('return async function handlePromptSubmit('))
   const stalePromptGuard = promptHook.indexOf('const staleSameTaskPrompt =')
   const stalePromptBranch = promptHook.indexOf('else if (staleSameTaskPrompt)')
   const localPromptFailure = promptHook.indexOf("await failTeamTaskForSession(session, 'A local terminal prompt replaced")
@@ -456,10 +452,7 @@ test('reported dormant workers can be resumed and deferred follow-ups remain vis
 })
 
 test('authenticated coordinator-message acknowledgement wins a late uncertain transport result', () => {
-  const promptHook = daemon.slice(
-    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
-    daemon.indexOf("if (ev === 'PreToolUse')"),
-  )
+  const promptHook = promptHookModule.slice(promptHookModule.indexOf('return async function handlePromptSubmit('))
   assert.match(promptHook,
     /acknowledgeCoordinatorTaskMessageDelivery\(state, task\.id,[\s\S]*providerWorkGeneration: acknowledgedTurn\.providerWorkGeneration/)
   const acknowledgedCodexStart = promptHook.indexOf("if (provider === 'codex' && acknowledgedTurnStillCurrent")
@@ -519,10 +512,7 @@ test('fast provider finals retain pre-submit ordering and delayed Codex hooks ca
   assert.match(messageInjection,
     /stageTeamProviderTurn\(target, providerTurn, \{[\s\S]*now: providerTurnStartedAt,[\s\S]*prompt: providerPrompt,[\s\S]*\}\)/)
 
-  const promptHook = daemon.slice(
-    daemon.indexOf("if (ev === 'UserPromptSubmit')"),
-    daemon.indexOf("if (ev === 'PreToolUse')"),
-  )
+  const promptHook = promptHookModule.slice(promptHookModule.indexOf('return async function handlePromptSubmit('))
   assert.match(promptHook,
     /const acknowledgedTurnStillCurrent[\s\S]*activeTurn\.taskId === acknowledgedTurn\.taskId[\s\S]*activeTurn\.providerWorkGeneration === acknowledgedTurn\.providerWorkGeneration/)
   assert.match(promptHook,

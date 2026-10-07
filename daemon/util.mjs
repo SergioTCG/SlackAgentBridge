@@ -412,3 +412,33 @@ export function unwrapPastedContent(text) {
   }
   return value
 }
+
+// sid → texts the bridge injected, awaiting their UserPromptSubmit echo. The
+// record is short-lived by design: a provider may queue input behind a running
+// turn and submit it minutes later, and a daemon restart empties the cache, so
+// a delegated team prompt must also be recognizable from its persisted journal.
+export function createInjectedTextCache({ ttlMs = 120000, limit = 10, now = Date.now } = {}) {
+  const recent = new Map()
+  return {
+    remember(sid, text) {
+      const items = recent.get(sid) || []
+      items.push({ text: unwrapPastedContent(text), at: now() })
+      recent.set(sid, items.slice(-limit))
+    },
+    forget(sid, text) {
+      const items = recent.get(sid) || []
+      const wanted = unwrapPastedContent(text)
+      const index = items.findLastIndex(item => item.text === wanted)
+      if (index >= 0) items.splice(index, 1)
+      if (items.length) recent.set(sid, items)
+      else recent.delete(sid)
+    },
+    consume(sid, prompt) {
+      const items = recent.get(sid) || []
+      const wanted = unwrapPastedContent(prompt)
+      const index = items.findIndex(item => item.text === wanted && now() - item.at < ttlMs)
+      if (index >= 0) { items.splice(index, 1); return true }
+      return false
+    },
+  }
+}

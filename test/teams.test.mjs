@@ -25,6 +25,7 @@ import {
   completeTeamTaskWithWarning,
   consumeCoordinatorDispatch,
   coordinatorPromptContext,
+  coordinatorTaskMessagePrompt,
   createTeam,
   createTeamTask,
   delegatedTaskPrompt,
@@ -1469,4 +1470,17 @@ test('an expired uncertain dispatch is never revived by a late provider acknowle
     error => error.code === 'task_not_dispatching')
   assert.equal(state.teamTasks[task.id].status, 'failed')
   assert.equal(session.teamActiveTaskId, undefined)
+})
+
+test('a coordinator message envelope carries the exact task and generation it was journaled for', () => {
+  const prompt = coordinatorTaskMessagePrompt({ id: 'task_one' }, { workGeneration: 3, text: 'Run the approved checks.' })
+  assert.equal(prompt, [
+    '<sab-team-message task="task_one" generation="3" source="coordinator">',
+    '[Slack Agent Bridge coordinator message for your active delegated task]',
+    'Provider work generation: 3. If this completes the task, use `sab team complete --task task_one --generation 3 --stdin` before your final answer.',
+    'Run the approved checks.',
+    '</sab-team-message>',
+  ].join('\n'))
+  assert.equal(taskMarker(prompt), null, 'a message is not a task-start marker')
+  assert.match(coordinatorTaskMessagePrompt({ id: 'task_one' }, { workGeneration: 0, text: 'x' }), /generation="1"/)
 })

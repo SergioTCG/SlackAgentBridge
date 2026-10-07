@@ -1446,6 +1446,19 @@ export function delegatedTaskPrompt(team, task, destinationFiles = []) {
   ].join('\n')
 }
 
+// The provider-visible envelope of a coordinator message. Its exact text is
+// journaled before submission so a delayed prompt hook can authenticate it.
+export function coordinatorTaskMessagePrompt(task, message) {
+  const generation = Math.max(1, Number(message?.workGeneration) || 1)
+  return [
+    `<sab-team-message task="${task.id}" generation="${generation}" source="coordinator">`,
+    '[Slack Agent Bridge coordinator message for your active delegated task]',
+    `Provider work generation: ${generation}. If this completes the task, use \`sab team complete --task ${task.id} --generation ${generation} --stdin\` before your final answer.`,
+    message.text,
+    '</sab-team-message>',
+  ].join('\n')
+}
+
 // A provider input stream may disappear after a task has been claimed but
 // before it acknowledges the immutable marker. If that claim later fails, the
 // exact queued envelope must be removed so reconnect recovery cannot execute a

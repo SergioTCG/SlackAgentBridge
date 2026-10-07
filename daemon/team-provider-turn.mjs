@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { teamTaskProviderWorkGeneration } from './teams.mjs'
 
 const HISTORY_LIMIT = 8
 
@@ -444,4 +445,29 @@ export function providerTurnForTaskLifecycle(session, {
   if (tracked) return publicTurn(tracked)
   if (hasTeamProviderTurnTracking(session)) return null
   return { taskId: activeTaskId, providerWorkGeneration: generation }
+}
+
+// The provider generation a hook or final represents while this exact session
+// still holds its delegated task.
+export function boundTeamTaskProviderTurn(state, session, body = null) {
+  const taskId = session?.teamActiveTaskId
+  const task = taskId ? state.teamTasks?.[taskId] : null
+  if (!task || task.targetSessionId !== session.id || task.targetChannel !== session.channel) return null
+  const tracked = providerTurnForTaskLifecycle(session, {
+    taskId,
+    providerWorkGeneration: teamTaskProviderWorkGeneration(task),
+    providerTurnId: body?.turn_id || null,
+    observedAt: body?.observed_at || null,
+  })
+  return tracked ? Object.freeze(tracked) : null
+}
+
+export function teamTaskTurnOwnsLifecycle(state, session, expected) {
+  const taskId = session?.teamActiveTaskId || null
+  if (!taskId) return expected == null
+  if (!expected || expected.taskId !== taskId) return false
+  const task = state.teamTasks?.[taskId]
+  return Boolean(task && task.targetSessionId === session.id &&
+    task.targetChannel === session.channel &&
+    teamTaskProviderWorkGeneration(task) === expected.providerWorkGeneration)
 }
