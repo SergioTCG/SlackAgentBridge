@@ -210,10 +210,14 @@ bounded budget only by atomically claiming pending authenticated worker events
 for the same team. It cannot renew from a collaborator, another team, stale
 local input, or no event. A team holds at most 64 active tasks and one worker at
 most eight active tasks, only one of which may hold its session binding. Each
-task accepts at most 32 interim replies and
-32 idempotent control operations; terminal cancellation remains available if the
-control journal is full. Tasks expire after seven days. Overflow, expiry,
-revocation, and identity disagreement fail visibly.
+task accepts at most 256 interim replies and 256 idempotent control operations.
+That is enough for a long lane with many coordinator follow-ups over its
+seven-day lifetime. The last reply slot stays reserved for the checkpoint that
+clears the final gate, and terminal cancellation and release remain available
+if the control journal is full. The journals keep their full history for
+idempotency and recovery. Task views and command responses show the latest 32
+replies and coordinator messages, with total counts. Tasks expire after seven
+days. Overflow, expiry, revocation, and identity disagreement fail visibly.
 
 ## Delivery and recovery
 

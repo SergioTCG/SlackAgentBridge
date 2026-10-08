@@ -1,7 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  TEAM_MAX_REPLIES,
   TEAM_MESSAGE_MAX_BYTES,
+  TEAM_TASK_CONTROL_MAX,
+  TEAM_TASK_VIEW_ENTRIES,
   TeamError,
   activeTeamForChannel,
   addTeamWorker,
@@ -32,6 +35,8 @@ import {
   deferCoordinatorTaskMessageDelivery,
   failTeamTask,
   markTeamTaskRunning,
+  publicTeamMessage,
+  publicTeamReply,
   publicTeamTask,
   reconcileTeamSessionBindings,
   releaseTeamTask,
@@ -47,6 +52,7 @@ import {
   tasksPageForChannel,
   teamDispatchMode,
   teamMutationForRequest,
+  teamTaskProviderWorkGeneration,
   teamContext,
   teamTaskDeliverySettled,
   withoutDelegatedTaskPrompt,
@@ -768,12 +774,12 @@ test('the bounded reply journal reserves capacity to clear the final gate', () =
     fromChannel: 'C-WORKER-1', text: 'CI is pending.', pendingGates: ['ci'],
     requestId: 'gate-checkpoint-1', now: 5000,
   })
-  for (let index = 1; index < 31; index++) {
+  for (let index = 1; index < TEAM_MAX_REPLIES - 1; index++) {
     appendTeamTaskReply(state, task.id, {
       fromChannel: 'C-WORKER-1', text: `Progress ${index}.`, requestId: `gate-progress-${index}`, now: 5000 + index,
     })
   }
-  assert.equal(task.replies.length, 31)
+  assert.equal(task.replies.length, TEAM_MAX_REPLIES - 1)
   assert.throws(() => appendTeamTaskReply(state, task.id, {
     fromChannel: 'C-WORKER-1', text: 'One more progress note.', requestId: 'gate-progress-overflow', now: 5100,
   }), error => error.code === 'reply_limit')
@@ -786,7 +792,7 @@ test('the bounded reply journal reserves capacity to clear the final gate', () =
     fromChannel: 'C-WORKER-1', text: 'CI passed.', pendingGates: [],
     requestId: 'gate-cleared-final-slot', now: 5300,
   })
-  assert.equal(task.replies.length, 32)
+  assert.equal(task.replies.length, TEAM_MAX_REPLIES)
   assert.deepEqual(task.pendingGates, [])
   assert.equal(requestTeamTaskCompletion(state, task.id, {
     targetSessionId: 'worker', fromChannel: 'C-WORKER-1', summary: 'All gates passed.',
@@ -808,13 +814,13 @@ test('provider final remains backward-compatible for tasks without a completion 
 
   task.status = 'running'
   task.replies = []
-  for (let index = 0; index < 32; index++) {
+  for (let index = 0; index < TEAM_MAX_REPLIES; index++) {
     appendTeamTaskReply(state, task.id, {
       fromChannel: 'C-WORKER-1', text: `Legacy progress ${index}.`,
       requestId: `legacy-progress-${index}`, now: 5000 + index,
     })
   }
-  assert.equal(task.replies.length, 32)
+  assert.equal(task.replies.length, TEAM_MAX_REPLIES)
 })
 
 test('mutation receipts expose accepted state and session binding repair is exact', () => {
@@ -1345,13 +1351,13 @@ test('queued cancellation remains available after the bounded control journal fi
     teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
     target: 'parallel-1', text: 'Eventually cancel.', requestId: 'cancel-full', id: 'task_cancel_full', now: 2000,
   }).task
-  task.controlRequests = Array.from({ length: 32 }, (_, index) => ({
+  task.controlRequests = Array.from({ length: TEAM_TASK_CONTROL_MAX }, (_, index) => ({
     requestId: `prior-${index}`, kind: 'replace', payloadHash: `hash-${index}`,
   }))
   assert.equal(cancelQueuedTeamTask(state, task.id, {
     sourceChannel: 'C-MASTER', requestId: 'cancel-final', now: 3000,
   }).status, 'cancelled')
-  assert.equal(task.controlRequests.length, 32)
+  assert.equal(task.controlRequests.length, TEAM_TASK_CONTROL_MAX)
   assert.throws(() => cancelQueuedTeamTask(state, task.id, {
     sourceChannel: 'C-MASTER', reason: 'Conflicting reason.', requestId: 'cancel-final', now: 3100,
   }), error => error.code === 'request_conflict')
@@ -1373,7 +1379,7 @@ test('coordinator release remains available after the bounded control journal fi
     requestId: 'long-release-ready', now: 4500,
   })
   reportTeamTaskTurn(state, task.id, { targetSessionId: 'worker', result: 'Done.', now: 5000 })
-  task.controlRequests = Array.from({ length: 32 }, (_, index) => ({
+  task.controlRequests = Array.from({ length: TEAM_TASK_CONTROL_MAX }, (_, index) => ({
     requestId: `control-${index}`, kind: 'message', payloadHash: `hash-${index}`, createdAt: new Date(5100 + index).toISOString(),
   }))
 
@@ -1483,4 +1489,136 @@ test('a coordinator message envelope carries the exact task and generation it wa
   ].join('\n'))
   assert.equal(taskMarker(prompt), null, 'a message is not a task-start marker')
   assert.match(coordinatorTaskMessagePrompt({ id: 'task_one' }, { workGeneration: 0, text: 'x' }), /generation="1"/)
+})
+
+// A long two-phase scanner lane hit both former 32-entry walls at once: 32
+// delivered coordinator follow-ups filled the control journal, and 31 worker
+// replies left only the slot reserved for a final gate-clearing checkpoint.
+function longScannerTask() {
+  const { state, team } = fixture()
+  let now = 10_000
+  const { task } = createTeamTask(state, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Scanner lane.', requestId: 'scanner', id: 'task_scanner', now,
+  })
+  const worker = { id: 'sid-worker-1', channel: 'C-WORKER-1' }
+  claimTeamTaskForSession(state, task.id, worker, { targetProvider: 'codex', now: ++now })
+  markTeamTaskRunning(state, task.id, { now: ++now })
+  appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Declared gates.', pendingGates: ['a', 'b', 'c', 'd', 'e', 'f'],
+    requestId: 'gates', now: ++now,
+  })
+  const deliver = (text, requestId) => {
+    const { message, created } = appendCoordinatorTaskMessage(state, task.id, {
+      sourceChannel: 'C-MASTER', text, requestId, now: ++now,
+    })
+    if (!created) return { message, created }
+    message.providerDeliveryStatus = 'delivering'
+    beginCoordinatorTaskMessageDelivery(state, task.id, message.id, { now: ++now })
+    completeCoordinatorTaskMessageDelivery(state, task.id, message.id, { now: ++now })
+    return { message, created }
+  }
+  for (let index = 1; index <= 32; index++) {
+    deliver(`Follow-up ${index}.`, `follow-${index}`)
+    if (task.replies.length < 31) {
+      appendTeamTaskReply(state, task.id, {
+        fromChannel: 'C-WORKER-1', text: `Progress ${index}.`, requestId: `progress-${index}`, now: ++now,
+      })
+    }
+  }
+  reportTeamTaskTurn(state, task.id, { targetSessionId: worker.id, result: 'Turn report.', now: ++now })
+  return { state, task, worker, deliver, next: () => ++now }
+}
+
+test('a long task accepts follow-ups and checkpoints past the former 32-entry walls', () => {
+  const { state, task, worker, deliver, next } = longScannerTask()
+  assert.equal(task.status, 'awaiting_release')
+  assert.equal(task.controlRequests.length, 32)
+  assert.equal(task.replies.length, 31)
+  const history = JSON.stringify({ messages: task.messages, replies: task.replies })
+
+  const followUp = deliver('Follow-up 33.', 'follow-33')
+  assert.equal(followUp.created, true)
+  assert.equal(task.status, 'running', 'the delivered follow-up resumes the same task')
+  assert.equal(task.messages.length, 33)
+  assert.equal(teamTaskProviderWorkGeneration(task), 34)
+  assert.equal(task.targetSessionId, worker.id, 'ownership is unchanged')
+  assert.equal(task.targetChannel, 'C-WORKER-1')
+  assert.equal(worker.teamActiveTaskId, task.id)
+  assert.deepEqual(task.pendingGates, ['a', 'b', 'c', 'd', 'e', 'f'], 'a follow-up never edits gates')
+  assert.ok(JSON.stringify({ messages: task.messages.slice(0, 32), replies: task.replies }) === history,
+    'earlier history is retained unchanged')
+
+  // Idempotency covers the oldest operation as well as the newest.
+  const retried = deliver('Follow-up 1.', 'follow-1')
+  assert.equal(retried.created, false)
+  assert.equal(retried.message.id, task.messages[0].id)
+  assert.equal(deliver('Follow-up 33.', 'follow-33').created, false)
+  assert.equal(task.messages.length, 33)
+  assert.throws(() => appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'Different text.', requestId: 'follow-1', now: next(),
+  }), error => error.code === 'request_conflict')
+  const receipt = teamMutationForRequest(state, 'C-MASTER', 'follow-1')
+  assert.equal(receipt.kind, 'message')
+  assert.equal(receipt.resourceId, task.messages[0].id)
+
+  // The worker can report gate progress again and still clear the final gate.
+  appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'Two gates done.', pendingGates: ['c', 'd', 'e', 'f'],
+    requestId: 'gates-progress', now: next(),
+  })
+  assert.deepEqual(task.pendingGates, ['c', 'd', 'e', 'f'])
+  appendTeamTaskReply(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'More progress.', requestId: 'progress-more', now: next(),
+  })
+  appendTeamTaskCheckpoint(state, task.id, {
+    fromChannel: 'C-WORKER-1', text: 'All gates clear.', pendingGates: [], requestId: 'gates-clear', now: next(),
+  })
+  assert.deepEqual(task.pendingGates, [])
+  assert.equal(task.replies.length, 34)
+})
+
+test('task journals stay bounded at their lifetime caps', () => {
+  const { state, task, next } = longScannerTask()
+  while (task.controlRequests.length < TEAM_TASK_CONTROL_MAX) {
+    task.controlRequests.push({ requestId: `filler-${task.controlRequests.length}`, kind: 'message', payloadHash: 'h' })
+  }
+  assert.throws(() => appendCoordinatorTaskMessage(state, task.id, {
+    sourceChannel: 'C-MASTER', text: 'One too many.', requestId: 'follow-over-cap', now: next(),
+  }), error => error.code === 'task_control_limit')
+  assert.ok(TEAM_TASK_CONTROL_MAX > 32 && TEAM_MAX_REPLIES > 32)
+})
+
+test('task views show the latest entries with totals while journals keep full history', () => {
+  const { task, deliver, next, state } = longScannerTask()
+  for (let index = 33; index <= 40; index++) deliver(`Follow-up ${index}.`, `follow-${index}`)
+  for (let index = 32; index <= 40; index++) {
+    appendTeamTaskReply(state, task.id, {
+      fromChannel: 'C-WORKER-1', text: `Progress ${index}.`, requestId: `progress-${index}`, now: next(),
+    })
+  }
+  const coordinatorView = publicTeamTask(task, 'C-MASTER')
+  assert.equal(coordinatorView.messageCount, 40)
+  assert.equal(coordinatorView.messages.length, TEAM_TASK_VIEW_ENTRIES)
+  assert.deepEqual(coordinatorView.messages.map(item => item.id), task.messages.slice(-TEAM_TASK_VIEW_ENTRIES).map(item => item.id))
+  assert.equal(coordinatorView.replyCount, task.replies.length)
+  assert.equal(coordinatorView.replies.length, TEAM_TASK_VIEW_ENTRIES)
+  assert.equal(coordinatorView.replies.at(-1).text, 'Progress 40.')
+  assert.equal(task.messages.length, 40, 'the journal keeps every message')
+
+  // Single-entry responses map the exact entry, even outside the window.
+  assert.deepEqual(publicTeamMessage(task.messages[0]), {
+    id: task.messages[0].id, text: 'Follow-up 1.', deliveryStatus: 'delivered', deliveryError: null,
+    workGeneration: 2, createdAt: task.messages[0].createdAt,
+  })
+  assert.equal(publicTeamReply(task, task.replies[0], 'C-MASTER').kind, 'checkpoint')
+  assert.deepEqual(coordinatorView.messages.at(-1), publicTeamMessage(task.messages.at(-1)))
+
+  const { state: shortState, team } = fixture()
+  const short = createTeamTask(shortState, {
+    teamId: team.id, sourceChannel: 'C-MASTER', sourceSessionId: 'master', sourceProvider: 'codex',
+    target: 'parallel-1', text: 'Short task.', requestId: 'short', id: 'task_short', now: 1,
+  }).task
+  const shortView = publicTeamTask(short, 'C-MASTER')
+  assert.deepEqual([shortView.messageCount, shortView.messages.length, shortView.replyCount, shortView.replies.length], [0, 0, 0, 0])
 })
