@@ -444,7 +444,10 @@ Task delivery is journal-first:
 3. Wait while the target is dormant, busy, switching, asking a question,
    awaiting permission, under maintenance, or owned by managed Pi work.
 4. Serialize both visible instruction-card updates for each replacement and
-   bind the final claim to that exact fully audited instruction revision. Then
+   bind the final claim to that exact fully audited instruction revision. A
+   revision too long for Slack's in-place edit is posted once as a new card,
+   with the original card pointing to it. Failing updates back off instead of
+   repeating every reconciliation sweep. Then
    reserve the worker input surface, atomically change `queued → dispatching`,
    populate `startedAt`, and bind `session.teamActiveTaskId` plus the exact target
    native session before provider injection. Availability derives from the same

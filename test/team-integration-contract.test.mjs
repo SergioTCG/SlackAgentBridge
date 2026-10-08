@@ -159,13 +159,11 @@ test('reviewed lifecycle races revalidate exact state at the last safe boundary'
   assert.match(messageDelivery, /forgetInjected\(expected\.sid, prompt\)[\s\S]*knownUndeliveredTeamMessage/)
   assert.match(daemon, /teamMessageFailureDisposition\(\{ providerAttempted, error \}\)[\s\S]*failure\.retryable/)
 
-  const audit = daemon.slice(
-    daemon.indexOf('async function performTeamTaskPayloadAuditUpdate('),
-    daemon.indexOf('async function updateTeamTaskAudit('),
-  )
+  const audit = fs.readFileSync(new URL('../daemon/team-audit.mjs', import.meta.url), 'utf8')
   assert.match(audit, /if \(!ts\)[\s\S]*failure \|\|=/)
-  assert.match(audit, /const instructionVersion[\s\S]*const snapshots[\s\S]*payloadAuditInstructionVersion = instructionVersion/)
-  assert.match(audit, /teamPayloadAuditTails\.get\(task\.id\)[\s\S]*teamPayloadAuditTails\.set\(task\.id, operation\)/)
+  assert.match(audit, /const instructionVersion[\s\S]*teamTaskPayloadText\(task, side\)[\s\S]*payloadAuditInstructionVersion = instructionVersion/)
+  assert.match(daemon, /const performTeamTaskPayloadAuditUpdate = createPayloadAuditUpdater\(\{/)
+  assert.match(daemon, /teamPayloadAuditTails\.get\(task\.id\)[\s\S]*teamPayloadAuditTails\.set\(task\.id, operation\)/)
 
   const dispatch = daemon.slice(daemon.indexOf('async function dispatchTeamTask('), daemon.indexOf('async function reconcileTeamTasks('))
   assert.match(dispatch, /expectedInstructionVersion[\s\S]*expectedAuditInstructionVersion[\s\S]*claimTeamTaskForSession/)
