@@ -100,6 +100,7 @@ import {
   stageTeamProviderTurn, teamProviderPollerObservationCurrent, teamTaskTurnOwnsLifecycle,
 } from './team-provider-turn.mjs'
 import { createPromptSubmitHandler } from './prompt-submit.mjs'
+import { createPayloadAuditUpdater, teamTaskPayloadText } from './team-audit.mjs'
 import { validTeamCallerBinding } from './team-auth.mjs'
 import { isNestedProviderClaim } from './process-claims.mjs'
 import {
@@ -4422,16 +4423,6 @@ function teamAuditClientId(task, side) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20)}`
 }
 
-function teamTaskPayloadText(task, destination) {
-  const direction = destination === 'source'
-    ? `➡️ Delegated to <#${task.targetChannel}> (\`${task.targetAlias}\`)`
-    : `⬅️ Delegated by <#${task.sourceChannel}>`
-  const files = task.files?.length
-    ? `\n\n*Files*\n${task.files.map(file => `• \`${String(file.filename).replace(/`/g, "'")}\` · ${file.size} bytes`).join('\n')}`
-    : ''
-  return `📋 *Team task* \`${task.id}\`\n${direction}\n\n${task.instruction || task.text || '_File-only task._'}${files}`
-}
-
 async function ensureTeamTaskAudit(task) {
   try {
     if (!task.sourcePayloadSlackTs) {
@@ -4482,33 +4473,13 @@ async function ensureTeamTaskAudit(task) {
   }
 }
 
-async function performTeamTaskPayloadAuditUpdate(task) {
-  const instructionVersion = Math.max(1, Number(task.instructionVersion) || 1)
-  const snapshots = [
-    ['source', task.sourceChannel, task.sourcePayloadSlackTs, teamTaskPayloadText(task, 'source')],
-    ['target', task.targetChannel, task.targetPayloadSlackTs, teamTaskPayloadText(task, 'target')],
-  ]
-  let failure = null
-  for (const [side, channel, ts, text] of snapshots) {
-    if (!ts) {
-      failure ||= new Error(`The ${side} task instruction card does not exist yet.`)
-      continue
-    }
-    try { await enqueue(channel, () => web.chat.update({ channel, ts, text })) }
-    catch (error) {
-      failure ||= error
-      log('team payload audit update failed', task.id, channel, error?.data?.error || String(error))
-    }
-  }
-  if (!failure) {
-    // Record exactly the revision rendered above. A newer replacement remains
-    // unaudited until its own serialized update completes, so dispatch cannot
-    // cross a mixed-card intermediate state.
-    task.payloadAuditInstructionVersion = instructionVersion
-    saveStateNow(state)
-  }
-  return !failure
-}
+const performTeamTaskPayloadAuditUpdate = createPayloadAuditUpdater({
+  update: (channel, ts, text) => enqueue(channel, () => web.chat.update({ channel, ts, text })),
+  post: (channel, payload) => postSlackMessage(channel, payload),
+  clientId: teamAuditClientId,
+  persist: () => saveStateNow(state),
+  log,
+})
 
 function updateTeamTaskPayloadAudit(task) {
   const previous = teamPayloadAuditTails.get(task.id) || Promise.resolve()

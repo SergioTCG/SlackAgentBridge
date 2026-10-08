@@ -230,7 +230,10 @@ which the task waits for a safe idle input surface.
 Before injection, SAB reserves the input surface and atomically claims the exact
 worker native session and the exact instruction revision already visible on
 both Slack audit cards. Concurrent replacements serialize those card updates;
-a changed or partly audited revision cannot be claimed. That same persisted mutation binds
+a changed or partly audited revision cannot be claimed. Slack cannot edit a card
+to more than about 4,000 characters. A longer revision is therefore posted in
+full as a new card, and the original card points to it. A card update that
+keeps failing is retried with backoff from 30 seconds up to 30 minutes. That same persisted mutation binds
 `session.teamActiveTaskId` and populates `startedAt`, so status cannot report the
 worker ready while its task is `dispatching`. It remains `dispatching` until the provider acknowledges
 the immutable task marker or that exact process journals a task-bound `sab team

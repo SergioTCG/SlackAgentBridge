@@ -36,6 +36,17 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A queued task replaced with an instruction longer than about 4,000
+  characters can be dispatched again.
+  - Slack rejects longer text in `chat.update` with `msg_too_long`, although
+    the original card is posted with `chat.postMessage`, which accepts it.
+    The card update failed on every 3-second reconciliation sweep, forever.
+    Dispatch requires both cards to show the current revision, so the task
+    could never be claimed, and each sweep made two Slack calls.
+  - Such a revision is now posted once, in full, as a new card in both
+    channels, and the original cards point to it.
+  - Any card update that keeps failing now backs off from 30 seconds to 30
+    minutes. A newer revision is still tried at once.
 - A long delegated task no longer stops accepting work at 32 journal entries.
   - Before, a coordinator follow-up after 32 control operations was refused
     with "This task reached its bounded control-operation limit". After 31
