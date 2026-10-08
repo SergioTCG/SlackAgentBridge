@@ -36,6 +36,17 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A long delegated task no longer stops accepting work at 32 journal entries.
+  - Before, a coordinator follow-up after 32 control operations was refused
+    with "This task reached its bounded control-operation limit". After 31
+    replies, the worker could only send a final gate-clearing checkpoint.
+  - The per-task control and reply journals now hold 256 entries, sized for
+    the seven-day task lifetime. They keep their full history for
+    idempotency, mutation receipts and recovery.
+  - Task views and command responses show the latest 32 replies and
+    coordinator messages, plus `replyCount` and `messageCount`, so their size
+    no longer grows with the task's history.
+  - Existing tasks need no migration.
 - A coordinator message whose prompt hook arrives late no longer fails the
   delegated task as local terminal input.
   - Codex queues a message delivered during a running turn and submits it

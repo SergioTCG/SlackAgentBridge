@@ -5,7 +5,13 @@ import crypto from 'node:crypto'
 export const TEAM_MESSAGE_MAX_BYTES = 24 * 1024
 export const TEAM_MAX_MEMBERS = 20
 export const TEAM_MAX_TASKS = 500
-export const TEAM_MAX_REPLIES = 32
+// A task's reply and control journals keep their full history for idempotency
+// and recovery. They are bounded for a long, chatty task over its whole
+// seven-day lifetime rather than for a short one; task views and command
+// responses show only the latest TEAM_TASK_VIEW_ENTRIES of each, with totals.
+export const TEAM_MAX_REPLIES = 256
+export const TEAM_TASK_CONTROL_MAX = 256
+export const TEAM_TASK_VIEW_ENTRIES = 32
 export const TEAM_MAX_REPORTS = 32
 export const TEAM_MAX_ACTIVE_TASKS = 64
 export const TEAM_MAX_QUEUED_PER_WORKER = 8
@@ -21,7 +27,6 @@ const TASK_STATES = new Set(['queued', 'dispatching', 'running', 'awaiting_relea
 const ACTIVE_TASK_STATES = new Set(['queued', 'dispatching', 'running', 'awaiting_release'])
 const WORKER_BOUND_TASK_STATES = new Set(['dispatching', 'running', 'awaiting_release'])
 const TERMINAL_TASK_STATES = new Set(['completed', 'completed_with_warning', 'failed', 'cancelled'])
-const TASK_CONTROL_MAX = 32
 const DEFAULT_COMPLETION_POLICY = 'coordinator-release'
 export const LEGACY_COMPLETION_POLICY = 'provider-final'
 
@@ -845,7 +850,7 @@ export function releaseTeamTask(state, taskId, {
   }
   // Release is a terminal safety valve and must remain available even when a
   // long task used its bounded coordinator-message/control journal.
-  if (task.controlRequests.length < TASK_CONTROL_MAX) {
+  if (task.controlRequests.length < TEAM_TASK_CONTROL_MAX) {
     rememberTaskControl(task, control.key, 'release', payloadHash, now)
   }
   task.terminalRequest = {
@@ -937,7 +942,7 @@ function taskControlRequest(task, requestId, kind, payloadHash) {
 
 function rememberTaskControl(task, requestId, kind, payloadHash, now) {
   task.controlRequests ||= []
-  if (task.controlRequests.length >= TASK_CONTROL_MAX) {
+  if (task.controlRequests.length >= TEAM_TASK_CONTROL_MAX) {
     throw new TeamError('task_control_limit', 'This task reached its bounded control-operation limit.', 409)
   }
   task.controlRequests.push({ requestId, kind, payloadHash, createdAt: nowIso(now) })
@@ -965,7 +970,7 @@ export function cancelQueuedTeamTask(state, taskId, {
     if (control.existing) return task
     // Preserve the historical idempotent cancellation surface while making a
     // new bounded request identity queryable when journal capacity permits.
-    if (task.controlRequests.length >= TASK_CONTROL_MAX) {
+    if (task.controlRequests.length >= TEAM_TASK_CONTROL_MAX) {
       throw new TeamError('task_control_limit',
         'This cancelled task cannot journal another cancellation request identity.', 409)
     }
@@ -978,7 +983,7 @@ export function cancelQueuedTeamTask(state, taskId, {
   // Cancellation is the terminal safety valve and must remain available even
   // after the bounded replace/message idempotency journal is full. A terminal
   // cancelled task itself makes subsequent cancellation retries harmless.
-  if (task.controlRequests.length < TASK_CONTROL_MAX) {
+  if (task.controlRequests.length < TEAM_TASK_CONTROL_MAX) {
     rememberTaskControl(task, control.key, 'cancel', payloadHash, now)
   }
   task.terminalRequest = { requestId: control.key, kind: 'cancel', payloadHash, createdAt: nowIso(now) }
@@ -1210,6 +1215,34 @@ export function tasksPageForChannel(state, channel, {
   }
 }
 
+export function publicTeamReply(task, reply, callerChannel) {
+  return {
+    id: reply.id,
+    text: reply.text,
+    files: reply.files.map(file => ({
+      filename: file.filename,
+      size: file.size,
+      ...(callerChannel === task.sourceChannel && file.path ? { path: file.path } : {}),
+    })),
+    fileDeliveryStatus: reply.fileDeliveryStatus,
+    fileDeliveryError: reply.fileDeliveryError,
+    kind: reply.kind || 'progress',
+    pendingGates: reply.pendingGates || null,
+    createdAt: reply.createdAt,
+  }
+}
+
+export function publicTeamMessage(message) {
+  return {
+    id: message.id,
+    text: message.text,
+    deliveryStatus: message.deliveryStatus,
+    deliveryError: message.deliveryError,
+    workGeneration: Number(message.workGeneration) || null,
+    createdAt: message.createdAt,
+  }
+}
+
 export function publicTeamTask(task, callerChannel) {
   if (callerChannel !== task.sourceChannel && callerChannel !== task.targetChannel) {
     throw new TeamError('task_not_visible', 'That task does not belong to this channel.', 403)
@@ -1235,28 +1268,11 @@ export function publicTeamTask(task, callerChannel) {
     fileDeliveryError: task.fileDeliveryError,
     completionDeliveryStatus: task.completionDeliveryStatus || null,
     completionDeliveryError: task.completionDeliveryError || null,
-    replies: task.replies.map(reply => ({
-      id: reply.id,
-      text: reply.text,
-      files: reply.files.map(file => ({
-        filename: file.filename,
-        size: file.size,
-        ...(callerChannel === task.sourceChannel && file.path ? { path: file.path } : {}),
-      })),
-      fileDeliveryStatus: reply.fileDeliveryStatus,
-      fileDeliveryError: reply.fileDeliveryError,
-      kind: reply.kind || 'progress',
-      pendingGates: reply.pendingGates || null,
-      createdAt: reply.createdAt,
-    })),
-    messages: (task.messages || []).map(message => ({
-      id: message.id,
-      text: message.text,
-      deliveryStatus: message.deliveryStatus,
-      deliveryError: message.deliveryError,
-      workGeneration: Number(message.workGeneration) || null,
-      createdAt: message.createdAt,
-    })),
+    // Long tasks keep their full journals; views stay bounded with totals.
+    replies: task.replies.slice(-TEAM_TASK_VIEW_ENTRIES).map(reply => publicTeamReply(task, reply, callerChannel)),
+    replyCount: task.replies.length,
+    messages: (task.messages || []).slice(-TEAM_TASK_VIEW_ENTRIES).map(publicTeamMessage),
+    messageCount: (task.messages || []).length,
     reports: (task.reports || []).map(report => ({
       id: report.id,
       result: report.result,

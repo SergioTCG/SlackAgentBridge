@@ -116,7 +116,8 @@ import {
   consumeCoordinatorDispatch, coordinatorPromptContext,
   coordinatorTaskMessagePrompt, createTeam, createTeamTask, delegatedTaskPrompt, failTeamTask, markTeamTaskRunning,
   normalizeTeamAlias,
-  isActiveTeamTask, isTerminalTeamTask, isWorkerBoundTeamTask, publicTeamTask, reconcileTeamSessionBindings,
+  isActiveTeamTask, isTerminalTeamTask, isWorkerBoundTeamTask, publicTeamMessage, publicTeamReply, publicTeamTask,
+  reconcileTeamSessionBindings,
   deferCoordinatorTaskMessageDelivery, releaseTeamTask, removeTeamWorker, replaceQueuedTeamTask, reportTeamTaskTurn,
   requestTeamTaskCompletion,
   resolveTeamPeer, setTeamDispatchMode,
@@ -5860,7 +5861,7 @@ const teamService = {
       }
       await ensureTeamReplyDelivery(task, appended.reply)
       return {
-        reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === appended.reply.id),
+        reply: publicTeamReply(task, appended.reply, task.sourceChannel),
         task: publicTeamTask(task, task.sourceChannel),
         created: false,
         mutation: acceptedTeamMutation(session, task, request.requestId),
@@ -5894,7 +5895,7 @@ const teamService = {
       if (files.length) removeTeamFiles(replyId)
       await ensureTeamReplyDelivery(task, reply)
       return {
-        reply: publicTeamTask(task, task.sourceChannel).replies.find(item => item.id === reply.id),
+        reply: publicTeamReply(task, reply, task.sourceChannel),
         task: publicTeamTask(task, task.sourceChannel),
         created: false,
         mutation: acceptedTeamMutation(session, task, request.requestId),
@@ -5916,7 +5917,7 @@ const teamService = {
     }
     await ensureTeamReplyDelivery(task, reply)
     return {
-      reply: publicTeamTask(task, task.sourceChannel).replies.at(-1),
+      reply: publicTeamReply(task, reply, task.sourceChannel),
       task: publicTeamTask(task, task.sourceChannel),
       created: true,
       mutation: acceptedTeamMutation(session, task, request.requestId),
@@ -6071,7 +6072,7 @@ const teamService = {
       log('queued coordinator task message for later ordered delivery', task.id, result.message.id, error.code)
     }
     return {
-      message: publicTeamTask(task, session.channel).messages.find(message => message.id === result.message.id),
+      message: publicTeamMessage(result.message),
       task: publicTeamTask(task, session.channel), created: result.created,
       mutation: acceptedTeamMutation(session, task, request.requestId),
     }

@@ -709,3 +709,10 @@ test('only a provably unstaged tmux write fails delegated input as undelivered',
     /if \(!error\?\.inputNotDelivered\) throw error\s*forgetInjected\(expected\.sid, prompt\)\s*throw knownUndeliveredTeamMessage\(error\.message\)/,
     'an unstaged coordinator message is a known non-delivery, safe to defer and retry')
 })
+
+test('single-entry team responses never depend on the bounded task view', () => {
+  assert.doesNotMatch(daemon, /publicTeamTask\([^)]*\)\.(?:replies|messages)\b/,
+    'a reply or message response must map its exact entry, which may be older than the view window')
+  assert.match(daemon, /reply: publicTeamReply\(task, appended\.reply, task\.sourceChannel\)/)
+  assert.match(daemon, /message: publicTeamMessage\(result\.message\)/)
+})
