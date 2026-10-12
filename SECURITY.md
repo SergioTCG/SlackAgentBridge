@@ -420,10 +420,14 @@ an exact native-turn or event-time match cannot borrow the current task binding.
 ## Research-preview dependencies
 
 Claude support uses the Channels research-preview API. SAB supplies exactly one
-local stdio server in its private generated MCP configuration and selects that
-server through `--channels`; headless launches do not auto-accept or depend on
-the interactive `--dangerously-load-development-channels` confirmation.
-Workspace trust remains separate: only the exact owner-selected launch tmux is
+local stdio server in its private generated MCP configuration. It loads that
+server with `--dangerously-load-development-channels server:slack-bridge`,
+because Claude Code 2.1.296 skips a `server:` entry passed through `--channels`
+as not on the approved channels allowlist. Claude then shows its
+development-channel warning on every launch. The consent helper confirms it
+only for SAB's own server: the dialog must list exactly `server:slack-bridge`,
+and the affirmative row must be visibly selected. Any other or additional
+development channel is left for a human. Workspace trust remains separate: only the exact owner-selected launch tmux is
 inspected, and the helper confirms only after Claude's affirmative trust row is
 visibly selected. Unknown or changed prompt rendering fails closed.
 Anthropic may change or remove the Channels contract, including its allowlist or

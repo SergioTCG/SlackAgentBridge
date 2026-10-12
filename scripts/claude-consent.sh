@@ -1,9 +1,10 @@
 #!/bin/bash
-# Auto-dismiss Claude's workspace-trust and development-channel dialogs.
+# Auto-dismiss Claude's workspace-trust dialog and its development-channel
+# confirmation for SAB's own channel server.
 TN="${1:-}"
 [ -n "$TN" ] || exit 0
 for _ in $(seq 1 30); do tmux has-session -t "$TN" 2>/dev/null && break; sleep 0.3; done
-deadline=$(( $(date +%s) + 30 ))
+deadline=$(( $(date +%s) + 60 ))
 trust_done=0
 channel_done=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -22,8 +23,20 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     # Unknown prompt rendering fails closed instead of guessing a key.
     sleep 0.5; continue
   fi
-  if [ "$channel_done" -eq 0 ] && printf '%s' "$pane" | grep -q "development channels"; then
-    tmux send-keys -t "$TN" Enter; channel_done=1; sleep 1; continue
+  if [ "$channel_done" -eq 0 ] && printf '%s' "$pane" | grep -q "Loading development channels"; then
+    # Claude asks on every launch that loads a development channel. Confirm
+    # only SAB's own private stdio server, and only once the affirmative row is
+    # visibly selected. Any other channel list waits for a human.
+    if ! printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*Channels:[[:space:]]*server:slack-bridge[[:space:]]*$'; then
+      sleep 0.5; continue
+    fi
+    if printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*(❯|>)[[:space:]]*(1\.[[:space:]]*)?I am using this for local development'; then
+      tmux send-keys -t "$TN" Enter; channel_done=1; sleep 1; continue
+    fi
+    if printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*(❯|>)[[:space:]]*(2\.[[:space:]]*)?Exit'; then
+      tmux send-keys -t "$TN" Up; sleep 0.5; continue
+    fi
+    sleep 0.5; continue
   fi
   [ "$channel_done" -eq 1 ] && exit 0
   sleep 0.5

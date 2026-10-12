@@ -36,6 +36,16 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Claude sessions started or resumed on Claude Code 2.1.296 receive SAB's MCP
+  channel events again.
+  - Claude Code now skips a `server:` channel passed through `--channels` as
+    "not on the approved channels allowlist", so the channel fallback path and
+    the Slack permission relay were silently disabled.
+  - SAB loads its private `server:slack-bridge` with
+    `--dangerously-load-development-channels`, as before September.
+  - The consent helper confirms the per-launch development-channel warning
+    only when it lists exactly SAB's server and the affirmative row is visibly
+    selected. Any other development channel is left for a human.
 - A queued task replaced with an instruction longer than about 4,000
   characters can be dispatched again.
   - Slack rejects longer text in `chat.update` with `msg_too_long`, although

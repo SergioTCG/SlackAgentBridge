@@ -93,10 +93,13 @@ Claude `AskUserQuestion` forms use their structured hook payload, so Slack keeps
 the question header, prompt, recommendation, option descriptions, and previews
 separate from concise answer buttons. A bounded terminal parser remains only as
 a restart/legacy fallback. Claude's explicitly configured local MCP server is
-selected through the approved `--channels` path, so detached starts and resumes
-do not depend on an interactive development-channel confirmation. When Claude
-asks for workspace trust, SAB explicitly selects the affirmative row for the
-owner-requested directory instead of assuming Enter is safe.
+loaded with `--dangerously-load-development-channels server:slack-bridge`.
+Claude Code 2.1.296 delivers a `server:` channel only that way; on `--channels`
+it skips the server. Claude then asks for confirmation on every launch. SAB's
+consent helper confirms only when the dialog lists exactly `server:slack-bridge`
+and the affirmative row is visibly selected. When Claude asks for workspace
+trust, SAB explicitly selects the affirmative row for the owner-requested
+directory instead of assuming Enter is safe.
 The bridge never parses Codex transcript JSONL. See
 [ARCHITECTURE.md](ARCHITECTURE.md), the provider feasibility notes under
 [`docs/`](docs/), and [Managed Pi runs](docs/pi-managed-runs.md).

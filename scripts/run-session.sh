@@ -84,12 +84,12 @@ EOF
   if [ -n "$startup_status_file" ]; then
     status=0
     claude --mcp-config "$CONFIG_DIR/mcp.json" \
-      --channels server:slack-bridge "$@" || status=$?
+      --dangerously-load-development-channels server:slack-bridge "$@" || status=$?
     record_startup_exit "$status"
     return "$status"
   fi
   exec claude --mcp-config "$CONFIG_DIR/mcp.json" \
-    --channels server:slack-bridge "$@"
+    --dangerously-load-development-channels server:slack-bridge "$@"
 }
 
 run_codex() {
