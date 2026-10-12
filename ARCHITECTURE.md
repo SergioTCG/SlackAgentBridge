@@ -524,8 +524,10 @@ team`. See [Session teams](docs/session-teams.md).
 ### Claude Code
 
 Claude inbound messages use the explicitly configured MCP Channel server,
-selected through Claude's approved `--channels` path. Headless launches never
-depend on the interactive development-channel confirmation. Hooks mirror
+loaded as a development channel. Claude Code 2.1.296 delivers a `server:`
+channel only that way. Its per-launch confirmation is accepted by the consent
+helper solely for SAB's own `server:slack-bridge`, and only on the affirmative
+row. Hooks mirror
 lifecycle and outbound final content; its transcript and statusline support live
 progress, account usage, and topic metadata. `AskUserQuestion` uses the bounded
 structured `PreToolUse.tool_input.questions` payload for Slack text,

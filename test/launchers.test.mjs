@@ -44,7 +44,10 @@ test('the private runner exports the authoritative provider and shared bridge id
   assert.match(source, /run_pi/)
 })
 
-test('Claude runner uses its explicit approved channel without a detached development-consent gate', () => {
+// Claude Code 2.1.296 registers channel notifications from a server: entry only
+// when it is loaded as a development channel; on --channels it is skipped as
+// "not on the approved channels allowlist".
+test('Claude runner loads its private channel server as a development channel', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-claude-channel-'))
   try {
     const log = path.join(temp, 'claude-argv')
@@ -63,10 +66,10 @@ test('Claude runner uses its explicit approved channel without a detached develo
     assert.equal(run.status, 0, run.stderr)
     const args = fs.readFileSync(log, 'utf8').trim().split('\n')
     assert.deepEqual(args.slice(0, 4), [
-      '--mcp-config', path.join(temp, 'mcp.json'), '--channels', 'server:slack-bridge',
+      '--mcp-config', path.join(temp, 'mcp.json'), '--dangerously-load-development-channels', 'server:slack-bridge',
     ])
     assert.deepEqual(args.slice(4), ['--model', 'opus', '--resume', 'session-id'])
-    assert.equal(args.includes('--dangerously-load-development-channels'), false)
+    assert.equal(args.includes('--channels'), false)
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
 })
 
@@ -300,4 +303,61 @@ test('Pi runner translates validated inline values to native argv pairs', () => 
       '--model', 'qwen38-local/qwen3.8-27b', '--thinking', 'xhigh', '--provider', 'local', '--session', 'pi-session-id',
     ])
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+})
+
+// The development-channel confirmation appears on every Claude launch. The
+// helper accepts it only for SAB's own server and only on the affirmative row.
+function devChannelConsent({ channels = 'server:slack-bridge', selected = 'accept', maxCaptures = 40 } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-claude-dev-channel-'))
+  try {
+    const log = path.join(temp, 'keys')
+    const state = path.join(temp, 'selection')
+    const ended = path.join(temp, 'ended')
+    const captures = path.join(temp, 'captures')
+    fs.writeFileSync(state, selected)
+    fs.writeFileSync(path.join(temp, 'tmux'), `#!/bin/bash
+case "$1" in
+  has-session)
+    [ ! -f "$TMUX_TEST_ENDED" ] && [ "$(wc -l < "$TMUX_TEST_CAPTURES" 2>/dev/null || echo 0)" -lt ${maxCaptures} ] ;;
+  capture-pane)
+    echo x >> "$TMUX_TEST_CAPTURES"
+    printf '%s\\n' '  WARNING: Loading development channels' \\
+      '  --dangerously-load-development-channels is for local channel development only.' \\
+      '  Channels: ${channels}'
+    if [ "$(cat "$TMUX_TEST_STATE")" = accept ]; then
+      printf '%s\\n' '  ❯ 1. I am using this for local development' '    2. Exit'
+    else
+      printf '%s\\n' '    1. I am using this for local development' '  ❯ 2. Exit'
+    fi
+    printf '%s\\n' '  Enter to confirm · Esc to cancel'
+    ;;
+  send-keys)
+    key="\${!#}"
+    printf '%s\\n' "$key" >> "$TMUX_TEST_LOG"
+    if [ "$key" = Up ]; then printf accept > "$TMUX_TEST_STATE"; fi
+    if [ "$key" = Enter ]; then : > "$TMUX_TEST_ENDED"; fi
+    ;;
+esac
+`, { mode: 0o755 })
+    const run = spawnSync(claudeConsent, ['sab-test'], {
+      encoding: 'utf8', timeout: 30000,
+      env: {
+        ...process.env,
+        PATH: `${temp}:${process.env.PATH}`,
+        TMUX_TEST_LOG: log, TMUX_TEST_STATE: state, TMUX_TEST_ENDED: ended, TMUX_TEST_CAPTURES: captures,
+      },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    return fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : []
+  } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+}
+
+test('Claude consent helper confirms the development channel only for SAB\'s own server', () => {
+  assert.deepEqual(devChannelConsent(), ['Enter'])
+  assert.deepEqual(devChannelConsent({ selected: 'exit' }), ['Up', 'Enter'],
+    'a default of Exit is moved to the affirmative row before confirming')
+  assert.deepEqual(devChannelConsent({ channels: 'server:other-bridge', maxCaptures: 6 }), [],
+    'another development channel is left for a human')
+  assert.deepEqual(devChannelConsent({ channels: 'server:slack-bridge, server:other-bridge', maxCaptures: 6 }), [],
+    'an extra development channel is left for a human')
 })
