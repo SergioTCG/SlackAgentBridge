@@ -25,9 +25,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   fi
   if [ "$channel_done" -eq 0 ] && printf '%s' "$pane" | grep -q "Loading development channels"; then
     # Claude asks on every launch that loads a development channel. Confirm
-    # only SAB's own private stdio server, and only once the affirmative row is
-    # visibly selected. Any other channel list waits for a human.
-    if ! printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*Channels:[[:space:]]*server:slack-bridge[[:space:]]*$'; then
+    # only SAB's own private stdio server (listed once, or repeated by a stale
+    # stored flag), and only once the affirmative row is visibly selected. Any
+    # other channel in the list waits for a human.
+    if ! printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*Channels:[[:space:]]*server:slack-bridge(,[[:space:]]*server:slack-bridge)*[[:space:]]*$'; then
       sleep 0.5; continue
     fi
     if printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*(❯|>)[[:space:]]*(1\.[[:space:]]*)?I am using this for local development'; then

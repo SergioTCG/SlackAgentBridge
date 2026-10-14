@@ -145,6 +145,23 @@ test('Claude resume args preserve the latest model and effort', () => {
 
 // Claude records its model and effort only when its status line first reports
 // in. A resume before that must not drop the settings it was launched with.
+test('Claude resume never replays the launcher\'s own channel and MCP flags', () => {
+  // A session recorded under an older launcher kept these in its stored flags.
+  // Replayed on resume they duplicated the launcher's own, and Claude 2.1.296
+  // then waited at a development-channel prompt listing the channel twice.
+  const session = {
+    id: 'cav-1',
+    launchFlags: '--dangerously-skip-permissions --chrome --dangerously-load-development-channels server:slack-bridge ' +
+      '--channels server:slack-bridge --mcp-config /tmp/mcp.json --model claude-opus-5-5[1m] --effort max --resume cav-1',
+  }
+  assert.deepEqual(resumeArgsFor(session), [
+    '--dangerously-skip-permissions', '--chrome', '--model', 'claude-opus-5-5[1m]', '--effort', 'max', '--resume', 'cav-1',
+  ])
+  assert.deepEqual(displayFlagsFor({ launchFlags: '--chrome --channels=server:slack-bridge --mcp-config=/tmp/x.json' }), ['--chrome'])
+  assert.deepEqual(displayFlagsFor({ provider: 'codex', launchFlags: '--channels keep' }), ['--channels', 'keep'],
+    'other providers keep their own flags')
+})
+
 test('Claude resume falls back to launch settings until a selection is recorded', () => {
   assert.deepEqual(resumeArgsFor({
     id: 'abc', launchFlags: '--dangerously-skip-permissions --chrome --model claude-opus-5-5[1m] --effort max',
