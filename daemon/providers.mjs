@@ -252,6 +252,8 @@ export function codexFlagsWithoutInitialPrompt(flags, sessionId) {
   return match ? raw.slice(0, match.index + match[0].length).trim() : raw
 }
 
+const CLAUDE_LAUNCHER_FLAGS = new Set(['--mcp-config', '--channels', '--dangerously-load-development-channels'])
+
 export function displayFlagsFor(session) {
   const provider = providerOf(session)
   const toks = String(session?.launchFlags || '').trim().split(/\s+/).filter(Boolean)
@@ -261,6 +263,11 @@ export function displayFlagsFor(session) {
     if (provider === 'claude') {
       if (t === '--resume' || t === '-r') { i++; continue }
       if (t === '--continue' || t === '-c') continue
+      // The launcher adds SAB's own MCP configuration and channel on every
+      // start. A stored copy (left by an older launcher) would be replayed on
+      // resume and duplicate them, which Claude then refuses to start with.
+      if (CLAUDE_LAUNCHER_FLAGS.has(t)) { i++; continue }
+      if ([...CLAUDE_LAUNCHER_FLAGS].some(flag => t.startsWith(`${flag}=`))) continue
     } else if (provider === 'codex' && t === 'resume') {
       continue
     } else if (provider === 'pi' && (t === '--session' || t === '-s')) {

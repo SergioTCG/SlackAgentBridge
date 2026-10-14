@@ -360,4 +360,6 @@ test('Claude consent helper confirms the development channel only for SAB\'s own
     'another development channel is left for a human')
   assert.deepEqual(devChannelConsent({ channels: 'server:slack-bridge, server:other-bridge', maxCaptures: 6 }), [],
     'an extra development channel is left for a human')
+  assert.deepEqual(devChannelConsent({ channels: 'server:slack-bridge, server:slack-bridge' }), ['Enter'],
+    'SAB\'s own channel listed twice is still only SAB\'s channel')
 })

@@ -36,6 +36,15 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A Claude session whose stored launch flags still carried the launcher's own
+  `--dangerously-load-development-channels server:slack-bridge` resumes again.
+  - Resume replayed that flag next to the launcher's own copy. Claude listed
+    the channel twice, the consent helper waited for a human, and the wake-up
+    failed with "The provider process did not initialize".
+  - Resume and flag display now drop the launcher-owned `--mcp-config`,
+    `--channels` and `--dangerously-load-development-channels` from stored
+    flags.
+  - The helper also accepts a list made only of SAB's own channel.
 - Claude sessions started or resumed on Claude Code 2.1.296 receive SAB's MCP
   channel events again.
   - Claude Code now skips a `server:` channel passed through `--channels` as
