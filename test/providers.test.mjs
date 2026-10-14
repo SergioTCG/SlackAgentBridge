@@ -162,6 +162,28 @@ test('Claude resume never replays the launcher\'s own channel and MCP flags', ()
     'other providers keep their own flags')
 })
 
+test('Claude resume drops bare words left from an old multi-word model name', () => {
+  // Older releases stored `--model Opus 4.8` and `--model Opus 5 (1M context)`.
+  // After a model change the leftover words stayed in the stored flags, and
+  // Claude submitted them as a prompt on every start.
+  assert.deepEqual(resumeArgsFor({
+    id: 'e3', model: 'claude-opus-5-5[1m]', effort: 'max',
+    launchFlags: '--dangerously-skip-permissions 4.8 --model claude-opus-5-5[1m] --effort max --resume e3',
+  }), ['--dangerously-skip-permissions', '--model', 'claude-opus-5-5[1m]', '--effort', 'max', '--resume', 'e3'])
+  assert.deepEqual(resumeArgsFor({
+    id: 'eb', launchFlags: '--dangerously-skip-permissions --chrome 5 (1M context) --model claude-opus-5-5[1m] --effort max',
+  }), ['--dangerously-skip-permissions', '--chrome', '--model', 'claude-opus-5-5[1m]', '--effort', 'max', '--resume', 'eb'])
+  assert.deepEqual(resumeArgsFor({
+    id: 'abc', launchFlags: '--dangerously-skip-permissions --model Opus 4.8 --effort max',
+  }), ['--dangerously-skip-permissions', '--model', 'Opus', '--effort', 'max', '--resume', 'abc'])
+  assert.deepEqual(displayFlagsFor({ launchFlags: '--chrome 5 (1M context) --model opus' }), ['--chrome', '--model', 'opus'])
+  assert.deepEqual(displayFlagsFor({ launchFlags: '--settings=/tmp/s.json 4.8 --chrome' }), ['--settings=/tmp/s.json', '--chrome'])
+  // Options SAB does not know, such as operator CCS_NEW_FLAGS, keep their values.
+  assert.deepEqual(displayFlagsFor({
+    launchFlags: '--dangerously-skip-permissions --permission-mode acceptEdits --add-dir /a /b --chrome',
+  }), ['--dangerously-skip-permissions', '--permission-mode', 'acceptEdits', '--add-dir', '/a', '/b', '--chrome'])
+})
+
 test('Claude resume falls back to launch settings until a selection is recorded', () => {
   assert.deepEqual(resumeArgsFor({
     id: 'abc', launchFlags: '--dangerously-skip-permissions --chrome --model claude-opus-5-5[1m] --effort max',

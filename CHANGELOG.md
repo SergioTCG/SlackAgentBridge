@@ -36,6 +36,16 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A resumed Claude session no longer receives a stray prompt such as `4.8` or
+  `5 (1M context)` the moment it starts.
+  - Older releases stored the status-line model name, for example
+    `--model Opus 4.8`, in the space-joined launch flags. A later model change
+    left its last words behind, and every resume passed them to Claude as a
+    prompt.
+  - Resume and flag display now drop a bare word that follows an on/off flag
+    or an already-filled `--model`/`--effort`. Values of options SAB does not
+    know, such as operator `CCS_NEW_FLAGS`, are kept.
+  - Stored flags clean themselves on each session's next start.
 - A Claude session whose stored launch flags still carried the launcher's own
   `--dangerously-load-development-channels server:slack-bridge` resumes again.
   - Resume replayed that flag next to the launcher's own copy. Claude listed

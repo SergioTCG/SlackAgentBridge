@@ -253,14 +253,20 @@ export function codexFlagsWithoutInitialPrompt(flags, sessionId) {
 }
 
 const CLAUDE_LAUNCHER_FLAGS = new Set(['--mcp-config', '--channels', '--dangerously-load-development-channels'])
+const CLAUDE_VALUE_FLAGS = new Set(['--model', '--effort'])
+const CLAUDE_SWITCH_FLAGS = new Set(['--dangerously-skip-permissions', '--chrome'])
 
 export function displayFlagsFor(session) {
   const provider = providerOf(session)
   const toks = String(session?.launchFlags || '').trim().split(/\s+/).filter(Boolean)
   const out = []
+  // Whether a bare Claude word may still be a value of the option before it.
+  let claudeValueOpen = false
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i]
     if (provider === 'claude') {
+      const valueOpen = claudeValueOpen
+      claudeValueOpen = false
       if (t === '--resume' || t === '-r') { i++; continue }
       if (t === '--continue' || t === '-c') continue
       // The launcher adds SAB's own MCP configuration and channel on every
@@ -268,6 +274,23 @@ export function displayFlagsFor(session) {
       // resume and duplicate them, which Claude then refuses to start with.
       if (CLAUDE_LAUNCHER_FLAGS.has(t)) { i++; continue }
       if ([...CLAUDE_LAUNCHER_FLAGS].some(flag => t.startsWith(`${flag}=`))) continue
+      if (CLAUDE_VALUE_FLAGS.has(t)) {
+        out.push(t)
+        if (toks[i + 1] && !toks[i + 1].startsWith('-')) out.push(toks[++i])
+        continue
+      }
+      if (t.startsWith('-')) {
+        // An option SAB does not know, from CCS_NEW_FLAGS say, may take values.
+        claudeValueOpen = !t.includes('=') && !CLAUDE_SWITCH_FLAGS.has(t)
+      } else if (valueOpen) {
+        claudeValueOpen = true
+      } else {
+        // Older releases recorded the status-line display name as the model,
+        // so `--model Opus 4.8` was stored in this space-joined string. A later
+        // model change left `4.8` behind as a bare word, which Claude reads as
+        // a prompt and submits on every start.
+        continue
+      }
     } else if (provider === 'codex' && t === 'resume') {
       continue
     } else if (provider === 'pi' && (t === '--session' || t === '-s')) {
