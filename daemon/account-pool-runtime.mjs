@@ -251,10 +251,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       try { onSettled(session) } catch { /* input recovery is separately fenced */ }
       await notify(channelId, `Account handover complete: ${target.email} (${selected.group.name}).${journal.identityVerified ? '' : ' Legacy token identity is owner-attested only; this does not authorize automatic switching.'}`).catch(() => {})
       return { status: 'committed', accountId: target.id, requestId }
-    } catch {
-      const rejected = journal.phase === 'prepared'
+    } catch (error) {
+      const rejected = journal.phase === 'prepared' || error.accountPreflightRejected === true
       journal.phase = rejected ? 'rejected' : 'interrupted'
-      journal.failure = rejected ? 'Rejected before provider teardown; correct the target credential and use a new request ID.'
+      journal.failure = rejected ? 'Rejected before provider teardown; verify credentials, idle state and pending work, then use a new request ID.'
         : 'Verify this exact session with /sab-status before requesting another handover; the restart will not be replayed.'
       if (!persistenceFailed) save()
       await notify(channelId, rejected ? 'Account handover was rejected before teardown. The existing provider was not stopped.'

@@ -81,7 +81,7 @@ import {
   readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionPatch, validateInstructionResult,
   writeInstructionProposal,
 } from './instructions.mjs'
-import { createAutomationLifecycle, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
+import { createAutomationLifecycle, proveAutomationReleaseProcess, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
 import { handleAutomationHttp } from './automation-http.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { createTerminalControl } from './terminal-control.mjs'
@@ -237,7 +237,9 @@ const accountPools = createAccountPoolRuntime({
         stage === 'replacement' && !await validProviderRootClaim(expected.pid, expected.tmux, account.provider)) return 'credential-unavailable'
     return identity
   },
-  restart: (session, alias, options) => restartSessionWithMutation(session, {
+  restart: async (session, alias, options) => {
+    let preflightPassed = false
+    try { return await restartSessionWithMutation(session, {
     expectedSessionId: options.expectedSessionId,
     notice: `🔐 Switching subscription to ${options.account.email}; resuming the same conversation with its current settings…`,
     beforeMutation: async () => {
@@ -255,9 +257,16 @@ const accountPools = createAccountPoolRuntime({
           accountPoolBlockReason(session, true, options.taskMaintenance)) throw new Error('account_switch_not_proven_idle')
       if (options.taskMaintenance && childProof !== await proveIdleTaskProcessTree(session, { execFile, bridge: BRIDGE })) throw new Error('account_background_process_changed')
       options.authorize()
+      preflightPassed = true
     },
     mutate: current => { current.account = alias; current.accountKind = accountCredentialReference(options.account).kind },
-  }),
+    }) } catch (error) {
+      // A failed idle/child-process/authority proof never reached mutation or
+      // teardown. Do not strand an untouched task behind a recovery fence.
+      if (!preflightPassed) error.accountPreflightRejected = true
+      throw error
+    }
+  },
   notify: (channel, message) => post(channel, message),
   onSettled: session => scheduleSessionInputDrain(session, providerOf(session), session.tmux, 0),
 })
@@ -7706,7 +7715,7 @@ const automationLifecycle = createAutomationLifecycle({
   state,
   validateReleaseSession: async session => !activeTransition(session.channel) &&
     !updatingSessions.has(session.id) && !restarting.has(session.id) && !resurrectInFlight.has(session.id) &&
-    await validProviderRootClaim(session.pid, session.tmux, providerOf(session)),
+    await proveAutomationReleaseProcess(session, { pidAlive, isTmuxAlive: tmuxAlive, validProviderRootClaim }),
   notifyReleased: record => post(record.channelId, '🔓 Automation setup ownership released. This channel, conversation and collaborators are unchanged; normal session maintenance is now available.'),
   persist: () => saveStateNow(state),
   launch: launchAutomation,

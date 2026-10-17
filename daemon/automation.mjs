@@ -18,6 +18,13 @@ const TERMINAL_STATUSES = new Set(['stopped', 'released'])
 export const automationOwnsSession = (record, session) => Boolean(record && !TERMINAL_STATUSES.has(record.status) &&
   (record.sessionId === session.id || session.tmux && record.tmux === session.tmux))
 
+export async function proveAutomationReleaseProcess(session, { pidAlive, isTmuxAlive, validProviderRootClaim }) {
+  const { pid, tmux } = session
+  return Boolean(pid && tmux && pidAlive(pid) && await isTmuxAlive(tmux) &&
+    await validProviderRootClaim(pid, tmux, providerOf(session)) &&
+    session.pid === pid && session.tmux === tmux && pidAlive(pid))
+}
+
 export function validateAutomationRelease(input) {
   const patterns = { requestId: /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/, sessionId: /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/,
     channelId: /^[CG][A-Z0-9]{1,32}$/, tmux: /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/ }
@@ -396,7 +403,7 @@ export function createAutomationLifecycle({
   }
 
   function consumeInitialPromptEcho(sessionId, prompt) {
-    const record = Object.values(records()).find(item => item.status !== 'released' && item.sessionId === sessionId)
+    const record = Object.values(records()).find(item => item.sessionId === sessionId)
     if (!record || record.prompt.acknowledgedAt || !['claimed', 'delivered'].includes(record.prompt.status)) return false
     if (!record.prompt.sha256 || promptDigest(prompt) !== record.prompt.sha256) return false
     record.prompt.acknowledgedAt = now()

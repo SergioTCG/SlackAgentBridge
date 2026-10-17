@@ -49,6 +49,15 @@ test('task maintenance rejects rebound, nonlocal and undelivered checkpoints wit
   }
 })
 
+test('pending reply text, files and failure notices block maintenance before teardown', () => {
+  for (const reply of [{ text: 'progress' }, { text: 'progress', textSlackTs: '1.2', files: [{}], fileDeliveryStatus: 'uploading' },
+    { files: [{}], fileDeliveryStatus: 'failed' }]) {
+    const { state, session, task } = fixture()
+    task.replies = [reply]
+    assert.throws(() => captureTaskMaintenance(state, session, task.id), /blocked/)
+  }
+})
+
 test('process proof rejects arbitrary children, nested jobs, additional panes and a mismatched provider root', async () => {
   const session = { pid: 20, tmux: 'sab-worker' }, bridge = '/bridge'
   const normal = '10 1\n20 10\n21 20\n'

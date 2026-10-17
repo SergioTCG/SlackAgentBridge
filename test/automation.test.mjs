@@ -7,6 +7,7 @@ import path from 'node:path'
 import {
   AutomationRequestError,
   createAutomationLifecycle,
+  proveAutomationReleaseProcess,
   shouldFenceAutomationHook,
   validateAutomationRequest,
   waitForProviderInput,
@@ -57,6 +58,27 @@ test('release requires completed setup, exact local authority and live-process p
   await assert.rejects(f.lifecycle.release(f.request.externalKey, f.input), /local|correlation/)
   const denied = await releasedFixture(t, { validateReleaseSession: async () => false })
   await assert.rejects(denied.lifecycle.release(denied.request.externalKey, denied.input), /process|correlation/)
+})
+
+test('released bootstrap receipt still deduplicates a late prompt echo after recovery', async t => {
+  const f = await releasedFixture(t)
+  await f.lifecycle.release(f.request.externalKey, f.input)
+  f.lifecycle.recover()
+  assert.equal(f.lifecycle.consumeInitialPromptEcho(f.session.id, f.request.initialPrompt), true)
+  assert.equal(f.lifecycle.consumeInitialPromptEcho(f.session.id, f.request.initialPrompt), false)
+  assert.equal(f.lifecycle.status(f.request.externalKey).status, 'released')
+  assert.equal(f.calls.inject.length, 1)
+})
+
+test('release process proof requires fresh PID and tmux liveness despite cached ancestry', async () => {
+  const session = { pid: 42, tmux: 'sab-live' }
+  const dependencies = { pidAlive: () => true, isTmuxAlive: async () => true, validProviderRootClaim: async () => true }
+  assert.equal(await proveAutomationReleaseProcess(session, dependencies), true)
+  assert.equal(await proveAutomationReleaseProcess(session, { ...dependencies, pidAlive: () => false }), false)
+  assert.equal(await proveAutomationReleaseProcess(session, { ...dependencies, isTmuxAlive: async () => false }), false)
+  let alive = true
+  assert.equal(await proveAutomationReleaseProcess(session, { ...dependencies, pidAlive: () => alive,
+    validProviderRootClaim: async () => { alive = false; return true } }), false)
 })
 
 test('release rejects an original automation tmux still alive and a rebind during proof', async t => {

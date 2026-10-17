@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { taskMaintenancePending } from './account-task-maintenance.mjs'
+import { teamReplyDeliverySettled } from './team-delivery-state.mjs'
 
 // Keep a full delegated text envelope below Slack's single-message limit so
 // both linked channels retain a visible audit copy without hidden history reads.
@@ -1428,12 +1429,7 @@ export function pruneTeamTasks(state, { now = Date.now(), max = TEAM_MAX_TASKS }
 export function teamTaskDeliverySettled(task) {
   const completion = !Object.hasOwn(task || {}, 'completionDeliveryStatus') ||
     task?.completionDeliveryStatus === 'delivered'
-  const replies = (task?.replies || []).every(reply => {
-    const text = !reply.text || Boolean(reply.textSlackTs)
-    const files = !reply.files?.length || ['none', 'uploaded'].includes(reply.fileDeliveryStatus) ||
-      (reply.fileDeliveryStatus === 'failed' && Boolean(reply.fileDeliveryNotifiedAt))
-    return text && files
-  })
+  const replies = (task?.replies || []).every(teamReplyDeliverySettled)
   const messages = (task?.messages || []).every(message => ['delivered', 'failed'].includes(message.deliveryStatus))
   const reports = (task?.reports || []).every(report => report.deliveryStatus === 'delivered')
   return completion && replies && messages && reports

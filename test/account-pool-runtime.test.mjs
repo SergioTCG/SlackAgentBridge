@@ -74,6 +74,17 @@ test('native normalization of stale flag fragments is not an account handover mi
   assert.equal((await f.runtime.switchAccount(f.session, 'second', { requestId: 'canonical' })).status, 'committed')
 })
 
+test('a proved preflight rejection unlocks the unchanged task without an uncertain-restart fence', async () => {
+  const f = setup({ blockReason: s => s.teamActiveTaskId ? 'delegated team task in progress' : null,
+    restart: async () => { throw Object.assign(new Error('unknown background job'), { accountPreflightRejected: true }) } })
+  const tasks = reserveTask(f)
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'preflight', preserveTask: 'task-held' }), /rejected/)
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'rejected')
+  assert.deepEqual(f.state.teamTasks, tasks)
+  assert.equal(f.session.pid, 100)
+  assert.equal(f.session.account, undefined)
+})
+
 test('serialized restart preserves an exact task reservation and reconciles without replay or automatic proof', async () => {
   const f = setup({ blockReason: s => s.teamActiveTaskId ? 'delegated team task in progress' : null,
     restart: async (session, alias) => { session.account = alias; session.pid = 200; throw new Error('crash after adoption') } })

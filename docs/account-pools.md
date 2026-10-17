@@ -477,14 +477,16 @@ This narrow local-owner exception applies only to a Claude worker already
 `awaiting_release`, not running or dispatching work. It keeps the assignment,
 pending gates, completion declaration, reports and work generation unchanged;
 no unfinished task is marked complete. SAB requires fully delivered turn proof,
-no pending task messages/input, two stable native idle observations and a
+no pending reply deliveries or task messages/input, two stable native idle observations and a
 single-pane process tree containing only the provider ancestor chain and exact
 SAB channel server. Any unknown child job is refused, not terminated.
 
 The complete task checkpoint is journaled before restart. Team replies,
 completion/release, messages and reconciliation are fenced during a prepared,
 restarting or interrupted handover. A crash never replays instructions or
-releases the task. Query the original request and explicitly reconcile an exact
+releases the task. A proved preflight rejection clears the maintenance fence
+without teardown; it can be corrected and retried with a new request ID.
+Query the original request and explicitly reconcile an exact
 live replacement; a failed restart remains reserved for owner recovery. This
 exception never creates automatic rotation proof. Normal/bulk updates and
 automatic selection still exclude reserved workers. Decline any native quota

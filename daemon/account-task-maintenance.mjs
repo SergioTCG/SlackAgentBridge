@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { channelNodeId, nodeIdForSession, LOCAL_NODE_ID } from './nodes.mjs'
+import { teamReplyDeliverySettled } from './team-delivery-state.mjs'
 
 const fail = code => { throw new Error(code) }
 const digest = task => crypto.createHash('sha256').update(JSON.stringify(task)).digest('hex')
@@ -19,6 +20,7 @@ export function captureTaskMaintenance(state, session, taskId) {
       !Number.isSafeInteger(task.workGeneration) || task.workGeneration < 1 || task.workGeneration !== task.providerWorkGeneration ||
       !task.reports?.some(report => report.workGeneration === task.workGeneration && report.deliveryStatus === 'delivered') ||
       task.reports.some(report => report.deliveryStatus !== 'delivered') ||
+      task.replies?.some(reply => !teamReplyDeliverySettled(reply)) ||
       task.messages?.some(message => message.deliveryStatus !== 'delivered' || message.providerDeliveryStatus !== 'delivered')) {
     fail('account_task_maintenance_blocked')
   }
