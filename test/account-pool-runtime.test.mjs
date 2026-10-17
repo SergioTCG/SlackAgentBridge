@@ -12,6 +12,86 @@ const enrollment = () => ({ schemaVersion: 1, requestId: 'runtime-fixture', acco
 ], groups: [{ key: 'mine', name: 'Mine', members: ['primary', 'secondary'], preferred: { claude: 'primary' } },
   { key: 'client', name: 'Client', members: ['client'] }], routing: { defaultGroup: 'mine', channels: { CCLIENT: 'client' } } })
 const legacy = 'second=PRIVATE-SECOND\nclient=PRIVATE-CLIENT\n'
+
+function reserveTask(f) {
+  f.session.teamActiveTaskId = 'task-held'
+  f.state.teams = { team: { id: 'team', coordinatorChannel: 'CCOORD', members: { CMINE: { role: 'worker' } } } }
+  f.state.teamTasks = { 'task-held': { id: 'task-held', teamId: 'team', status: 'awaiting_release',
+    completionPolicy: 'coordinator-release', sourceChannel: 'CCOORD', targetSessionId: f.session.id, targetChannel: 'CMINE', targetProvider: 'claude',
+    workGeneration: 2, providerWorkGeneration: 2, pendingGates: ['review', 'merge'], completionRequest: null,
+    messages: [], reports: [{ workGeneration: 2, deliveryStatus: 'delivered' }] } }
+  return structuredClone(f.state.teamTasks)
+}
+
+test('explicit idle-task maintenance preserves pending gates, task authority and unrelated state', async () => {
+  const f = setup({ blockReason: s => s.teamActiveTaskId ? 'delegated team task in progress' : null })
+  const tasks = reserveTask(f), other = structuredClone(f.other)
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'ordinary' }), /blocked/)
+  assert.equal((await f.runtime.switchAccount(f.session, 'second', { requestId: 'maintain', preserveTask: 'task-held' })).status, 'committed')
+  assert.deepEqual(f.state.teamTasks, tasks); assert.deepEqual(f.other, other)
+  assert.equal(f.session.teamActiveTaskId, 'task-held')
+  assert.equal(Object.keys(f.state.accountPools.proofs).length, 0)
+  assert.equal(f.state.accountPools.switches.CMINE.taskMaintenance.taskId, 'task-held')
+  assert.equal((await f.runtime.switchAccount(f.session, 'second', { requestId: 'maintain', preserveTask: 'task-held' })).status, 'committed')
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'maintain' }), /conflict/)
+})
+
+test('task maintenance refuses running, mismatched, pending-message, busy and automatic switches', async () => {
+  for (const reason of ['running', 'wrong-task', 'pending-message', 'busy', 'automatic', 'dormant']) {
+    const f = setup({ isDormant: async () => true,
+      blockReason: s => reason === 'busy' ? 'turn in progress' : s.teamActiveTaskId ? 'delegated team task in progress' : reason === 'dormant' ? 'provider is dormant' : null })
+    reserveTask(f)
+    if (reason === 'dormant') f.session.pid = null
+    if (reason === 'running') f.state.teamTasks['task-held'].status = 'running'
+    if (reason === 'pending-message') f.state.teamTasks['task-held'].messages = [{ deliveryStatus: 'pending' }]
+    await assert.rejects(f.runtime.switchAccount(f.session, 'second', {
+      requestId: reason, preserveTask: reason === 'wrong-task' ? 'task-other' : 'task-held', automatic: reason === 'automatic',
+    }))
+    assert.equal(f.events.some(e => e.restart), false)
+  }
+})
+
+test('task mutation during credential proof prevents teardown; an interrupted restart preserves the reservation', async () => {
+  let change = () => {}
+  const f = setup({ blockReason: s => s.teamActiveTaskId ? 'delegated team task in progress' : null,
+    verifyIdentity: async () => { change(); return 'verified' } })
+  reserveTask(f)
+  change = () => { f.state.teamTasks['task-held'].pendingGates.push('new-gate') }
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'raced', preserveTask: 'task-held' }))
+  assert.equal(f.events.some(e => e.restart), false)
+  const interrupted = setup({ blockReason: s => s.teamActiveTaskId ? 'delegated team task in progress' : null,
+    restart: async () => { throw new Error('native resume interrupted') } })
+  const tasks = reserveTask(interrupted)
+  await assert.rejects(interrupted.runtime.switchAccount(interrupted.session, 'second', { requestId: 'crash', preserveTask: 'task-held' }), /uncertain/)
+  assert.deepEqual(interrupted.state.teamTasks, tasks)
+  await interrupted.runtime.recover()
+  assert.equal(interrupted.session.teamActiveTaskId, 'task-held')
+})
+
+test('native normalization of stale flag fragments is not an account handover mismatch', async () => {
+  const f = setup({ restart: async (s, alias) => { s.account = alias; s.pid = 200; s.launchFlags = '--chrome --dangerously-skip-permissions --model opus --effort max --resume native-one' } })
+  f.session.launchFlags = '--chrome --dangerously-skip-permissions 5 (1M context) --model opus --effort max --resume native-one'
+  assert.equal((await f.runtime.switchAccount(f.session, 'second', { requestId: 'canonical' })).status, 'committed')
+})
+
+test('serialized restart preserves an exact task reservation and reconciles without replay or automatic proof', async () => {
+  const f = setup({ blockReason: s => s.teamActiveTaskId ? 'delegated team task in progress' : null,
+    restart: async (session, alias) => { session.account = alias; session.pid = 200; throw new Error('crash after adoption') } })
+  const tasks = reserveTask(f)
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'resume-recovery', preserveTask: 'task-held' }), /uncertain/)
+  const disk = JSON.parse(JSON.stringify(f.state))
+  const recovered = setup({ initialState: disk, readRegistry: () => f.registry,
+    blockReason: s => s.teamActiveTaskId ? 'delegated team task in progress' : null,
+    restart: async () => assert.fail('recovery must not restart') })
+  await recovered.runtime.recover()
+  assert.deepEqual(disk.teamTasks, tasks)
+  assert.throws(() => recovered.runtime.assertInputAllowed(recovered.session), /uncertain/)
+  const result = await recovered.runtime.reconcile(recovered.session, { requestId: 'resume-recovery' })
+  assert.equal(result.status, 'reconciled')
+  assert.deepEqual(disk.teamTasks, tasks)
+  assert.equal(recovered.session.teamActiveTaskId, 'task-held')
+  assert.equal(Object.keys(disk.accountPools.proofs).length, 0)
+})
 function setup({ mode = 'manual', initialState = null, ...overrides } = {}) {
   const registry = compileAccountRegistry(enrollment(), { legacyAccounts: legacy })
   const session = { id: 'native-one', channel: 'CMINE', cwd: '/workspace', tmux: 'sab-one', pid: 100,

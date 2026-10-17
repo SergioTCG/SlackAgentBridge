@@ -1,10 +1,9 @@
 import { providerOf } from './providers.mjs'
 import { activeTerminalSessions } from './terminal-control.mjs'
+import { automationOwnsSession } from './automation.mjs'
 
 function ownsAutomation(session, automations = {}) {
-  return Object.values(automations).some(record =>
-    record && record.status !== 'stopped' &&
-    (record.sessionId === session.id || (session.tmux && record.tmux === session.tmux)))
+  return Object.values(automations).some(record => automationOwnsSession(record, session))
 }
 
 export function bulkUpdateBlockReason(session, {

@@ -8,6 +8,15 @@ Notable changes to this project. Format based on
 
 ### Added
 
+- Explicit non-destructive `sab automation release` for completed bootstrap
+  ownership. Exact binding/process proof, durable request receipts and retained
+  external keys prevent re-launch or accidental later stop/archive; sessions,
+  channels and collaborators remain intact after native resume.
+- Explicit `sab account pool switch --preserve-task TASK_ID` maintenance for a
+  reported idle Claude worker. Durable task checkpoints and mutation fences,
+  stable native idle proof and a bounded process-tree check preserve task
+  authority/gates/history without releasing work or killing background jobs.
+  Running work and automatic delegated rotation remain blocked.
 - Owner account/group management: JSON-safe `sab account group` and `manage`,
   exact revision/request receipts, group CRUD/membership/preferences, profile
   attachment, channel routes, safe draining and retirement without credential
@@ -64,6 +73,8 @@ Notable changes to this project. Format based on
 
 ### Changed
 
+- Account handover compares canonical resume arguments, preventing harmless
+  cleanup of malformed legacy model-name fragments from reporting failure.
 - Named Claude launches fail closed on missing/conflicting/insecure credentials
   and reject inherited tokens in place of the requested account.
 

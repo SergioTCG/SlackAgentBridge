@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { channelNodeId, nodeIdForSession, LOCAL_NODE_ID } from './nodes.mjs'
 
 import {
   isPathWithin,
@@ -12,7 +13,20 @@ import {
 const MAX_EXTERNAL_KEY = 512
 const MAX_INITIAL_PROMPT_BYTES = 256 * 1024
 const SLACK_USER_ID = /^[UW][A-Z0-9]{8,}$/
-const TERMINAL_STATUSES = new Set(['stopped'])
+const TERMINAL_STATUSES = new Set(['stopped', 'released'])
+
+export const automationOwnsSession = (record, session) => Boolean(record && !TERMINAL_STATUSES.has(record.status) &&
+  (record.sessionId === session.id || session.tmux && record.tmux === session.tmux))
+
+export function validateAutomationRelease(input) {
+  const patterns = { requestId: /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/, sessionId: /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/,
+    channelId: /^[CG][A-Z0-9]{1,32}$/, tmux: /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/ }
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 4 ||
+      Object.entries(patterns).some(([key, pattern]) => typeof input[key] !== 'string' || !pattern.test(input[key]))) {
+    throw new AutomationRequestError('invalid_release', 'release requires exact requestId, sessionId, channelId and tmux')
+  }
+  return Object.fromEntries(Object.keys(patterns).map(key => [key, input[key]]))
+}
 
 export class AutomationRequestError extends Error {
   constructor(code, message, status = 400) {
@@ -145,6 +159,7 @@ function publicStatus(record) {
     },
     failure: record.failure ? { ...record.failure } : null,
     stop: record.stop ? { ...record.stop } : null,
+    ...(record.release ? { release: { ...record.release } } : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   }
@@ -162,6 +177,8 @@ export function createAutomationLifecycle({
   terminate,
   archive,
   isTmuxAlive = async () => true,
+  validateReleaseSession = async () => false,
+  notifyReleased = async () => {},
   launchTimeoutMs = 5 * 60 * 1000,
   notifyFailure = async () => {},
   now = () => Date.now(),
@@ -357,7 +374,7 @@ export function createAutomationLifecycle({
     if (!session?.id || !session?.tmux || !session?.channel) return false
     const provider = providerOf(session)
     const record = Object.values(records()).find(item =>
-      item.tmux === session.tmux && item.provider === provider && !stopRequested(item) && !['stopping', 'stopped'].includes(item.status))
+      item.tmux === session.tmux && item.provider === provider && !stopRequested(item) && !['stopping', 'stopped', 'released'].includes(item.status))
     if (!record) return false
     if (path.resolve(session.cwd || record.cwd) !== record.cwd) {
       setFailure(record, 'session_cwd_mismatch', 'The tmux session registered from a different working directory.', 'Stop the automation and investigate the launcher before retrying.')
@@ -379,7 +396,7 @@ export function createAutomationLifecycle({
   }
 
   function consumeInitialPromptEcho(sessionId, prompt) {
-    const record = Object.values(records()).find(item => item.sessionId === sessionId)
+    const record = Object.values(records()).find(item => item.status !== 'released' && item.sessionId === sessionId)
     if (!record || record.prompt.acknowledgedAt || !['claimed', 'delivered'].includes(record.prompt.status)) return false
     if (!record.prompt.sha256 || promptDigest(prompt) !== record.prompt.sha256) return false
     record.prompt.acknowledgedAt = now()
@@ -389,6 +406,7 @@ export function createAutomationLifecycle({
 
   function recover() {
     for (const record of Object.values(records())) {
+      if (record.status === 'released') continue
       if (record.prompt?.status === 'claimed' && record.status === 'injecting_prompt') {
         runOnce(record.externalKey, 'recover-prompt', async () => {
           if (record.prompt.status !== 'claimed' || record.status !== 'injecting_prompt') return
@@ -445,6 +463,7 @@ export function createAutomationLifecycle({
     validateExternalKey(externalKey)
     const record = recordFor(externalKey)
     if (!record) return null
+    if (record.status === 'released') throw new AutomationRequestError('automation_ownership_released', 'Automation ownership was released; stop cannot touch the retained session.', 409)
     record.stop ||= { requestedAt: null, archiveRequested: false, terminated: false, channelArchived: false }
     if (shouldArchive) record.stop.archiveRequested = true
     if (record.status === 'stopped' && record.stop.terminated && (!record.stop.archiveRequested || record.stop.channelArchived)) {
@@ -485,14 +504,64 @@ export function createAutomationLifecycle({
     return publicStatus(recordFor(externalKey))
   }
 
+  async function release(externalKey, input) {
+    validateExternalKey(externalKey)
+    const expected = validateAutomationRelease(input), record = recordFor(externalKey)
+    if (!record) return null
+    const receipt = () => {
+      if (record.status !== 'released') return null
+      if (Object.entries(expected).some(([key, value]) => record.release?.[key] !== value)) {
+        throw new AutomationRequestError('release_request_conflict', 'Automation ownership release request conflict.', 409)
+      }
+      touch(record) // a retry also makes an earlier failed atomic write durable
+      return publicStatus(record)
+    }
+    const prior = receipt()
+    if (prior) return prior
+    const correlate = () => {
+      const session = state.sessions?.[expected.sessionId]
+      if (record.status !== 'active' || record.stop?.requestedAt || record.prompt?.status !== 'delivered' || record.initialPrompt ||
+          !record.collaborators.every(item => item.status === 'ready') ||
+          running.has(`${externalKey}:launch`) || running.has(`${externalKey}:configure`)) {
+        throw new AutomationRequestError('automation_setup_incomplete', 'Release requires completed automation setup with no pending launch or stop.', 409)
+      }
+      if (!session || record.sessionId !== expected.sessionId || record.channelId !== expected.channelId ||
+          session.channel !== expected.channelId || state.channels?.[expected.channelId] !== session.id || session.tmux !== expected.tmux ||
+          session.cwd !== record.cwd || providerOf(session) !== record.provider ||
+          channelNodeId(state, session.channel) !== LOCAL_NODE_ID || nodeIdForSession(session) !== LOCAL_NODE_ID ||
+          Object.values(state.sessions || {}).some(other => other.id !== session.id && other.tmux === record.tmux)) {
+        throw new AutomationRequestError('automation_release_correlation', 'Release requires the exact local automation session/channel correlation.', 409)
+      }
+      return session
+    }
+    const session = correlate(), processClaim = { pid: session.pid, tmux: session.tmux }
+    if (record.tmux !== session.tmux && await isTmuxAlive(record.tmux)) {
+      throw new AutomationRequestError('automation_release_tmux_alive', 'The original automation tmux is still alive; inspect correlation before release.', 409)
+    }
+    if (!await validateReleaseSession(session)) throw new AutomationRequestError('automation_release_process', 'The exact provider process could not be proved; no ownership was changed.', 409)
+    if (record.tmux !== session.tmux && await isTmuxAlive(record.tmux)) {
+      throw new AutomationRequestError('automation_release_tmux_alive', 'The original automation tmux reappeared; ownership was not released.', 409)
+    }
+    const racedReceipt = receipt()
+    if (racedReceipt) return racedReceipt
+    if (correlate() !== session || session.pid !== processClaim.pid || session.tmux !== processClaim.tmux) {
+      throw new AutomationRequestError('automation_release_correlation', 'Session correlation changed during release proof.', 409)
+    }
+    record.release = { ...expected, releasedAt: now() }
+    record.status = 'released'
+    touch(record) // journal before the notice; no session, whitelist or channel mutation
+    try { await notifyReleased(record) } catch { /* durable result remains queryable */ }
+    return publicStatus(record)
+  }
+
   function findForHook(provider, sessionId, tmux) {
     return Object.values(records()).find(record =>
-      record.provider === provider && ((sessionId && record.sessionId === sessionId) || (tmux && record.tmux === tmux))) || null
+      record.status !== 'released' && record.provider === provider && ((sessionId && record.sessionId === sessionId) || (tmux && record.tmux === tmux))) || null
   }
 
   function codexBootstrapDisposition(bootstrap, tmux) {
     const record = Object.values(records()).find(item => item.provider === 'codex' && item.tmux === tmux)
-    if (!record || stopRequested(record) || ['stopping', 'stopped'].includes(record.status)) return { disposition: 'ignore', record }
+    if (!record || stopRequested(record) || ['stopping', 'stopped', 'released'].includes(record.status)) return { disposition: 'ignore', record }
     if (!bootstrap?.threadId || !bootstrap?.cwd || path.resolve(bootstrap.cwd) !== record.cwd) {
       return { disposition: 'forbidden', record }
     }
@@ -535,7 +604,7 @@ export function createAutomationLifecycle({
   }
 
   return {
-    create, status, stop, recover, reconcile, correlateSessionStart,
+    create, status, stop, release, recover, reconcile, correlateSessionStart,
     consumeInitialPromptEcho, findForHook, acceptCodexBootstrap,
   }
 }

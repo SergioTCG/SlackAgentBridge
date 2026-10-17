@@ -14,6 +14,26 @@ async function withServer(lifecycle, run) {
   finally { await new Promise(resolve => server.close(resolve)) }
 }
 
+test('automation ownership release is exact, JSON-only, browser-fenced and never aliases stop', async () => {
+  const calls = []
+  await withServer({ release: async (key, input) => { calls.push({ key, input }); return { status: 'released' } },
+    stop: async () => assert.fail('release must not stop'), status: () => null }, async base => {
+    const key = 'project:person/name', input = { sessionId: 'native', channelId: 'CWORK', tmux: 'sab-current', requestId: 'release-once' }
+    const post = (body, extra = {}) => fetch(`${base}/automation/sessions/${encodeURIComponent(key)}/release`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...extra }, body: JSON.stringify(body),
+    })
+    assert.equal((await post(input, { origin: 'http://evil.test' })).status, 403)
+    assert.equal((await post(input, { 'sec-fetch-site': 'same-origin' })).status, 403)
+    assert.equal((await post(input, { 'content-type': 'text/plain' })).status, 415)
+    assert.equal((await post({ ...input, archive: true })).status, 400)
+    assert.equal((await post({ requestId: 'missing-proof' })).status, 400)
+    assert.equal(calls.length, 0)
+    const response = await post(input)
+    assert.equal(response.status, 200)
+    assert.deepEqual(calls, [{ key, input }])
+  })
+})
+
 test('automation HTTP create/status/stop preserves encoded external keys and response codes', async () => {
   const key = 'github:org/repo#123'
   const known = new Map()

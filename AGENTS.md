@@ -167,6 +167,14 @@ generated MCP configuration. Do not print secrets during diagnostics.
   only after native session/channel correlation and complete collaborator
   setup. It never receives an artifact grant. Exact automation stop must not
   delegate to bulk cleanup or mutate a rebound/unrelated session or channel.
+  Explicit owner release of completed bootstrap ownership must retain the
+  external-key receipt, session, channel, whitelist and prompt deduplication;
+  released automations may never stop, archive or re-adopt the retained session.
+  Explicit owner account maintenance may preserve one exact local Claude task
+  already `awaiting_release`, but only with an unchanged durable task checkpoint,
+  no pending input/messages, repeated native idle proof and no unknown child
+  jobs or extra tmux panes. It must not clear gates, declare completion, release
+  the worker, replay input or authorize automatic/delegated rotation.
 - Provider-switch phase changes require immediate atomic persistence. Private
   handoff/alignment turns must not mirror into Slack, and a target must not
   receive the channel until its read-only readiness turn validates.

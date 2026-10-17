@@ -1,4 +1,4 @@
-import { AutomationRequestError } from './automation.mjs'
+import { AutomationRequestError, validateAutomationRelease } from './automation.mjs'
 
 const MAX_REQUEST_BODY = 320 * 1024
 const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i
@@ -69,7 +69,7 @@ export async function handleAutomationHttp(req, res, url, lifecycle) {
     return true
   }
 
-  const match = /^\/automation\/sessions\/([^/]+?)(\/stop)?$/.exec(url.pathname)
+  const match = /^\/automation\/sessions\/([^/]+?)(\/(?:stop|release))?$/.exec(url.pathname)
   if (!match) return false
   try {
     requireScriptClient(req, { json: req.method === 'POST' })
@@ -82,6 +82,12 @@ export async function handleAutomationHttp(req, res, url, lifecycle) {
     }
     if (match[2] && req.method === 'POST') {
       const body = await readAutomationJson(req)
+      if (match[2] === '/release') {
+        const status = await lifecycle.release(externalKey, validateAutomationRelease(body))
+        if (!status) sendJson(res, 404, { ok: false, code: 'automation_not_found', error: 'automation not found' })
+        else sendJson(res, 200, { ok: true, ...status })
+        return true
+      }
       if (body.archive !== undefined && typeof body.archive !== 'boolean') {
         throw new AutomationRequestError('invalid_archive', 'archive must be a boolean')
       }

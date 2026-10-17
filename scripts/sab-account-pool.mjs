@@ -5,7 +5,7 @@ const args = process.argv.slice(2), json = args.includes('--json')
 const fail = () => { throw new Error('invalid_account_pool_command') }
 try {
   const action = args.shift(), options = {}
-  const fields = { status: ['--channel'], refresh: ['--account'], switch: ['--channel', '--session', '--account', '--request-id'], reconcile: ['--channel', '--session', '--request-id'] }
+  const fields = { status: ['--channel'], refresh: ['--account'], switch: ['--channel', '--session', '--account', '--request-id', '--preserve-task'], reconcile: ['--channel', '--session', '--request-id'] }
   if (!Object.hasOwn(fields, action)) fail()
   while (args.length) {
     const flag = args.shift()
@@ -13,14 +13,15 @@ try {
     options[flag] = flag === '--json' ? true : args.shift()
     if (typeof options[flag] !== 'string' && flag !== '--json') fail()
   }
-  if (fields[action].some(flag => !options[flag])) fail()
+  if (fields[action].filter(flag => flag !== '--preserve-task').some(flag => !options[flag])) fail()
   const base = new URL(process.env.SAB_ACCOUNT_URL || 'http://127.0.0.1:8877')
   if (base.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname) || base.username || base.password || base.pathname !== '/' || base.search || base.hash) fail()
   const url = new URL(`/account-pools/${action}`, base)
   let body
   if (action === 'status') url.searchParams.set('channel', options['--channel'])
   else if (action === 'refresh') body = { account: options['--account'] }
-  else body = { channel: options['--channel'], session: options['--session'], ...(action === 'switch' ? { account: options['--account'] } : {}), requestId: options['--request-id'] }
+  else body = { channel: options['--channel'], session: options['--session'], ...(action === 'switch' ? { account: options['--account'],
+    ...(options['--preserve-task'] ? { preserveTask: options['--preserve-task'] } : {}) } : {}), requestId: options['--request-id'] }
   const response = await fetch(url, { method: action === 'status' ? 'GET' : 'POST', redirect: 'error',
     headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(60000) })
   const payload = await response.json()

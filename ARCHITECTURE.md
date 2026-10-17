@@ -231,6 +231,21 @@ provide automatic proof. Shadow mode remains observational for legacy launches.
 Live idle sessions reserve conservative headroom too, and account status rows
 are bounded below Slack's block/text limits.
 
+An explicit local-owner `sab account pool switch --preserve-task TASK_ID`
+exception permits maintenance of a Claude worker already `awaiting_release`.
+It snapshots the exact task/session/channel/team and complete task journal,
+fences task mutations and reconciliation durably before teardown, and proves
+two unchanged idle surfaces plus a single-pane process tree containing only
+the provider ancestor chain and SAB channel server. Unknown child jobs fail
+closed. The assignment, pending gates, reports, readiness and work generation
+remain unchanged; only provider PID/tmux and account change. Interrupted
+handovers preserve the reservation and require exact non-restarting
+reconciliation. This explicit exception grants no automatic-rotation proof and
+does not relax ordinary or bulk-update guards. Running tasks, Codex/Pi tasks,
+pending messages and uncertain background work remain ineligible. Flag
+preservation compares canonical native resume arguments, not obsolete display
+fragments in the legacy space-joined flags string.
+
 ## Session identity and durable state
 
 `state.sessions[nativeSessionId]` stores the native provider identity, cwd,
@@ -818,6 +833,7 @@ Automation endpoints are:
 - `POST /automation/sessions`
 - `GET /automation/sessions/:externalKey`
 - `POST /automation/sessions/:externalKey/stop`
+- `POST /automation/sessions/:externalKey/release` (explicit owner, exact binding)
 
 Opt-in account-pool owner endpoints (absent in `off` mode) are:
 
@@ -854,6 +870,14 @@ and name resolution precede whitelisting and initial-prompt injection. The
 prompt is claimed at most once and receives no artifact grant. Exact stop
 revalidates every binding, revokes grants and handoff state, stops only the
 correlated process/tmux, and optionally archives only that immutable channel.
+An explicit `release` instead journals completed bootstrap ownership as
+`released`, preserving the external-key receipt, conversation, channel,
+collaborators and initial-prompt claim. It proves the exact local current
+session/channel/provider/cwd/process and expected tmux; when native resume has
+replaced the original tmux, that old tmux must be absent. No provider is stopped
+and no history or whitelist is detached. Release retries return the same
+receipt; duplicate creation never launches/prompts again. A released record is
+ignored by adoption/ownership recovery and its stop endpoint refuses mutation.
 Codex automation startup does not depend solely on a release-specific hook:
 the transparent proxy forwards a validated root App Server `thread/started`
 identity to `/codex/bootstrap`. The daemon accepts it only while the exact

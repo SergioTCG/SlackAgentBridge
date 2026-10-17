@@ -3,7 +3,7 @@ import { accountEditSchema } from './account-management.mjs'
 
 const channel = z.string().regex(/^[CG][A-Z0-9]{1,32}$/)
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/)
-const switchSchema = z.object({ channel, session: identifier, account: z.string().min(1).max(254), requestId: identifier }).strict()
+const switchSchema = z.object({ channel, session: identifier, account: z.string().min(1).max(254), requestId: identifier, preserveTask: identifier.optional() }).strict()
 const refreshSchema = z.object({ account: identifier }).strict()
 const reconcileSchema = z.object({ channel, session: identifier, requestId: identifier }).strict()
 const send = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)) }
@@ -15,6 +15,7 @@ for (const code of ['revision_conflict', 'request_id_conflict', 'account_in_use'
   'group_is_routed', 'unknown_group', 'channel_account_incompatible', 'account_outside_group', 'account_pool_operation_in_progress',
   'invalid_enrollment', 'credential_provider_mismatch', 'duplicate_account_identity', 'invalid_account_edit']) publicErrors.add(code)
 for (const code of ['account_handover_rejected', 'account_identity_unverified']) publicErrors.add(code)
+for (const code of ['account_task_maintenance_blocked', 'account_task_maintenance_changed']) publicErrors.add(code)
 
 export async function handleAccountPoolHttp(req, res, url, runtime, state) {
   if (!url.pathname.startsWith('/account-pools/') || !runtime.enabled) return false
@@ -56,7 +57,8 @@ export async function handleAccountPoolHttp(req, res, url, runtime, state) {
     const input = parsed.data, session = state.sessions?.[state.channels?.[input.channel]]
     if (!session || session.id !== input.session || session.channel !== input.channel) error(409, 'stale_account_session')
     send(res, 200, reconciling ? await runtime.reconcile(session, { expectedSessionId: input.session, requestId: input.requestId })
-      : await runtime.switchAccount(session, input.account, { expectedSessionId: input.session, requestId: input.requestId }))
+      : await runtime.switchAccount(session, input.account, { expectedSessionId: input.session, requestId: input.requestId,
+          ...(input.preserveTask ? { preserveTask: input.preserveTask } : {}) }))
   } catch (failure) {
     const fixed = failure.status ? failure.message : publicErrors.has(failure.message) ? failure.message : 'account_pool_request_failed'
     send(res, failure.status || 409, { ok: false, error: fixed })

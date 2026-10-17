@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { taskMaintenancePending } from './account-task-maintenance.mjs'
 
 // Keep a full delegated text envelope below Slack's single-message limit so
 // both linked channels retain a visible audit copy without hidden history reads.
@@ -40,6 +41,9 @@ export class TeamError extends Error {
 }
 
 const nowIso = now => new Date(now).toISOString()
+const requireNoAccountMaintenance = (state, task) => {
+  if (taskMaintenancePending(state, task)) throw new TeamError('task_maintenance', 'The exact worker account is under maintenance; query account status and retry task control after settlement.', 409)
+}
 const randomId = prefix => `${prefix}_${crypto.randomBytes(12).toString('base64url')}`
 const textBytes = text => Buffer.byteLength(String(text || ''), 'utf8')
 const hash = text => crypto.createHash('sha256').update(String(text || '')).digest('hex')
@@ -546,6 +550,7 @@ export function appendTeamTaskReply(state, taskId, {
   id = randomId('reply'),
 } = {}) {
   const task = teamTask(state, taskId)
+  requireNoAccountMaintenance(state, task)
   if (task.targetChannel !== fromChannel) throw new TeamError('reply_not_allowed', 'Only the assigned worker may reply to this task.', 403)
   const body = String(text || '').trim()
   if (!body && !files.length) throw new TeamError('empty_reply', 'A reply needs text or at least one file.')
@@ -628,6 +633,7 @@ export function requestTeamTaskCompletion(state, taskId, {
   now = Date.now(),
 } = {}) {
   const task = teamTask(state, taskId)
+  requireNoAccountMaintenance(state, task)
   if (task.targetChannel !== fromChannel || task.targetSessionId !== targetSessionId) {
     throw new TeamError('completion_not_allowed', 'Only the exact assigned worker session may declare this task ready.', 403)
   }
@@ -814,6 +820,7 @@ export function releaseTeamTask(state, taskId, {
   now = Date.now(),
 } = {}) {
   const task = teamTask(state, taskId)
+  requireNoAccountMaintenance(state, task)
   if (task.sourceChannel !== sourceChannel) {
     throw new TeamError('task_control_not_allowed', 'Only the task coordinator may release this task.', 403)
   }
@@ -1024,6 +1031,7 @@ export function appendCoordinatorTaskMessage(state, taskId, {
   id = randomId('message'),
 } = {}) {
   const task = teamTask(state, taskId)
+  requireNoAccountMaintenance(state, task)
   if (task.sourceChannel !== sourceChannel) {
     throw new TeamError('task_control_not_allowed', 'Only the task coordinator may message its worker.', 403)
   }
