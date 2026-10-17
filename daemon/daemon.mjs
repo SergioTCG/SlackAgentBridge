@@ -86,6 +86,12 @@ import { handleAutomationHttp } from './automation-http.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { createTerminalControl } from './terminal-control.mjs'
 import { handleTerminalHttp } from './terminal-http.mjs'
+import { createAccountPoolRuntime } from './account-pool-runtime.mjs'
+import { handleAccountPoolHttp } from './account-pool-http.mjs'
+import { readAccountIdentity, readAccountQuota, verifyClaudeLaunchIdentity } from './account-telemetry.mjs'
+import { accountRegistryDigest } from './account-registry.mjs'
+import { readAccountRegistry, readPrivateAccountFile, manageAccountRegistry } from './account-registry-store.mjs'
+import { accountCredentialReference } from './account-profiles.mjs'
 import { handleTeamHttp } from './team-http.mjs'
 import {
   knownUndeliveredTeamMessage, recoverInterruptedTeamMessage, teamMessageFailureDisposition,
@@ -155,7 +161,7 @@ import {
 } from './codex-resume.mjs'
 import { waitForClaudeResumeClaim } from './claude-resume.mjs'
 import {
-  authoritativeManagementBinding, bridgeDashboardBlocks, modelPickerBlocks, newSessionBlocks,
+  accountPickerBlocks, authoritativeManagementBinding, bridgeDashboardBlocks, modelPickerBlocks, newSessionBlocks,
   parseManagementActionId, sessionDashboardBlocks,
   settingPickerBlocks, switchPickerBlocks, teamPickerBlocks, terminalPickerBlocks, updatePickerBlocks,
 } from './management-ui.mjs'
@@ -182,6 +188,64 @@ const { web } = slackRuntime
 const syncTopic = createTopicSync(web)
 const artifactGrants = createArtifactGrantStore()
 const state = loadState()
+const accountPools = createAccountPoolRuntime({
+  state, mode: process.env.CCS_ACCOUNT_POOLS || 'off',
+  readRegistry: () => {
+    const value = readAccountRegistry(CONFIG_DIR)
+    if (value && value.sourceDigest !== accountRegistryDigest(readPrivateAccountFile(path.join(CONFIG_DIR, 'accounts'), { missing: '' }))) {
+      throw new Error('legacy_credentials_changed')
+    }
+    return value
+  },
+  persist: () => saveStateNow(state),
+  writeRegistry: (input, usage) => manageAccountRegistry(CONFIG_DIR, input, {
+    usage, legacyAccounts: readPrivateAccountFile(path.join(CONFIG_DIR, 'accounts'), { missing: '' }),
+  }),
+  readQuota: account => readAccountQuota(account, { configDir: CONFIG_DIR, isProfileInactive: async (provider, profile) => {
+    for (const candidate of Object.values(state.sessions || {})) {
+      if (providerOf(candidate) !== provider || candidate.account !== profile || provider === 'claude' && candidate.accountKind !== 'claude-profile') continue
+      if (candidate.pid && pidAlive(candidate.pid) || candidate.tmux && await tmuxAlive(candidate.tmux)) return false
+    }
+    return true
+  } }),
+  isDormant: async session => !(session.pid && pidAlive(session.pid)) && !(session.tmux && await tmuxAlive(session.tmux)),
+  blockReason: session => accountPoolBlockReason(session),
+  verifyIdentity: async (session, account, { stage }) => {
+    const expected = { id: session.id, pid: session.pid, tmux: session.tmux }
+    if (stage === 'replacement') {
+      if (!await validProviderRootClaim(expected.pid, expected.tmux, account.provider)) return 'credential-unavailable'
+      const ref = accountCredentialReference(account)
+      const alias = ref.kind === 'legacy-claude' ? ref.alias : ref.kind.endsWith('-profile') ? ref.profile : null
+      if ((session.account || null) !== alias || ref.kind === 'claude-profile' && session.accountKind !== ref.kind) return 'identity-mismatch'
+      await waitForAutomationInput(session)
+    }
+    const identity = await readAccountIdentity(account, { configDir: CONFIG_DIR })
+    if (account.provider === 'claude' && !await verifyClaudeLaunchIdentity(account, { cwd: session.cwd, configDir: CONFIG_DIR })) return 'identity-mismatch'
+    if (session.id !== expected.id || session.pid !== expected.pid || session.tmux !== expected.tmux ||
+        stage === 'replacement' && !await validProviderRootClaim(expected.pid, expected.tmux, account.provider)) return 'credential-unavailable'
+    return identity
+  },
+  restart: (session, alias, options) => restartSessionWithMutation(session, {
+    expectedSessionId: options.expectedSessionId,
+    notice: `🔐 Switching subscription to ${options.account.email}; resuming the same conversation with its current settings…`,
+    beforeMutation: async () => {
+      options.authorize()
+      if (accountPoolBlockReason(session, true)) throw new Error('account_switch_blocked')
+      const expected = { id: session.id, pid: session.pid, tmux: session.tmux, provider: providerOf(session) }
+      const pane = await tmuxCapture(expected.tmux)
+      if (targetStartupState(expected.provider, pane) !== 'ready' || expected.provider === 'claude' && extractSpinner(pane)) throw new Error('account_switch_not_proven_idle')
+      await sleep(250)
+      const repeated = await tmuxCapture(expected.tmux)
+      if (repeated !== pane || targetStartupState(expected.provider, repeated) !== 'ready' ||
+          !await validProviderRootClaim(expected.pid, expected.tmux, expected.provider) ||
+          session.id !== expected.id || session.pid !== expected.pid || session.tmux !== expected.tmux || accountPoolBlockReason(session, true)) throw new Error('account_switch_not_proven_idle')
+      options.authorize()
+    },
+    mutate: current => { current.account = alias; current.accountKind = accountCredentialReference(options.account).kind },
+  }),
+  notify: (channel, message) => post(channel, message),
+  onSettled: session => scheduleSessionInputDrain(session, providerOf(session), session.tmux, 0),
+})
 const bootSessionInputClaims = createBootSessionInputClaims(state)
 const isNoSpaceError = error => error?.code === 'ENOSPC' || /no space left on device/i.test(String(error?.message || error))
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
@@ -1937,6 +2001,7 @@ async function reportCodexModelMismatch(session) {
 function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
   if (!session?.id || !tmux ||
       (!updatingSessions.has(session.id) && !pendingBySid.get(session.id)?.length)) return false
+  try { accountPools.assertInputAllowed(session) } catch { return false }
   // SessionStart and the Pi stream can race, and the native session id may be
   // replaced while the first delivery is awaiting tmux/provider I/O. Reserve
   // the stable record synchronously so neither surface can start a second queue
@@ -1956,6 +2021,7 @@ function scheduleSessionInputDrain(session, provider, tmux, delay = 2000) {
         inFlightPrompts: sessionInputDrainPrompts,
         inFlightOwner: session,
         deliver: async m => {
+          accountPools.assertInputAllowed(session)
           const currentSid = session.id
           const prompt = queuedPromptText(m)
           rememberInjected(currentSid, prompt)
@@ -2343,8 +2409,12 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
       : resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd })
     if (effort) session.effort = effort
   }
-  const acct = provider === 'claude' ? safeAccount(account) : null
-  if (acceptSettings && acct && session.account !== acct) session.account = acct // which subscription pays for this session
+  const profileAccount = provider === 'claude' ? safeAccount(body.sab_account_profile) : null
+  const acct = provider === 'claude' ? profileAccount || safeAccount(account) : null
+  if (acceptSettings && acct) {
+    session.account = acct
+    session.accountKind = profileAccount ? 'claude-profile' : 'legacy-claude'
+  }
   if (targetClaim) {
     targetClaim.transition.target.sid = sid
     targetClaim.transition.target.startedAt = targetClaim.transition.target.startedAt || Date.now()
@@ -2849,6 +2919,10 @@ async function resurrect(session, text) {
   let lastResumeError = null
   let lastTmuxName = null
   try {
+    if (accountPools.enabled) {
+      try { accountPools.assertLaunchAllowed(session) }
+      catch { return post(session.channel, '🔐 Account policy blocks this resume. Select a permitted account with `/sab-account <email|key>` first; queued messages remain queued and no provider was launched.') }
+    }
     const anchored = resumeCwd(session)
     if (anchored !== session.cwd) { log('resume cwd re-anchored', session.id.slice(0, 8), session.cwd, '→', anchored); session.cwd = anchored; saveState(state) }
     const provider = providerOf(session)
@@ -2886,7 +2960,9 @@ async function resurrect(session, text) {
           title: `sab ${path.basename(session.cwd)} (resumed)`,
           tmuxName,
           autoConsent: provider === 'claude',
-          account: provider === 'claude' ? session.account : null, // Claude-only subscription binding
+          account: ['claude', 'codex'].includes(provider) ? session.account : null,
+          accountKind: provider === 'claude' ? session.accountKind : null,
+          accountPool: accountPools.enforcing,
           provider,
           startupStatusPath,
         })
@@ -3359,6 +3435,8 @@ async function runProviderSwitch(channel, lineage, transition, { applyProposal =
     let blocker = switchBlockReason(source, channel, { allowCurrentTransition: true })
     if (!blocker) { await sleep(500); blocker = switchBlockReason(source, channel, { allowCurrentTransition: true }) }
     if (blocker) throw new Error(blocker)
+    const poolTarget = transition.target.sid ? state.sessions[transition.target.sid] : null
+    accountPools.assertProviderLaunchAllowed(channel, transition.target.provider, poolTarget?.account || null, poolTarget?.accountKind || null)
     if (applyProposal) {
       await applyInstructionProposal(transition)
       await post(channel, '✅ Instruction proposal applied as uncommitted repository changes.')
@@ -3391,13 +3469,16 @@ async function runProviderSwitch(channel, lineage, transition, { applyProposal =
     saveStateNow(state)
     await post(channel, `🚀 Starting the ${providerLabel(transition.target.provider)} leg for private validation…`)
     const nodeId = nodeIdForSession(source)
+    accountPools.assertProviderLaunchAllowed(channel, transition.target.provider, existingTarget?.account || null, existingTarget?.accountKind || null)
     await executionNodes.spawn(nodeId, {
       cwd: source.cwd,
       args: transition.target.args,
       title: `sab ${path.basename(source.cwd)} (${providerCommand(transition.target.provider)})`,
       tmuxName,
       autoConsent: transition.target.provider === 'claude',
-      account: transition.target.provider === 'claude' ? existingTarget?.account : null,
+      account: ['claude', 'codex'].includes(transition.target.provider) ? existingTarget?.account : null,
+      accountKind: transition.target.provider === 'claude' ? existingTarget?.accountKind : null,
+      accountPool: accountPools.enforcing,
       provider: transition.target.provider,
     })
     let up = false
@@ -3754,6 +3835,10 @@ async function handleSlackMessage(channel, text, sender, request) {
   }
 
   const managedSession = sessionByChannel(channel)
+  if (managedSession && accountPools.enforcing) {
+    try { accountPools.assertInputAllowed(managedSession) }
+    catch { return post(channel, '🔐 Input was not submitted: this session needs account-policy or interrupted-handover reconciliation. Inspect `/sab-account` and `/sab-status`; no restart or prompt replay was attempted.') }
+  }
   if (managedSession?.teamActiveTaskId) {
     const activeTeamTask = state.teamTasks?.[managedSession.teamActiveTaskId]
     if (activeTeamTask?.status === 'awaiting_release' &&
@@ -3880,7 +3965,9 @@ function uncertainTeamProviderInput(message, cause, { accepted = false } = {}) {
 }
 
 async function injectText(session, text, options = {}) {
+  accountPools.assertInputAllowed(session)
   const assertExpectedBinding = () => {
+    accountPools.assertInputAllowed(session)
     if (!options.expectedSessionId) return
     if (session.id !== options.expectedSessionId || state.sessions?.[session.id] !== session ||
         !session.channel || state.channels?.[session.channel] !== session.id ||
@@ -4072,6 +4159,10 @@ async function handleAttachments(channel, caption, files, sender, request) {
   }
   const session = sessionByChannel(channel)
   if (!session) { log('attachment in unmapped channel, ignored', channel); return }
+  if (accountPools.enforcing) {
+    try { accountPools.assertInputAllowed(session) }
+    catch { return post(channel, '🔐 Attachment was not submitted: resolve the account-policy or interrupted-handover fence with `/sab-account` first.') }
+  }
   if (session.teamActiveTaskId) {
     return post(channel, `🕸️ Delegated team task \`${session.teamActiveTaskId}\` currently owns this worker turn. Wait for it to finish before sending unrelated attachments.`)
   }
@@ -4559,6 +4650,7 @@ function ensureTeamCompletionDelivery(task) {
 function teamTargetBusyReasons(session) {
   if (!session) return ['session unavailable']
   const reasons = []
+  try { accountPools.assertInputAllowed(session) } catch { reasons.push('account policy or interrupted handover') }
   const durableTask = Object.values(state.teamTasks || {}).find(task =>
     task.targetChannel === session.channel && isWorkerBoundTeamTask(task))
   if (durableTask) reasons.push(`task ${durableTask.status}`)
@@ -4805,6 +4897,7 @@ async function validateCoordinatorTaskMessageTarget(task, target, expected) {
 
 async function injectCoordinatorTaskMessageOnce(task, target, expected, prompt, providerTurn,
   providerTurnStartedAt) {
+  accountPools.assertInputAllowed(target)
   if (!coordinatorTaskMessageTargetMatches(task, target, expected)) {
     throw new TeamError('target_authority_lost', 'The exact active worker changed before provider delivery.', 409)
   }
@@ -6104,6 +6197,7 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
     extraFlags = extraFlags.filter((_, i) => i !== ai && i !== ai + 1)
   }
   if (provider !== 'claude' && account) return post(channel, '❌ `--account` is only available for Claude Code sessions.')
+  if (accountPools.enforcing && account) return post(channel, '🔐 With pool policy enabled, create the channel on its native login, review its exact channel route, then select the permitted account with `/sab-account`. Named-account creation cannot bypass channel restrictions.')
   if (!extraFlags.length) extraFlags = defaultNewFlags(provider) // provider-specific operator default
   let flags
   try { flags = normalizeRemoteLaunchFlags(provider, extraFlags) }
@@ -6118,6 +6212,7 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
   await executionNodes.spawn(LOCAL_NODE_ID, {
     cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName,
     autoConsent: provider === 'claude', account, provider,
+    accountPool: accountPools.enforcing,
   })
   let up = false
   for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await executionNodes.tmuxAlive(LOCAL_NODE_ID, tmuxName) }
@@ -6399,6 +6494,7 @@ async function restartSessionWithMutation(session, {
   expectedSessionId = null,
   notice,
   mutate,
+  beforeMutation,
 } = {}) {
   const reservation = reserveSessionMaintenance(session, { expectedSessionId })
   try {
@@ -6407,6 +6503,8 @@ async function restartSessionWithMutation(session, {
     if (!maintenanceSessionIsAuthoritative(session, reservation)) {
       throw new Error('the native session changed while its setting notice was being posted; no setting was changed')
     }
+    if (beforeMutation) await beforeMutation()
+    if (!maintenanceSessionIsAuthoritative(session, reservation)) throw new Error('the native session changed during its maintenance preflight; no setting was changed')
     mutate(session)
     // Journal operator intent before teardown. A daemon crash in the restart
     // window must resume with the newly selected setting, account, or flags.
@@ -6428,8 +6526,47 @@ async function switchAccount(session, name, { expectedSessionId = null } = {}) {
   return restartSessionWithMutation(session, {
     expectedSessionId,
     notice: `🔐 *Switching subscription* → ${label}. Restarting and resuming this conversation…`,
-    mutate: current => { current.account = name || null },
+    mutate: current => { current.account = name || null; delete current.accountKind },
   })
+}
+
+function accountPoolBlockReason(session, reserved = false) {
+  const context = bulkUpdateContext()
+  if (reserved) context.restartingSessionIds.delete(session.id)
+  return bulkUpdateBlockReason(session, { ...context, automations: state.automations }) ||
+    (!(session.pid && pidAlive(session.pid)) ? 'provider is dormant' : null)
+}
+
+async function postAccountPoolStatus(channel) {
+  const info = accountPools.status(channel)
+  const rows = info.accounts.map(account => {
+    const sample = account.observation
+    const known = sample?.status === 'observed' ? sample : account.lastKnownQuota
+    const windows = known?.windows?.map(w => `${Math.round(w.usedPercent)}% (${w.inactive ? 'unused window; reset not started' : `resets ${new Date(w.resetsAt).toISOString()}`})`).join(' · ') || 'unknown'
+    const age = sample ? `${Math.max(0, Math.floor((Date.now() - sample.observedAt) / 1000))}s old` : 'not sampled'
+    return `• ${account.email}: ${sample?.status || 'unknown'} · ${known && known !== sample ? 'last known (not eligible): ' : ''}${windows} · ${age}`.slice(0, 2900)
+  })
+  const text = `*Account group: ${info.group.name}* · mode: ${info.mode}\n` +
+    `Current: ${info.currentAccount?.email || 'unresolved legacy binding'}\n${rows.join('\n')}\n` +
+    `Selection: ${info.decision.reason}${info.decision.nextResetAt ? ` · next reset ${new Date(info.decision.nextResetAt).toISOString()}` : ''}.\n` +
+    'Switch an idle session with `/sab-account <email|account-key|alias>`. No model/effort downgrade is permitted.'
+  const session = sessionByChannel(channel), inventory = accountPools.inventory()
+  return postSlackMessage(channel, { text: text.slice(0, 3500), blocks: [
+    ...accountPickerBlocks({ sessionId: session.id, revision: info.registryRevision, group: info.group.name, current: info.currentAccount?.email || 'unresolved',
+      accounts: accountPools.enforcing ? info.accounts.filter(a => inventory.registry.accounts.find(v => v.id === a.id)?.lifecycle === 'active' && !info.group.drainingMembers.includes(a.id)) : [] }),
+    ...rows.slice(0, 40).map(row => ({ type: 'section', text: { type: 'mrkdwn', text: row } })),
+    ...(rows.length > 40 ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: `${rows.length - 40} more accounts: use sab account pool status --channel ${channel} --json.` }] }] : []),
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `Mode: ${info.mode} · ${info.decision.reason}. Unknown usage never authorizes automatic switching.` }] },
+  ] })
+}
+
+function postAccountGroups(channel) {
+  const info = accountPools.inventory()
+  return post(channel, `*Account groups* · revision ${info.registryRevision}\n` + info.registry.groups.slice(0, 20).map(g =>
+    `• ${g.name} (\`${g.key}\`): ` + g.members.slice(0, 20).map(id => {
+      const a = info.registry.accounts.find(a => a.id === id)
+      return `${a.provider}: ${a.email}${a.lifecycle !== 'active' || g.drainingMembers.includes(id) ? ' [draining/retired]' : ''}`
+    }).join(' · ') + (g.members.length > 20 ? ` · ${g.members.length - 20} more` : '')).join('\n') + '\nFull inventory: `sab account group list --json`. Manage with `sab account group …` or `/sab-account manage <JSON>`; edits require the current revision and a unique request ID. Credentials are never shown or deleted.')
 }
 
 // Launch flags a session was started with, minus the resume plumbing (which the
@@ -7338,6 +7475,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     }
     if (usageProvider === 'pi') return piUsageReport(channel, sub, rest[1])
     if (sub === 'limits') {
+      if (accountPools.enabled && sessionByChannel(channel) && ['claude', 'codex'].includes(providerOf(sessionByChannel(channel)))) return postAccountPoolStatus(channel)
       if (usageProvider === 'codex') return post(channel, 'Codex plan-limit windows are not exposed by ccusage; token and cost reports are available here.')
       return usageLimits(channel) // instant — no transcript scan
     }
@@ -7350,6 +7488,26 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
   }
   if (name === 'account') {
     const session = sessionByChannel(channel)
+    if (accountPools.enabled && rest[0] === 'groups') return postAccountGroups(channel)
+    if (accountPools.enabled && rest[0] === 'manage') {
+      let input
+      try { input = JSON.parse(rest.slice(1).join(' ')) } catch { return post(channel, '❌ Expected a bounded JSON account edit with requestId, expectedRevision, and operation. No change was made.') }
+      const result = accountPools.manage(input)
+      return post(channel, `✅ Account policy ${result.status}, revision ${result.registry.revision}. No provider was stopped; credential files are retained.`)
+    }
+    if (accountPools.enabled && session && ['claude', 'codex'].includes(providerOf(session)) && (!rest.length || accountPools.enforcing)) {
+      if (!rest.length) return postAccountPoolStatus(channel)
+      if (rest[0] === 'reconcile' && rest.length === 2) {
+        await accountPools.reconcile(session, { expectedSessionId: expectedSessionId || session.id, requestId: rest[1] })
+        return post(channel, '✅ The exact live account handover was reconciled without restarting or replaying input. Resend any message reported as not submitted.')
+      }
+      if (rest.length !== 1) return post(channel, 'Usage: `/sab-account <email|account-key|alias>`')
+      const info = accountPools.status(channel)
+      const selector = ['default', 'none'].includes(rest[0].toLowerCase()) ? info.group.preferred[providerOf(session)] : rest[0]
+      const result = await accountPools.switchAccount(session, selector, { expectedSessionId: expectedSessionId || session.id, requestId: `slack-${crypto.randomUUID()}` })
+      if (result.status === 'unchanged') return post(channel, 'Already using that account.')
+      return
+    }
     const available = listAccounts()
     const known = available.length ? available.map(a => `\`${a}\``).join(' · ') : '_none yet — add one on the Mac with_ `sab account add <name>`'
     if (!session) return post(channel, `*Subscriptions available:* ${known}\nRun \`/sab-account <name>\` in a Claude session channel to bind that session to an account.`)
@@ -7438,6 +7596,7 @@ async function launchAutomation(record) {
     autoConsent: record.provider === 'claude',
     account: null,
     provider: record.provider,
+    accountPool: accountPools.enforcing,
   })
   let up = false
   for (let i = 0; i < AUTOMATION_TMUX_LAUNCH_ATTEMPTS && !up; i++) {
@@ -7458,6 +7617,7 @@ async function waitForAutomationInput(session) {
 }
 
 async function injectAutomationPrompt(session, prompt) {
+  accountPools.assertInputAllowed(session)
   if (!(session.pid && pidAlive(session.pid))) throw new Error('the correlated provider process is not alive')
   if (providerOf(session) === 'pi') {
     if (!injectQueuedPiPrompt(session.pid, prompt)) throw new Error('the Pi input stream is not connected')
@@ -7579,6 +7739,7 @@ http.createServer(async (req, res) => {
   if (await handleTeamHttp(req, res, url, teamService)) return
   if (await handleAutomationHttp(req, res, url, automationLifecycle)) return
   if (await handleTerminalHttp(req, res, url, terminalControl)) return
+  if (await handleAccountPoolHttp(req, res, url, accountPools, state)) return
   if (await handleCodexBootstrapHttp(req, res, url, {
     lifecycle: automationLifecycle, resolveAgentPid, codexAppServerProcessPid,
     validProviderRootClaim, acceptHook: onHook, execFile, log,
@@ -7663,7 +7824,7 @@ http.createServer(async (req, res) => {
     for await (const c of req) body += c
     res.end('ok')
     try {
-      await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux'),
+      await onHook({ ...JSON.parse(body), sab_account_profile: req.headers['x-ccs-account-profile'] }, url.searchParams.get('ppid'), url.searchParams.get('tmux'),
         req.headers['x-ccs-flags'], req.headers['x-ccs-account'], req.headers['x-ccs-provider'] || 'claude')
     }
     catch (e) { log('hook error', String(e)) }
@@ -7992,10 +8153,12 @@ http.createServer(async (req, res) => {
       catch (error) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: String(error?.message || error) })) }
       const account = provider === 'claude' && j.account ? safeAccount(j.account) : null
       if (j.account && !account) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'invalid account name' })) }
+      if (accountPools.enforcing && account) { res.writeHead(409); return res.end(JSON.stringify({ ok: false, error: 'Select pooled accounts only after reviewing the exact new channel route.' })) }
       const tmuxName = `sab-new-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`
       await executionNodes.spawn(LOCAL_NODE_ID, {
         cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName,
         autoConsent: provider === 'claude', account, provider,
+        accountPool: accountPools.enforcing,
       })
       log('spawned via /spawn', provider, cwd, JSON.stringify(flags), account ? `account=${account}` : '')
       res.end(JSON.stringify({ ok: true, tmux: tmuxName, provider }))
@@ -8212,6 +8375,24 @@ async function handleManagementAction(body, action, parsed) {
   const session = parsed.target === 'bridge' ? null : authoritativeManagementSession(channel, parsed.target)
   if (parsed.target !== 'bridge' && !session) {
     return post(channel, '⚠️ This management control is stale: the channel is no longer bound to that exact active session. Run `/sab-status` for fresh controls.')
+  }
+
+  if (parsed.kind === 'account') {
+    if (!session || !accountPools.enabled || !['claude', 'codex'].includes(providerOf(session))) return post(channel, '❌ Account pools are not enabled for this session.')
+    const info = accountPools.status(channel)
+    if (parsed.binding !== `r${info.registryRevision}`) return post(channel, '⚠️ Account policy changed. Run `/sab-account` for fresh controls; no setting was changed.')
+    if (parsed.action === 'groups') return postAccountGroups(channel)
+    if (parsed.action === 'refresh') {
+      for (const account of info.accounts) await accountPools.refresh(account.id)
+      if (!authoritativeManagementSession(channel, expectedSessionId)) return
+      return postAccountPoolStatus(channel)
+    }
+    if (parsed.action === 'select' && action.selected_option?.value) {
+      const result = await accountPools.switchAccount(session, action.selected_option.value, { expectedSessionId, requestId: `slack-${crypto.randomUUID()}` })
+      if (result.status === 'unchanged') return post(channel, 'Already using that account.')
+      return
+    }
+    return post(channel, '❌ Invalid account control.')
   }
 
   if (parsed.kind === 'new') {
@@ -8625,5 +8806,11 @@ setInterval(async () => {
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   await recoverInterruptedTeamContinuations() // adopt a proven live wake; never replay an uncertain one
   startTeamReconciler() // status adoption must fence workers that were already busy before restart
+  if (accountPools.enabled) {
+    await accountPools.recover()
+    accountPools.tick().catch(() => log('account pool monitoring unavailable; inspect registry/auth; no account fallback was attempted'))
+    setInterval(() => accountPools.tick().catch(() =>
+      log('account pool monitoring unavailable; inspect registry/auth; no account fallback was attempted')), 60000).unref?.()
+  }
   selfUpdate('boot').catch(e => log('self-update error', String(e)))
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })

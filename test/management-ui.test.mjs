@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   authoritativeManagementBinding,
+  accountPickerBlocks,
   bridgeDashboardBlocks,
   managementActionId,
   modelPickerBlocks,
@@ -17,6 +18,18 @@ import {
 import { updateTargetProvider } from '../daemon/providers.mjs'
 
 const SID = '01a01234-5678-7abc-8def-0123456789ab'
+
+test('account controls bind exact session and registry revision, with bounded email options and no credentials', () => {
+  const blocks = accountPickerBlocks({ sessionId: SID, revision: 7, group: 'Owner', current: 'one@example.test',
+    accounts: Array.from({ length: 110 }, (_, i) => ({ id: `acct_fixture_${i}`, email: `${i}@example.test`, readiness: { reason: 'unknown' } })) })
+  const actions = blocks.filter(b => b.type === 'actions').flatMap(b => b.elements)
+  assert.ok(actions.every(a => parseManagementActionId(a.action_id).binding === 'r7'))
+  assert.ok(actions.every(a => parseManagementActionId(a.action_id).target === SID))
+  const picker = actions.find(a => a.type === 'static_select')
+  assert.equal(picker.options.length, 100)
+  assert.equal(picker.options[0].text.text, '0@example.test')
+  assert.ok(picker.options.every(o => o.value.startsWith('acct_fixture_')))
+})
 
 test('management action ids round-trip a bounded session identity', () => {
   const id = managementActionId('terminal', SID, 'open')

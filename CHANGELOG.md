@@ -8,6 +8,44 @@ Notable changes to this project. Format based on
 
 ### Added
 
+- Owner account/group management: JSON-safe `sab account group` and `manage`,
+  exact revision/request receipts, group CRUD/membership/preferences, profile
+  attachment, channel routes, safe draining and retirement without credential
+  deletion or active-work interruption. `/sab-account` adds revision-bound
+  email selection, usage refresh, and group inventory controls.
+- Isolated full Claude OAuth enrollment with `sab account login-claude PROFILE`,
+  exact native Keychain/private-file profile reads, and native inactive-profile
+  refresh for Claude/Codex under exclusive launch-fencing leases. Default/live
+  credentials are never refreshed by SAB; uncertain token rotation fails closed.
+- Opt-in account-pool runtime (`CCS_ACCOUNT_POOLS=shadow|manual|auto`, off by
+  default): no-inference account-bound Claude/Codex quota sampling, freshness-
+  and reset-aware sticky selection, shared-principal reservations, conservative
+  switch-back, exact idle-session restart journals, request receipts, and
+  manual-canary gates for automatic handover. `/sab-account` and `/sab-usage
+  limits` show group/email/quota state when enabled; `sab account pool` supplies
+  a JSON-safe loopback client. Explicit `sab account login-codex PROFILE`
+  isolates extra Codex credentials while preserving native history/resources.
+  No login, rollout, migration, or automatic activation occurs on upgrade.
+  Controlled native resume canaries and full-scope Claude enrollment remain
+  required for production rotation.
+- Inactive account/group registry preparation through `sab account registry
+  plan|stage|status|check`: owner-confirmed email identities, stable opaque IDs,
+  shared credential aliases, provider-specific group preferences, exact channel
+  routing, and account-level channel ceilings. Staging is atomic and request-ID
+  idempotent, retains private prior revisions, and fails closed on concurrent
+  edits, credential-source drift, or malformed latest state. Migration auditing
+  covers authoritative active and standby bindings without changing them.
+  Staging alone does not activate daemon policy: legacy switching remains the
+  default, telemetry requires authenticated observations, and automatic
+  switching requires explicit mode/canary gates. No manifest change is required.
+- Read-only account-pool preparation: `sab account preview [--json]` inventories
+  legacy Claude aliases, duplicate credentials, unverified native email
+  candidates, proposed singleton groups, and authoritative local session
+  mappings. It does not migrate credentials, rename accounts, or restart
+  sessions. `sab account capabilities [--probe] [--json]` separates documented
+  interfaces from installed credential-free CLI help/schema evidence and
+  outstanding live-provider proof. Automatic rotation and Codex account
+  switching remain disabled; no Slack manifest change is required.
 - `/sab-update claude-code`, `/sab-update codex`, and `/sab-update pi` run the
   maintenance sweep for a single provider: only that provider's CLI is updated
   and only its eligible idle sessions restart and resume, with the same safety
@@ -25,6 +63,9 @@ Notable changes to this project. Format based on
   availability reasons, and last durable transition reasons.
 
 ### Changed
+
+- Named Claude launches fail closed on missing/conflicting/insecure credentials
+  and reject inherited tokens in place of the requested account.
 
 - Codex automation flags accept strictly validated split or inline model and
   effort syntax; effort is translated to the narrow native configuration argv

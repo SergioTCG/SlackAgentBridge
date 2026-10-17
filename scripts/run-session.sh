@@ -58,6 +58,9 @@ if [ -z "${TMUX:-}" ] && [ -z "${CCS_NO_TMUX:-}" ] && command -v tmux >/dev/null
   if [ "$provider" = "claude" ]; then "$BRIDGE/scripts/claude-consent.sh" "$TN" >/dev/null 2>&1 & fi
   bridge_env=("CCS_BRIDGE=1" "CCS_PROVIDER=$provider" "CCS_TMUX=$TN")
   if [ -n "${CCS_ACCOUNT:-}" ]; then bridge_env+=("CCS_ACCOUNT=$CCS_ACCOUNT"); fi
+  if [ -n "${CCS_CLAUDE_PROFILE:-}" ]; then bridge_env+=("CCS_CLAUDE_PROFILE=$CCS_CLAUDE_PROFILE"); fi
+  if [ -n "${CCS_CODEX_PROFILE:-}" ]; then bridge_env+=("CCS_CODEX_PROFILE=$CCS_CODEX_PROFILE"); fi
+  if [ -n "${CCS_POOL_ACCOUNT:-}" ]; then bridge_env+=("CCS_POOL_ACCOUNT=$CCS_POOL_ACCOUNT"); fi
   exec tmux new-session -s "$TN" -- env "${bridge_env[@]}" \
     "$BRIDGE/bin/sab" __run "$provider" "$@"
 fi
@@ -68,13 +71,23 @@ if [ -n "${TMUX:-}" ] && [ -z "${CCS_TMUX:-}" ]; then
 fi
 
 run_claude() {
-  if [ -n "${CCS_ACCOUNT:-}" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    acct_tok="$(grep -m1 "^${CCS_ACCOUNT}=" "$CONFIG_DIR/accounts" 2>/dev/null | cut -d= -f2-)"
-    if [ -n "$acct_tok" ]; then
-      export CLAUDE_CODE_OAUTH_TOKEN="$acct_tok"
-    else
-      echo "sab: unknown account '$CCS_ACCOUNT' — using this machine's Claude login" >&2
-    fi
+  if [ "${CCS_POOL_ACCOUNT:-}" = "1" ]; then
+    unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_PROFILE \
+      CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY \
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES CLAUDE_SECURESTORAGE_CONFIG_DIR CLAUDE_CONFIG_DIR
+  fi
+  if [ -n "${CCS_CLAUDE_PROFILE:-}" ]; then
+    CLAUDE_CONFIG_DIR="$(CCS_CONFIG_DIR="$CONFIG_DIR" node "$BRIDGE/scripts/sab-account-profile.mjs" resolve "$CCS_CLAUDE_PROFILE" claude)" || return 1
+    export CLAUDE_CONFIG_DIR
+    unset CLAUDE_SECURESTORAGE_CONFIG_DIR CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES \
+      ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_PROFILE CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
+  elif [ -n "${CCS_ACCOUNT:-}" ]; then
+    # An inherited token must never silently defeat an explicit subscription.
+    # The private reader rejects missing/conflicting aliases and insecure files.
+    acct_tok="$(CCS_CONFIG_DIR="$CONFIG_DIR" node "$BRIDGE/scripts/sab-account-token.mjs")" || return 1
+    export CLAUDE_CODE_OAUTH_TOKEN="$acct_tok"
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_PROFILE \
+      CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
     unset acct_tok
   fi
   mkdir -p "$CONFIG_DIR"
@@ -93,11 +106,24 @@ EOF
 }
 
 run_codex() {
+  codex_account_args=()
+  if [ "${CCS_POOL_ACCOUNT:-}" = "1" ]; then
+    unset OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN
+    # Pool identity/usage reads inspect this native file store, never an
+    # unrelated keyring login. Apply the same choice to TUI and App Server.
+    codex_account_args=(-c 'cli_auth_credentials_store="file"')
+  fi
+  if [ -n "${CCS_CODEX_PROFILE:-}" ]; then
+    CODEX_HOME="$(CCS_CONFIG_DIR="$CONFIG_DIR" node "$BRIDGE/scripts/sab-account-profile.mjs" resolve "$CCS_CODEX_PROFILE")" || return 1
+    export CODEX_HOME
+    unset OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN
+    codex_account_args=(-c 'cli_auth_credentials_store="file"')
+  fi
   # SAB owns provider updates through `/sab-update`; a native startup chooser
   # would otherwise strand a detached session before hooks can bind its Slack
   # channel. Keep this internal so it is neither user launch metadata nor a
   # remotely configurable flag.
-  codex_tui_args=(-c 'check_for_update_on_startup=false' -c 'tui.keymap.chat.interrupt_turn="f12"')
+  codex_tui_args=(${codex_account_args[@]+"${codex_account_args[@]}"} -c 'check_for_update_on_startup=false' -c 'tui.keymap.chat.interrupt_turn="f12"')
   direct_codex() { exec codex "${codex_tui_args[@]}" "$@"; }
   if [ "${CCS_CODEX_APP_SERVER:-1}" = "0" ] || [ -z "${CCS_TMUX:-}" ]; then direct_codex "$@"; fi
 
@@ -177,9 +203,9 @@ run_codex() {
   fi
 
   if [ "${#app_policy_args[@]}" -gt 0 ]; then
-    codex app-server --listen ws://127.0.0.1:0 "${app_policy_args[@]}" >"$app_log" 2>&1 & app_pid=$!
+    codex app-server --listen ws://127.0.0.1:0 ${codex_account_args[@]+"${codex_account_args[@]}"} "${app_policy_args[@]}" >"$app_log" 2>&1 & app_pid=$!
   else
-    codex app-server --listen ws://127.0.0.1:0 >"$app_log" 2>&1 & app_pid=$!
+    codex app-server --listen ws://127.0.0.1:0 ${codex_account_args[@]+"${codex_account_args[@]}"} >"$app_log" 2>&1 & app_pid=$!
   fi
   app_url="$(wait_for_url "$app_log" "$app_pid")" || fallback_to_direct "$@"
   node "$BRIDGE/scripts/codex-event-proxy.mjs" \

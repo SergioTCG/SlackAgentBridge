@@ -98,6 +98,17 @@ export function modelPickerBlocks({ sessionId, provider, current, models }) {
   ]
 }
 
+export function accountPickerBlocks({ sessionId, revision, group, current, accounts }) {
+  const target = token(sessionId, 'session'), binding = `r${revision}`
+  const options = optionsFrom(accounts.map(a => ({ value: a.id, label: a.email, description: a.readiness?.reason || 'capacity unknown' })))
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text: `*Account group: ${text(group, 64)}*\nCurrent: ${text(current, 254)}\nOnly an idle session may switch; its native conversation and settings are preserved.` } },
+    ...(options.length ? [{ type: 'actions', elements: [{ type: 'static_select', action_id: managementActionId('account', target, 'select', binding),
+      placeholder: { type: 'plain_text', text: 'Switch subscription…' }, options }] }] : []),
+    { type: 'actions', elements: [button('Refresh usage', 'account', target, 'refresh', { binding }), button('Groups and accounts', 'account', target, 'groups', { binding })] },
+  ]
+}
+
 export function settingPickerBlocks({ sessionId, kind, title, current, values }) {
   const target = token(sessionId, 'session')
   const options = optionsFrom((values || []).map(value => ({ value, label: value })))
