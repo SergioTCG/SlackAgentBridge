@@ -11,6 +11,7 @@ function usage(message = '') {
     [--collaborator USER_ID ...] --prompt-file FILE|- -- [PROVIDER_FLAGS...]
   sab automation status EXTERNAL_KEY
   sab automation stop EXTERNAL_KEY [--archive]
+  sab automation release EXTERNAL_KEY --session ID --channel ID --tmux NAME --request-id ID
   sab automation validate-flags --provider claude|codex|pi -- [PROVIDER_FLAGS...]
 
 The prompt is read from a file (or stdin with -), then encoded as JSON without
@@ -94,6 +95,16 @@ if (command === 'validate-flags') {
 } else if (command === 'status') {
   if (args.length !== 1) usage('status requires exactly one external key')
   await request(`/automation/sessions/${encodeURIComponent(args[0])}`)
+} else if (command === 'release') {
+  const key = args.shift(), options = {}
+  const fields = { '--session': 'sessionId', '--channel': 'channelId', '--tmux': 'tmux', '--request-id': 'requestId' }
+  for (let i = 0; i < args.length; i += 2) {
+    const field = fields[args[i]]
+    if (!field || options[field]) usage('unknown or duplicate release option')
+    options[field] = requiredValue(args, i, args[i])
+  }
+  if (!key || Object.keys(options).length !== 4) usage('release requires an external key and exact --session, --channel, --tmux and --request-id')
+  await request(`/automation/sessions/${encodeURIComponent(key)}/release`, { method: 'POST', body: options })
 } else if (command === 'stop') {
   if (!args.length || args.length > 2 || (args.length === 2 && args[1] !== '--archive')) {
     usage('stop requires an external key and optional --archive')

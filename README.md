@@ -483,6 +483,12 @@ idempotent. Creation journals before launch, correlates the exact tmux/native
 session/channel, invites and resolves every collaborator before whitelisting,
 and injects the initial prompt at most once without an artifact grant. Exact
 stop never delegates to bulk cleanup and archives only the correlated channel.
+For a completed one-off bootstrap, `sab automation release EXTERNAL_KEY
+--session NATIVE_ID --channel CHANNEL_ID --tmux EXACT_TMUX --request-id ID`
+releases ownership without stopping the session or losing collaborators. It
+requires completed invitation/prompt setup and the exact live local binding,
+retains external-key idempotency, and forbids later automation stop from
+touching the retained session. It is not stop/archive or a new launch.
 `validate-flags` is local and side-effect free. It lets project automation
 validate and canonicalize the same provider argv before allocating its own
 worktrees, databases, or ports. Codex accepts both split and inline model/effort
@@ -576,6 +582,13 @@ sab account group drain-member owner second-claude --revision 4 --request-id dra
 sab account login-claude second-claude
 sab account login-codex second-codex
 ```
+
+Owner-only maintenance of an idle Claude worker with a reported, still-reserved
+task can explicitly add `--preserve-task TASK_ID` to `pool switch`. SAB keeps its
+assignment, gates, reports and readiness unchanged. It refuses running turns,
+pending messages, extra panes or unknown child jobs, fences task mutations
+during the journaled restart, and never replays instructions or marks work
+complete. This is manual maintenance, not automatic active-task failover.
 
 These owner-machine endpoints are loopback-only and disabled in `off` mode.
 Additional Claude/Codex logins can be enrolled explicitly with `sab account

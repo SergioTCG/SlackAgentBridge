@@ -34,6 +34,9 @@ test('account pool endpoints are opt-in, loopback-script-only, strict and exact-
     assert.equal(calls.length, 0)
     assert.equal((await post(body)).status, 200)
     assert.deepEqual(calls[0], ['switch', 'native-id', 'owner@example.test', { requestId: 'exact-request', expectedSessionId: 'native-id' }])
+    assert.equal((await post({ ...body, preserveTask: 'task-exact' })).status, 200)
+    assert.equal(calls[1][3].preserveTask, 'task-exact')
+    assert.equal((await post({ ...body, preserveTask: true })).status, 400)
     runtime.enabled = false
     assert.equal((await post(body)).status, 404)
   } finally { await server.close() }

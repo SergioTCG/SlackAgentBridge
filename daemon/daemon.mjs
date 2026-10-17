@@ -81,7 +81,7 @@ import {
   readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionPatch, validateInstructionResult,
   writeInstructionProposal,
 } from './instructions.mjs'
-import { createAutomationLifecycle, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
+import { createAutomationLifecycle, proveAutomationReleaseProcess, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
 import { handleAutomationHttp } from './automation-http.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { createTerminalControl } from './terminal-control.mjs'
@@ -92,6 +92,7 @@ import { readAccountIdentity, readAccountQuota, verifyClaudeLaunchIdentity } fro
 import { accountRegistryDigest } from './account-registry.mjs'
 import { readAccountRegistry, readPrivateAccountFile, manageAccountRegistry } from './account-registry-store.mjs'
 import { accountCredentialReference } from './account-profiles.mjs'
+import { assertTaskMaintenance, taskMaintenancePending, taskMaintenanceClaimAllowed, proveIdleTaskProcessTree } from './account-task-maintenance.mjs'
 import { handleTeamHttp } from './team-http.mjs'
 import {
   knownUndeliveredTeamMessage, recoverInterruptedTeamMessage, teamMessageFailureDisposition,
@@ -218,6 +219,17 @@ const accountPools = createAccountPoolRuntime({
       const alias = ref.kind === 'legacy-claude' ? ref.alias : ref.kind.endsWith('-profile') ? ref.profile : null
       if ((session.account || null) !== alias || ref.kind === 'claude-profile' && session.accountKind !== ref.kind) return 'identity-mismatch'
       await waitForAutomationInput(session)
+      const checkpoint = state.accountPools?.switches?.[session.channel]?.taskMaintenance
+      if (checkpoint) {
+        let ready = false
+        for (let attempt = 0; attempt < 40; attempt++) {
+          assertTaskMaintenance(state, session, checkpoint)
+          const pane = await tmuxCapture(expected.tmux)
+          if (targetStartupState('claude', pane) === 'ready' && !extractSpinner(pane)) { ready = true; break }
+          await sleep(250)
+        }
+        if (!ready) return 'credential-unavailable'
+      }
     }
     const identity = await readAccountIdentity(account, { configDir: CONFIG_DIR })
     if (account.provider === 'claude' && !await verifyClaudeLaunchIdentity(account, { cwd: session.cwd, configDir: CONFIG_DIR })) return 'identity-mismatch'
@@ -225,24 +237,36 @@ const accountPools = createAccountPoolRuntime({
         stage === 'replacement' && !await validProviderRootClaim(expected.pid, expected.tmux, account.provider)) return 'credential-unavailable'
     return identity
   },
-  restart: (session, alias, options) => restartSessionWithMutation(session, {
+  restart: async (session, alias, options) => {
+    let preflightPassed = false
+    try { return await restartSessionWithMutation(session, {
     expectedSessionId: options.expectedSessionId,
     notice: `🔐 Switching subscription to ${options.account.email}; resuming the same conversation with its current settings…`,
     beforeMutation: async () => {
       options.authorize()
-      if (accountPoolBlockReason(session, true)) throw new Error('account_switch_blocked')
+      if (accountPoolBlockReason(session, true, options.taskMaintenance)) throw new Error('account_switch_blocked')
       const expected = { id: session.id, pid: session.pid, tmux: session.tmux, provider: providerOf(session) }
+      const childProof = options.taskMaintenance ? await proveIdleTaskProcessTree(session, { execFile, bridge: BRIDGE }) : null
       const pane = await tmuxCapture(expected.tmux)
       if (targetStartupState(expected.provider, pane) !== 'ready' || expected.provider === 'claude' && extractSpinner(pane)) throw new Error('account_switch_not_proven_idle')
       await sleep(250)
       const repeated = await tmuxCapture(expected.tmux)
       if (repeated !== pane || targetStartupState(expected.provider, repeated) !== 'ready' ||
           !await validProviderRootClaim(expected.pid, expected.tmux, expected.provider) ||
-          session.id !== expected.id || session.pid !== expected.pid || session.tmux !== expected.tmux || accountPoolBlockReason(session, true)) throw new Error('account_switch_not_proven_idle')
+          session.id !== expected.id || session.pid !== expected.pid || session.tmux !== expected.tmux ||
+          accountPoolBlockReason(session, true, options.taskMaintenance)) throw new Error('account_switch_not_proven_idle')
+      if (options.taskMaintenance && childProof !== await proveIdleTaskProcessTree(session, { execFile, bridge: BRIDGE })) throw new Error('account_background_process_changed')
       options.authorize()
+      preflightPassed = true
     },
     mutate: current => { current.account = alias; current.accountKind = accountCredentialReference(options.account).kind },
-  }),
+    }) } catch (error) {
+      // A failed idle/child-process/authority proof never reached mutation or
+      // teardown. Do not strand an untouched task behind a recovery fence.
+      if (!preflightPassed) error.accountPreflightRejected = true
+      throw error
+    }
+  },
   notify: (channel, message) => post(channel, message),
   onSettled: session => scheduleSessionInputDrain(session, providerOf(session), session.tmux, 0),
 })
@@ -2257,6 +2281,10 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     return
   }
   if (tmux && !(await validProviderRootClaim(pid, tmux, provider))) return
+  if (!taskMaintenanceClaimAllowed(state, { sessionId: sid, tmux, provider })) {
+    log('rejected native identity change during task account maintenance', String(sid).slice(0, 8))
+    return
+  }
   const automationHook = automationLifecycle.findForHook(provider, sid, requestedTmux)
   if (shouldFenceAutomationHook(automationHook, requestedTmux)) {
     log('ignored hook from stopped automation', ev, String(sid).slice(0, 8), automationHook.externalKey)
@@ -5294,6 +5322,7 @@ async function reconcileTeamTasks() {
     const tasks = Object.values(state.teamTasks || {}).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
     for (const task of tasks) {
       if (deferredFinalFences.has(task.id)) continue
+      if (taskMaintenancePending(state, task)) continue
       const terminal = isTerminalTeamTask(task)
       // Tasks written by the first session-team implementation predate the
       // durable completion-delivery claim. Their terminal result was already
@@ -5536,6 +5565,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
   let task
   try {
     task = teamTask(state, taskId)
+    if (taskMaintenancePending(state, task)) return false
     if (session.teamActiveTaskId !== task.id || task.targetSessionId !== session.id ||
         task.targetChannel !== session.channel ||
         (expectedTeamTaskTurn &&
@@ -6530,10 +6560,13 @@ async function switchAccount(session, name, { expectedSessionId = null } = {}) {
   })
 }
 
-function accountPoolBlockReason(session, reserved = false) {
+function accountPoolBlockReason(session, reserved = false, taskMaintenance = null) {
   const context = bulkUpdateContext()
   if (reserved) context.restartingSessionIds.delete(session.id)
-  return bulkUpdateBlockReason(session, { ...context, automations: state.automations }) ||
+  if (taskMaintenance) assertTaskMaintenance(state, session, taskMaintenance)
+  if (taskMaintenance && pendingBySid.get(session.id)?.length) return 'queued input'
+  const subject = taskMaintenance ? { ...session, teamActiveTaskId: null } : session
+  return bulkUpdateBlockReason(subject, { ...context, automations: state.automations }) ||
     (!(session.pid && pidAlive(session.pid)) ? 'provider is dormant' : null)
 }
 
@@ -7680,6 +7713,10 @@ async function archiveAutomationChannel(channel, record) {
 
 const automationLifecycle = createAutomationLifecycle({
   state,
+  validateReleaseSession: async session => !activeTransition(session.channel) &&
+    !updatingSessions.has(session.id) && !restarting.has(session.id) && !resurrectInFlight.has(session.id) &&
+    await proveAutomationReleaseProcess(session, { pidAlive, isTmuxAlive: tmuxAlive, validProviderRootClaim }),
+  notifyReleased: record => post(record.channelId, '🔓 Automation setup ownership released. This channel, conversation and collaborators are unchanged; normal session maintenance is now available.'),
   persist: () => saveStateNow(state),
   launch: launchAutomation,
   invite: inviteSlackCollaborator,

@@ -51,6 +51,10 @@ test('sab automation creates JSON without shell interpolation and encodes status
   const status = await runCli(['status', 'github:org/repo#1'], env)
   assert.equal(status.status, 0, status.stderr)
   assert.equal(requests[1].url, `/automation/sessions/${encodeURIComponent('github:org/repo#1')}`)
+  const released = await runCli(['release', 'project:person/name', '--session', 'native', '--channel', 'CWORK', '--tmux', 'sab-current', '--request-id', 'release-once'], env)
+  assert.equal(released.status, 0, released.stderr)
+  assert.equal(requests[2].url, `/automation/sessions/${encodeURIComponent('project:person/name')}/release`)
+  assert.deepEqual(requests[2].body, { sessionId: 'native', channelId: 'CWORK', tmux: 'sab-current', requestId: 'release-once' })
 })
 
 test('sab automation validates and normalizes provider flags without contacting the daemon', async () => {

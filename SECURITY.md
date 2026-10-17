@@ -62,6 +62,11 @@ accounts, and the Mac user running the daemon.
   contacting the daemon or launching anything. Its Codex model and effort
   shorthands are strictly validated before being translated; callers still
   cannot supply arbitrary Codex configuration overrides.
+  Explicit `release` is a separate owner operation for completed bootstrap
+  setup. It requires the exact current local session/channel/tmux, provider-root
+  proof and an absent superseded tmux; it retains the external-key receipt and
+  changes no provider, channel, whitelist or prompt state. Released records are
+  excluded from adoption/ownership and their stop/archive API is refused.
 - **Invite before trust:** both automated collaborator setup and the manual
   status-panel picker call `conversations.invite` before changing the prompt
   allowlist. Invitation failure is visible and leaves that user untrusted;
@@ -438,6 +443,15 @@ failures, limited scopes, capacity banners, and provider errors are not evidence
 of exhausted subscription quota. An ambiguous restart is never replayed;
 disk-write failure disables further pool mutations. Requested model/effort is
 never silently changed.
+
+The sole delegated-task exception is explicit owner `--preserve-task TASK_ID`
+maintenance of a local Claude worker already `awaiting_release`. An unchanged
+durable task checkpoint, no pending input/messages, two stable idle surfaces
+and a single-pane process tree with only the provider ancestor chain and exact
+SAB channel server are required. Unknown child jobs fail closed. Task mutation
+and reconciliation are fenced before teardown; gates, reports, generation and
+reservation are preserved, never fabricated or released. It grants no automatic
+handover proof and does not relax bulk updates, running-work or Pi/Codex guards.
 
 An interrupted handover fences fresh/queued provider input and ordinary resume;
 the next owner message cannot silently retry it. Explicit reconciliation is

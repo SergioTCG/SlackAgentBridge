@@ -465,6 +465,41 @@ profile rather than deleting the lease and blindly reusing a rotating token.
 Native refresh support is not a claim that every current credential has been
 upgraded. Browser authentication for a new account is an owner action.
 
+### Explicit maintenance of a reported task
+
+```bash
+sab account pool switch --channel C0123456789 --session NATIVE_ID \
+  --account owner-claude --request-id maintain-worker-1 \
+  --preserve-task TASK_ID --json
+```
+
+This narrow local-owner exception applies only to a Claude worker already
+`awaiting_release`, not running or dispatching work. It keeps the assignment,
+pending gates, completion declaration, reports and work generation unchanged;
+no unfinished task is marked complete. SAB requires fully delivered turn proof,
+no pending reply deliveries or task messages/input, two stable native idle observations and a
+single-pane process tree containing only the provider ancestor chain and exact
+SAB channel server. Any unknown child job is refused, not terminated.
+
+The complete task checkpoint is journaled before restart. Team replies,
+completion/release, messages and reconciliation are fenced during a prepared,
+restarting or interrupted handover. A crash never replays instructions or
+releases the task. A proved preflight rejection clears the maintenance fence
+without teardown; it can be corrected and retried with a new request ID.
+Query the original request and explicitly reconcile an exact
+live replacement; a failed restart remains reserved for owner recovery. This
+exception never creates automatic rotation proof. Normal/bulk updates and
+automatic selection still exclude reserved workers. Decline any native quota
+chooser without enabling credits before requesting maintenance.
+
+A completed automation bootstrap must first relinquish ownership using
+`sab automation release EXTERNAL_KEY --session NATIVE_ID --channel CHANNEL_ID
+--tmux EXACT_TMUX --request-id ID`. This operation preserves the original
+external-key receipt, session, whitelist and one-time prompt claim; it does
+not stop or archive the channel. It can verify an exact native resume after
+the original tmux disappeared. An automation with pending setup, a rebound
+channel, unknown process or still-live superseded tmux cannot be released.
+
 ### Group/account management
 
 `sab account list [--json]` presents registered provider/email/group identities

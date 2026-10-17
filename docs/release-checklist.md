@@ -66,6 +66,13 @@
 - [ ] Record the previous release tag and rollback commands.
 - [ ] Confirm no provider switch or automation launch is mid-transaction.
 - [ ] Exactly one daemon connects with the production Socket Mode token.
+- [ ] Explicit bootstrap ownership release preserves session/channel/whitelist
+      after native resume; duplicate create cannot relaunch and stop cannot
+      terminate/archive the released session.
+- [ ] Explicit idle Claude task account maintenance preserves assignment,
+      gates, reports and generations through restart; unknown child jobs,
+      pending messages, running work and automatic requests are rejected.
+      Interrupted recovery never repeats teardown or task input.
 - [ ] Existing active Claude, Codex, and Pi processes are re-adopted without a
       duplicate channel, process, prompt, or topic write.
 - [ ] An in-progress turn for every provider regains its working line and
