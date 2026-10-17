@@ -497,7 +497,7 @@ fixed by the daemon. Paths must resolve to regular files inside that session's
 workspace. At most ten files and 100 MiB total may be delivered. A grant cannot
 be replayed or redirected.
 
-### Claude accounts
+### Accounts and staged pools
 
 ```bash
 sab account add work
@@ -507,6 +507,101 @@ sab account list
 Use `/sab-account work` in a Claude channel or pass `--account work` to
 `/sab-new claude`. Tokens remain in `~/.config/ccs/accounts` with mode `0600`
 and never enter process arguments.
+
+Account-pool preparation is available as **read-only local tooling**:
+
+```bash
+sab account preview --json
+sab account capabilities --probe --json
+```
+
+The preview proposes one-member groups for existing aliases and native defaults,
+coalesces identical stored Claude credentials, and maps authoritative local
+session bindings without changing any file, permission, account, or session.
+Cached email addresses are explicitly **unverified candidates**; they are never
+used to merge accounts or infer independent quota. Names and candidate IDs in
+the report are proposals, not a new registry.
+
+`capabilities` reports documented interfaces. Optional `--probe` checks installed
+Claude help and Codex public schemas in disposable configuration directories,
+without credentials, login, RPC, inference, or session launch. Both commands
+accept `--provider claude|codex|all`; JSON output never includes credentials,
+token fragments, or credential hashes. No `--apply` operation exists.
+
+Automatic rotation, active usage polling, email renaming, and Codex account
+switching are **not enabled** by these commands.
+
+An opt-in, **inactive metadata registry** can record owner-confirmed email
+identities, credential references, groups, and exact channel restrictions:
+
+```bash
+sab account registry plan --input enrollment.json --json
+sab account registry stage --input enrollment.json --expected-revision 0 --json
+sab account registry status --json
+sab account registry check --channel C0123456789 --provider claude --json
+```
+
+The enrollment file must be private (`0600`); `--input -` accepts JSON on stdin.
+Staging writes only private, atomic metadata revisions, never credentials or
+session bindings. Repeating a request ID is idempotent; conflicting requests
+and stale revisions fail closed. Email is presentation/selection data; opaque
+account IDs remain stable. Policy checks enforce both group membership and an
+account's own channel ceiling, even when selected by a legacy alias. Their
+`runtimeAllowed: false` result is deliberate: staging/checking alone never
+activates runtime policy. The daemon keeps legacy behavior by default.
+
+The experimental runtime is opt-in with `CCS_ACCOUNT_POOLS=shadow|manual|auto`
+(`off` by default). Shadow mode samples subscription quotas without switching;
+manual mode permits exact idle-session handovers; auto additionally requires
+fresh eligible quota and a successful manual resume proof for that account
+pair. `/sab-account` then shows email identities, group, and quota freshness for
+Claude and Codex; `/sab-usage limits` uses the same observations. Unknown,
+expired, scope-limited, or stale evidence never grants capacity. Active turns,
+delegated work, questions, permissions, automations, and maintenance block
+handover. No existing binding is bulk-migrated.
+
+Shadow mode keeps legacy account switching and launch overrides unchanged.
+Manual/auto pooled Codex launches deliberately use file auth storage for both
+the native default and named profiles, matching the identity actually probed;
+an unrelated keyring login is never counted as the verified file identity.
+
+```bash
+sab account pool status --channel C0123456789 --json
+sab account pool refresh --account ACCOUNT_ID --json
+sab account pool switch --channel C0123456789 --session NATIVE_ID \
+  --account owner@example.test --request-id unique-owner-request --json
+sab account group list --json
+sab account group add owner second-claude --revision 3 --request-id add-second --json
+sab account group drain-member owner second-claude --revision 4 --request-id drain-second --json
+sab account login-claude second-claude
+sab account login-codex second-codex
+```
+
+These owner-machine endpoints are loopback-only and disabled in `off` mode.
+Additional Claude/Codex logins can be enrolled explicitly with `sab account
+login-claude PROFILE` / `login-codex PROFILE` and referenced as `claude-profile`
+/ `codex-profile` credentials. Authentication is
+isolated; native history/settings/resources are shared without SAB reading
+transcripts. Installation and staging never log in or enable runtime modes.
+Use a controlled canary before manual/automatic handover. Claude setup tokens
+without profile/usage scope cannot supply automatic capacity proof. Instant
+mid-tool switching or never hitting provider limits cannot be guaranteed.
+
+`/sab-account` includes an exact-session/revision-bound email picker and usage
+controls. `/sab-account groups` lists registered groups. `sab account group`
+supports create/rename/remove, add/delete-member/drain-member, and provider
+preferences. `sab account manage --input FILE|-` (or owner-only `/sab-account
+manage <JSON>`) handles account enrollment, credential attachment, drain/retire/
+enable, and channel routing. In-use removal fails closed; explicit draining
+never kills a turn or deletes credentials. Isolated inactive profiles use native
+provider refresh under an exclusive lease; the default machine login is never
+refreshed by SAB. Full-scope enrollment and controlled native resume proofs are
+still required before unattended rotation.
+
+The enrollment schema, staged design, evidence limits, and remaining
+maintenance proofs are in
+[Account pools and migration preparation](docs/account-pools.md). Existing
+legacy `/sab-account` behavior and the Slack manifest are unchanged by default.
 
 ## Upgrading to 2.0
 

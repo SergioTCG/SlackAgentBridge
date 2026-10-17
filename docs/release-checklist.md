@@ -131,7 +131,13 @@
       delivery or a permanently queued owner turn.
 - [ ] A delayed failed SessionStart cannot clear a newer maintenance generation,
       including when the same session record was rebound to a new native ID.
-- [ ] `/sab-account` works only for Claude and `/sab-run` only for Pi.
+- [ ] With pools off, `/sab-account` retains legacy Claude behavior; with pools
+      enabled it shows provider-correct Claude/Codex identities, fresh quota,
+      and exact revision/session-bound controls. `/sab-run` remains Pi-only.
+- [ ] Follow the account-pool canary in `account-pools.md`: isolated full login,
+      correct identity/usage, inactive native refresh, both resume directions,
+      drain without active-work interruption, request retry, and rollback. No
+      automatic activation or account/binding migration occurs on upgrade.
 - [ ] Claude/Codex permission relay and Pi safe-mode/project-trust decisions work.
 - [ ] Pi image input, adaptive routing, plan/approve, pause/resume, all budgets,
       failure reporting, independent review, and exactly-one final response work.

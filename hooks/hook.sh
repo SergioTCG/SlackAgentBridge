@@ -15,6 +15,6 @@ if [ "$event" = "Stop" ] || [ "$event" = "UserPromptSubmit" ]; then
   fi
 fi
 curl -s -m 2 -X POST "http://127.0.0.1:8877/hook?ppid=$PPID&tmux=$CCS_TMUX" \
-  -H 'content-type: application/json' -H "x-ccs-flags: $CCS_FLAGS" -H "x-ccs-account: $CCS_ACCOUNT" \
+  -H 'content-type: application/json' -H "x-ccs-flags: $CCS_FLAGS" -H "x-ccs-account: $CCS_ACCOUNT" -H "x-ccs-account-profile: $CCS_CLAUDE_PROFILE" \
   --data-binary "$payload" >/dev/null 2>&1
 exit 0

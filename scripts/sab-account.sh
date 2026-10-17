@@ -6,11 +6,48 @@
 # account by NAME; the token itself is resolved inside the private runner, so it
 # never appears in argv — `ps` is readable by every user on the machine.
 #
-#   sab account list                 names + masked tokens
+#   sab account list                 registered emails/groups, or legacy aliases
 #   sab account add <name>           mint a token by signing in (browser)
 #   sab account set <name>           store a token minted elsewhere (stdin)
 #   sab account remove <name>
+#   sab account preview [--json]      read-only pool migration inventory
+#   sab account capabilities [--probe] [--json]
+#   sab account registry <plan|stage|status|check> ...
 set -euo pipefail
+
+# Pool tooling must bypass the legacy registry's mkdir/chmod/create steps.
+# Explicit staging writes only its own inactive metadata, never credentials or
+# session state. Inspection never logs in or refreshes tokens.
+case "${1:-list}" in
+  list)
+    [ "$#" -eq 0 ] || shift
+    exec node "$(dirname "${BASH_SOURCE[0]}")/sab-account-registry.mjs" list "$@"
+    ;;
+  login-claude)
+    shift
+    [ "$#" -eq 1 ] || { echo 'Usage: sab account login-claude PROFILE' >&2; exit 2; }
+    exec node "$(dirname "${BASH_SOURCE[0]}")/sab-account-profile.mjs" login "$1" claude
+    ;;
+  manage|group)
+    exec node "$(dirname "${BASH_SOURCE[0]}")/sab-account-manage.mjs" "$@"
+    ;;
+  login-codex)
+    shift
+    exec node "$(dirname "${BASH_SOURCE[0]}")/sab-account-profile.mjs" login "$@"
+    ;;
+  pool)
+    shift
+    exec node "$(dirname "${BASH_SOURCE[0]}")/sab-account-pool.mjs" "$@"
+    ;;
+  registry)
+    shift
+    exec node "$(dirname "${BASH_SOURCE[0]}")/sab-account-registry.mjs" "$@"
+    ;;
+  preview|capabilities)
+    exec node "$(dirname "${BASH_SOURCE[0]}")/sab-account-inspect.mjs" "$@"
+    ;;
+esac
+
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
 ACCOUNTS="$CONFIG_DIR/accounts"
 command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$PATH"
@@ -19,7 +56,7 @@ mkdir -p "$CONFIG_DIR"
 [ -f "$ACCOUNTS" ] || { umask 177; : > "$ACCOUNTS"; }
 chmod 600 "$ACCOUNTS" 2>/dev/null || true
 
-valid_name() { case "$1" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; *) return 0 ;; esac; }
+valid_name() { [ "${#1}" -le 64 ] || return 1; case "$1" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; *) return 0 ;; esac; }
 
 store() { # name token
   local tmp
@@ -34,13 +71,6 @@ store() { # name token
 }
 
 case "${1:-list}" in
-  list)
-    if [ ! -s "$ACCOUNTS" ]; then echo "No accounts yet. Add one with: sab account add <name>"; exit 0; fi
-    while IFS='=' read -r name tok; do
-      [ -n "$name" ] || continue
-      printf '  %-16s %s…%s\n' "$name" "$(printf %s "$tok" | cut -c1-14)" "$(printf %s "$tok" | tail -c 4)"
-    done < "$ACCOUNTS"
-    ;;
   add)
     name="${2:?usage: sab account add <name>}"
     valid_name "$name" || { echo "name must be [a-zA-Z0-9_-]" >&2; exit 1; }
@@ -63,10 +93,12 @@ case "${1:-list}" in
     ;;
   remove|rm)
     name="${2:?usage: sab account remove <name>}"
+    valid_name "$name" || { echo 'invalid account name' >&2; exit 2; }
+    CCS_ACCOUNT_REMOVE="$name" node "$(dirname "${BASH_SOURCE[0]}")/sab-account-registry.mjs" guard-remove >/dev/null
     tmp="$(mktemp)"
     grep -v "^$name=" "$ACCOUNTS" > "$tmp" 2>/dev/null || true
     umask 177; mv "$tmp" "$ACCOUNTS"; chmod 600 "$ACCOUNTS"
-    echo "✓ removed '$name' (sessions bound to it fall back to the machine's own login on next start)"
+    echo "✓ removed '$name' (sessions still bound to it will refuse to start; no fallback login is used)"
     ;;
   *)
     sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'

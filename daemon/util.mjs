@@ -335,12 +335,16 @@ export async function closeTmuxTerminal(tname) {
 // validated here as well as at the CLI — never trust a stored value blindly.
 export const safeAccount = a => (typeof a === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(a) ? a : null)
 
-export async function spawnSession({ cwd, args, tmuxName, autoConsent, account, provider = 'claude', startupStatusPath = null }) {
-  const acct = provider === 'claude' ? safeAccount(account) : null
+export async function spawnSession({ cwd, args, tmuxName, autoConsent, account, accountKind = null, accountPool = false, provider = 'claude', startupStatusPath = null }) {
+  const acct = ['claude', 'codex'].includes(provider) ? safeAccount(account) : null
+  if (account && !acct) throw new Error('invalid provider account reference')
   if (!safeTmuxName(tmuxName)) throw new Error('invalid tmux session name')
   fs.mkdirSync(cwd, { recursive: true })
-  const env = ['CCS_BRIDGE=1', `CCS_PROVIDER=${provider}`, `CCS_TMUX=${tmuxName}`]
-  if (acct) env.push(`CCS_ACCOUNT=${acct}`)
+  if (accountKind && !(provider === 'claude' && ['claude-profile', 'legacy-claude', 'native-default'].includes(accountKind))) throw new Error('invalid provider account kind')
+  const env = ['-u', 'CCS_ACCOUNT', '-u', 'CCS_CODEX_PROFILE', '-u', 'CCS_CLAUDE_PROFILE', '-u', 'CCS_POOL_ACCOUNT', 'CCS_BRIDGE=1', `CCS_PROVIDER=${provider}`, `CCS_TMUX=${tmuxName}`]
+  if (acct) env.push(`${provider === 'codex' ? 'CCS_CODEX_PROFILE' : accountKind === 'claude-profile' ? 'CCS_CLAUDE_PROFILE' : 'CCS_ACCOUNT'}=${acct}`)
+  if (accountPool) env.push('CCS_POOL_ACCOUNT=1')
+  if (accountPool && provider === 'codex' && !acct) env.push(`CODEX_HOME=${process.env.CODEX_HOME || path.join(os.homedir(), '.codex')}`)
   if (startupStatusPath) {
     const runtimeRoot = path.resolve(CONFIG_DIR, 'runtime')
     const resolved = path.resolve(String(startupStatusPath))

@@ -19,6 +19,21 @@ Usage:
   sab terminal close <session|tmux|here>
   sab terminal open-all|show-all|close-all
   sab account <list|add|set|remove> [name]
+  sab account preview [--provider claude|codex|all] [--json]
+  sab account capabilities [--probe] [--provider claude|codex|all] [--json]
+  sab account registry status [--json]
+  sab account registry plan --input FILE|- [--accept-source-change] [--json]
+  sab account registry stage --input FILE|- --expected-revision N [--accept-source-change] [--json]
+  sab account registry check --channel ID --provider claude|codex [--account EMAIL|ID|ALIAS] [--json]
+  sab account pool status --channel ID [--json]
+  sab account pool refresh --account ID [--json]
+  sab account pool switch --channel ID --session ID --account EMAIL|ID|ALIAS --request-id ID [--json]
+  sab account pool reconcile --channel ID --session ID --request-id ID [--json]
+  sab account login-codex PROFILE
+  sab account login-claude PROFILE
+  sab account group list [--json]
+  sab account group <create|rename|remove|add|delete-member|drain-member|prefer> ... --revision N --request-id ID [--json]
+  sab account manage --input FILE|- [--json]
   sab upload --grant TOKEN -- FILE_PATH [FILE_PATH ...]
   sab team <context|peers|send|send-file|inbox|wait|reply|message|replace|cancel|mode> ...
   sab automation <create|status|stop|validate-flags> ...

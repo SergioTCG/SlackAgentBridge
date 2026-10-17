@@ -111,6 +111,125 @@ them.
   through a private file or stdin and is never stored in plaintext.
 - `scripts/sab-upload.mjs`, `scripts/sab-automation.mjs`, and
   `scripts/sab-account.sh` are private implementations reached through `sab`.
+- `daemon/account-discovery.mjs`, `daemon/account-capabilities.mjs`, and
+  `scripts/sab-account-inspect.mjs` implement offline account-pool preparation.
+  They are invoked only by local `sab account preview|capabilities`, not by
+  daemon startup, provider hooks, or Slack commands. They never apply migrations
+  or select/switch accounts.
+- `daemon/account-registry.mjs`, `daemon/account-registry-store.mjs`, and
+  `scripts/sab-account-registry.mjs` implement the opt-in inactive account/group
+  registry. Staging alone never changes the daemon's legacy behavior.
+- `daemon/account-quota.mjs` owns quota normalization, sticky selection,
+  shared-principal reservations, and reset-aware switch-back.
+  `daemon/account-telemetry.mjs` reads native/private credentials only for
+  bounded no-inference quota queries. `daemon/account-profiles.mjs` isolates
+  explicitly enrolled Codex authentication from shared native resources.
+- `daemon/account-pool-runtime.mjs` owns opt-in sampling and exact restart
+  journals. `daemon/account-pool-http.mjs` and `scripts/sab-account-pool.mjs`
+  expose the loopback owner client, not agent-facing credentials.
+
+### Account-pool preparation boundary
+
+`sab account preview` reads bounded legacy registry, native identity-cache, and
+state snapshots. It emits proposed singleton groups and exact authoritative
+local session mappings, preserving the canonical implicit-local node rules.
+Identical token bytes identify duplicate credential aliases only; distinct
+tokens, matching cached emails, and multiple workspaces do not prove independent
+accounts or quota. Cached Claude metadata and decoded Codex ID-token claims are
+unverified hints, never authentication or routing authority. Candidate IDs are
+alias-based preview references, not persistent account identities.
+
+`sab account capabilities --probe` runs only installed CLI version/help and
+public schema-generation commands under temporary credential-free configuration
+roots. It strips bridge, provider-auth, tmux, and session environment, starts no
+App Server listener or provider conversation, and cleans its own temporary
+files. Structured schema checks can confirm that the installed Codex binary
+advertises account identity and quota-read fields; they do not prove live
+authentication, quotas, or cross-account native resume.
+
+`sab account registry plan|stage|status|check` accepts owner-confirmed email
+identities and references to existing credentials, not token bytes. Accounts
+have provider/workspace identity and stable opaque IDs; groups have stable IDs,
+members, and optional provider preferences. Channel-ID routing picks a group;
+the pure selection checker additionally enforces account-level channel ceilings
+after resolving aliases. Missing provider/node state retains the ordinary
+Claude/local interpretation. Migration auditing includes only authoritative
+active mappings and validated standby legs; nonlocal or mismatched node claims
+require review. Already-permitted bindings are preserved, not rebalanced.
+
+Only explicit `stage` writes metadata under `~/.config/ccs/account-pools`, with
+private immutable revision files. It fsyncs a uniquely created temporary file
+before exclusive hard-link publication, with expected-revision compare-and-swap
+and durable request-ID receipts. Concurrent staging cannot overwrite a winner;
+crash retries return the accepted revision, including its stable IDs. No lock
+can strand a future retry. A missing registry is unconfigured; invalid latest
+state never falls back to an older policy. Prior revisions are retained, not
+silently restored. Credential-source drift requires review; private source
+digests and receipts never enter public reports.
+
+Staging is **not activation**: registry mode stays `staged`, enrollment claims
+never imply authenticated telemetry, and checks report `runtimeAllowed: false`.
+The runtime defaults to `off`, with no registry I/O or migration. Explicit
+`CCS_ACCOUNT_POOLS=shadow` enables serialized, account-deduplicated sampling;
+`manual` permits owner handovers; `auto` adds safe-boundary selection only after
+a successful manual native resume proves that account direction for the current
+registry revision. No binding is bulk-migrated. A changed registry invalidates
+old sampling/proof eligibility. Credential-source changes require reviewed
+re-enrollment with a new request ID and `--accept-source-change`.
+
+The ordinary sampler receives no refresh tokens or live provider authority. Claude reads
+its default Keychain/private-file credential or an explicit named/profile reference, then verifies
+profile identity and reads quota. A scope-limited setup token is unavailable
+for automatic selection, not a reason to borrow machine quota. Codex supplies
+only an access token and account ID on stdin to a temporary, ephemeral-storage
+App Server. It invokes initialize, memory-only login, account/read (no refresh),
+and account/rateLimits/read. An isolated inactive profile may instead use its
+native account/read refresh under an exclusive profile lease. No thread/turn, paid-credit/reset operation, live
+App Server attachment, or transcript read is involved.
+
+Explicit `login-claude`/`login-codex` create private native credential homes and
+share only allowlisted native conversation/settings resources, never auth files.
+Claude profile identity is persisted separately from legacy setup-token aliases
+and echoed by its lifecycle hook. Native Claude alone exchanges a profile refresh
+token through its documented non-browser `auth login` provisioning path. SAB
+performs that operation only after two inactivity checks under a launch-fencing
+lease; default machine credentials and live profile credentials are never
+refreshed by SAB. An uncertain refresh retains its lease and requires operator
+recovery/new-profile enrollment, rather than replaying a rotating token.
+
+Owner edits use `account-management.mjs` and the existing immutable revision CAS.
+Request retries derive the original candidate from its immutable base revision,
+not from current policy. Group CRUD, membership/preference changes, profile
+attachment, and routing never restart providers. Account/group-member draining
+removes automatic eligibility while retaining existing work and credentials.
+Retirement/removal refuses live, dormant, and standby references; account IDs
+and historical metadata remain retained. New selection rejects retired/draining
+accounts. `/sab-account` controls bind the exact native session and policy
+revision, and are owner-only like other management controls.
+
+Bounded observations, receipts, exact transitions, bindings, and canary proofs
+are stored lazily in `state.accountPools`. Handover journals precede the existing
+maintenance/input-fence restart. Authority and idle checks repeat after the
+Slack notice, before mutation/teardown. Native ID, cwd, provider, latest
+settings, and account binding must match after resume. Active turns, delegated
+tasks, permissions, questions, automations, private maintenance, and concurrent
+restarts are ineligible. Uncertain restarts are never replayed; disk-write
+failure fences further pool mutations. Tasks and queued input are not released
+or replayed by the pool. Passed reset times require fresh backend observations;
+unknown/stale quota does not imply zero use, and backend denial wins over
+percentages. Shadow mode cannot switch accounts. The next proof gates are in
+[Account pools](docs/account-pools.md).
+
+Manual/auto policy also gates fresh channel input, synthetic automation input,
+queued drains, and provider-switch targets; a launch-only check is insufficient.
+An interrupted journal fences input and ordinary resume until exact explicit
+reconciliation or a new owner handover. Reconciliation verifies the live target
+without restarting or replaying anything and never mints canary proof. Backend
+identity is checked before teardown and against the verified replacement
+credential namespace before proof commit; legacy scope-limited tokens cannot
+provide automatic proof. Shadow mode remains observational for legacy launches.
+Live idle sessions reserve conservative headroom too, and account status rows
+are bounded below Slack's block/text limits.
 
 ## Session identity and durable state
 
@@ -260,8 +379,9 @@ one until the owner clicks a provider. In a session channel, the authoritative
 session selects provider-specific behavior for every other provider operation.
 From the control channel, `/sab-status` and `/sab-usage` may take a provider
 filter. `/sab-update all` is bridge-wide and may be run from the control channel
-or a session channel. `/sab-run` rejects non-Pi sessions and `/sab-account`
-rejects non-Claude sessions before mutation.
+or a session channel. `/sab-run` rejects non-Pi sessions. `/sab-account` is
+Claude-only in legacy mode; the opt-in pool runtime supports Claude and Codex
+and rejects Pi before account mutation.
 
 No-argument management commands use Block Kit as a presentation layer over the
 same dispatcher. `/sab-status` renders a session or bridge dashboard; model and
@@ -698,6 +818,18 @@ Automation endpoints are:
 - `POST /automation/sessions`
 - `GET /automation/sessions/:externalKey`
 - `POST /automation/sessions/:externalKey/stop`
+
+Opt-in account-pool owner endpoints (absent in `off` mode) are:
+
+- `GET /account-pools/status?channel=CHANNEL_ID`
+- `POST /account-pools/refresh` with `{ "account": "ACCOUNT_ID" }`
+- `POST /account-pools/switch` with exact channel, session, account, and request ID
+- `POST /account-pools/reconcile` for one exact interrupted live handover
+- `GET /account-pools/inventory` with groups, metadata, and exact usage references
+- `POST /account-pools/manage` with request ID, expected revision, and strict edit
+
+They use loopback/script-origin checks, strict bounded JSON, and the sole daemon
+state writer. Neither credentials nor caller-selected remote URLs are exposed.
 
 The local CLI also exposes side-effect-free `sab automation validate-flags`.
 It invokes the canonical provider adapter directly, allowing a project

@@ -388,6 +388,99 @@ Slack when its scope or progress is no longer appropriate.
 both as password stores: never paste them into issues, logs, shell history, or
 agent prompts, and never commit configuration backups.
 
+The local `sab account preview` command is an offline, read-only migration
+inventory. Unlike the legacy account-list display, it prints no credential
+bytes, masked prefixes/suffixes, or credential-derived hashes. Inputs and
+diagnostics are bounded; invalid JSON and filesystem/provider errors are
+reported as fixed codes, never raw fragments. The report still contains private
+email candidates and session/channel identities: do not commit it or publish it
+as a generic diagnostic attachment. Cached emails, including decoded ID-token
+claims, remain unverified and grant no account or quota authority.
+
+`sab account capabilities --probe` executes only public CLI version/help/schema
+commands, in disposable configuration directories with a minimal environment.
+It inherits no Slack credentials, provider credentials, bridge identity, tmux,
+or native session identity, and never invokes login, refresh, account RPC, model
+inference, or a session resume. No secret-bearing native diagnostics are
+included in its output. These preparation commands neither modify the old
+registry's mode nor create a missing registry; they do not enable account
+rotation or expose an account HTTP endpoint.
+
+`sab account registry` adds a separate opt-in **inactive metadata** store. Its
+strict enrollment schema accepts owner-attested emails, workspace identities,
+existing credential references, group membership, and exact channel IDs. It
+rejects token fields, claimed monitoring proofs, remote-node authority, and
+automatic activation. Email confirmation by the owner is not provider-auth
+verification. Duplicate stored credentials must have one account owner; aliases
+never bypass group membership or the account's channel ceiling. A read-only
+policy result is not runtime permission: the daemon keeps legacy behavior unless
+the owner explicitly enables an account-pool runtime mode.
+
+Enrollment files and revisions must be owner-owned regular files with no
+group/other permissions; pool directories must be private and nonsymlinked.
+Readers reject rather than repair insecure modes or symlinks. Only explicit
+`stage` creates `account-pools` (`0700`) and metadata revisions (`0600`);
+`plan`, `status`, and `check` never create directories. Neither path copies
+tokens or edits legacy credentials, session state, grants, or tasks. Private
+canonical-request and credential-source digests guard receipts/source drift but
+are omitted from public reports. Treat enrollment files, revisions, and reports
+as private: registered emails, aliases, and channel identities remain sensitive.
+Never commit them. Keep old revisions for recovery; do not delete the newest
+file to bypass a rejected policy or credential-source change.
+
+The experimental runtime is off by default. Shadow mode only samples; manual
+and automatic handovers require exact channel/group/account policy and the
+ordinary maintenance fence. They never stop an active turn, delegated task,
+question/permission, automation-owned session, or provider switch. Automatic
+selection also requires fresh identity-bound quota and a successful manual
+resume proof for that account pair/registry revision. Unknown quota, auth
+failures, limited scopes, capacity banners, and provider errors are not evidence
+of exhausted subscription quota. An ambiguous restart is never replayed;
+disk-write failure disables further pool mutations. Requested model/effort is
+never silently changed.
+
+An interrupted handover fences fresh/queued provider input and ordinary resume;
+the next owner message cannot silently retry it. Explicit reconciliation is
+bound to its exact request/native session/process/profile and fresh backend
+identity, starts no process, and creates no automatic proof. New session and
+automation prompts and private provider-switch targets must satisfy their exact
+channel route, not merely an earlier launch check. Scope-limited legacy tokens
+are manual-only. Shadow mode cannot enforce policy or alter launch auth.
+
+Manual/auto Codex launches pin the native default as well as named profiles to
+the inspected file-auth store; a different keyring credential cannot validate
+that process. This opt-in auth-store choice does not apply in off/shadow mode.
+
+The sampler inherits no bridge, Slack, tmux, tool, or native session authority,
+starts no conversation, and spends no inference tokens. Its URLs/methods are
+fixed. The ordinary Codex probe receives only an access token over stdin, never
+a refresh token. Claude Keychain output is captured privately. Native diagnostics
+and HTTP bodies are bounded/redacted. Only isolated inactive profiles may run
+native refresh under a private exclusive launch-fencing lease. The Claude
+refresh token is passed privately in the documented provisioning environment,
+never argv, Slack, ordinary state, or logs; Codex reads its own profile store.
+SAB never refreshes the default machine login or a live profile. Ambiguous
+refreshes retain a lease instead of retrying potentially rotated credentials.
+Unavailable credentials cannot borrow another login's quota.
+
+Explicit Claude/Codex profile login isolates authentication while linking an allowlist
+of native history/settings/skills resources. It never copies or links
+`auth.json` or `.credentials.json`. Group membership therefore authorizes that account's access to
+shared workspace/history; it does not isolate project data or memory. Named
+Claude launches always use their exact private credential: inherited tokens
+cannot override the requested account, and missing/conflicting/insecure
+credentials fail closed instead of falling back to machine login. Pool-native
+launches clear auth overrides; legacy explicit native overrides remain
+compatible outside pool mode.
+
+Management metadata is private, not a secret vault. Group/account edits require
+strict bounded JSON, an expected revision, and an idempotency identity. Removal
+checks all session references, including dormant/standby legs. Draining blocks
+new selection; it neither kills active work nor erases credentials/history.
+Changing group membership does not remove an account's independent channel
+ceiling. Policy changes invalidate old quota/canary eligibility and Slack
+controls. Tokens, arbitrary URLs, paths, and remote node claims are rejected.
+
 The app-level token can open the Socket Mode event stream; the bot token can act
 with the OAuth scopes declared in `slack/app-manifest.json`. Compromise of either
 requires immediate rotation. State maps local sessions, processes, paths, and
