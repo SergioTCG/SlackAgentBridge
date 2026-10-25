@@ -2893,6 +2893,14 @@ function resumeCwd(session) {
   return session.cwd
 }
 
+// Claude Code deletes conversations idle for `cleanupPeriodDays` (30 by
+// default), so a long-idle standby leg can outlive the transcript it resumes.
+function claudeConversationGone(session) {
+  if (providerOf(session) !== 'claude') return false
+  resumeCwd(session)
+  return !(session.transcript && fs.existsSync(session.transcript))
+}
+
 // sid → ts of a resurrect currently materializing. Guards against stacked spawns:
 // messages that arrive while claude is still starting used to trigger fresh spawns
 // (and fresh "Waking…" posts) every time. Cleared by SessionStart, or after 90s.
@@ -3319,10 +3327,16 @@ async function beginProviderSwitch(channel, source, {
     return post(channel, `❌ Choose a different target provider: ${PROVIDERS.filter(name => name !== providerOf(source)).join(' · ')}`)
   }
   const savedTargetSid = lineage.legs[targetProvider]
-  if (savedTargetSid && !state.sessions[savedTargetSid] && !replaceMissing) {
-    return post(channel, `⚠️ The saved ${providerLabel(targetProvider)} leg \`${savedTargetSid.slice(0, 8)}\` is missing from bridge state. Run \`${slackCommand(providerOf(source), 'switch')} ${targetProvider} new\` to explicitly replace it with a new native leg.`)
+  const savedTarget = savedTargetSid ? state.sessions[savedTargetSid] : null
+  const savedTargetGone = !!savedTarget && claudeConversationGone(savedTarget)
+  if (savedTargetSid && (!savedTarget || savedTargetGone) && !replaceMissing) {
+    const problem = savedTarget
+      ? 'can no longer be resumed because Claude Code has deleted its conversation'
+      : 'is missing from bridge state'
+    return post(channel, `⚠️ The saved ${providerLabel(targetProvider)} leg \`${savedTargetSid.slice(0, 8)}\` ${problem}. Run \`${slackCommand(providerOf(source), 'switch')} ${targetProvider} new\` to explicitly replace it with a new native leg.`)
   }
-  if (savedTargetSid && !state.sessions[savedTargetSid] && replaceMissing) {
+  if (savedTargetSid && (!savedTarget || savedTargetGone) && replaceMissing) {
+    if (savedTarget) delete state.sessions[savedTargetSid]
     lineage.legs[targetProvider] = null
     saveStateNow(state)
   }

@@ -26,6 +26,16 @@ test('textual management forms remain routed for automation and muscle memory', 
   assert.match(daemon, /return spawnNew\(channel, rest\[0\], rest\.slice\(1\), commandProvider\)/)
 })
 
+test('a standby Claude leg whose conversation Claude Code deleted is replaced only with new', () => {
+  const begin = /async function beginProviderSwitch\([\s\S]*?\n\}\n/.exec(daemon)?.[0] || ''
+  assert.match(begin, /const savedTargetGone = !!savedTarget && claudeConversationGone\(savedTarget\)/)
+  assert.match(begin, /\(!savedTarget \|\| savedTargetGone\) && !replaceMissing\) \{[\s\S]*?deleted its conversation[\s\S]*?return post\(/)
+  assert.match(begin, /\(!savedTarget \|\| savedTargetGone\) && replaceMissing\) \{\s*if \(savedTarget\) delete state\.sessions\[savedTargetSid\]\s*lineage\.legs\[targetProvider\] = null/)
+  const gone = /function claudeConversationGone\(session\) \{[\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(gone, /providerOf\(session\) !== 'claude'\) return false/)
+  assert.match(gone, /resumeCwd\(session\)/)
+})
+
 test('interactive actions are owner-only and revalidate exact authoritative bindings', () => {
   const handler = /async function handleSocketInteractive\(\{ body \}\) \{([\s\S]*?)\n\}\n\nconst socketCoordinator/.exec(daemon)?.[1] || ''
   assert.match(handler, /body\?\.user\?\.id !== USER/)

@@ -88,6 +88,19 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A provider switch to Claude Code no longer rolls back after Claude has
+  confirmed the handoff.
+  - SAB asks the new leg for "Objective:" and "Next action:" lines. Claude
+    wrote them in bold, as `**Objective:**`, and SAB rejected the reply with
+    "target did not confirm the objective and next action".
+  - The check now also accepts labels with Markdown emphasis, list markers,
+    headings or quote markers.
+- `/sab-switch claude` now explains when a saved standby Claude leg can no
+  longer be resumed, instead of trying to resume it and rolling back.
+  - Claude Code deletes conversations idle for 30 days by default
+    (`cleanupPeriodDays`), so an old standby leg can lose its transcript.
+  - `/sab-switch claude new` replaces such a leg with a new native leg, as it
+    already did for a leg missing from bridge state.
 - A resumed Claude session no longer receives a stray prompt such as `4.8` or
   `5 (1M context)` the moment it starts.
   - Older releases stored the status-line model name, for example
