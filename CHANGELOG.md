@@ -88,6 +88,18 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- SAB now removes the records of archived session channels.
+  - A channel archived after its session had stopped, for example after
+    `/sab-kill`, kept its session records, standby legs and team forever.
+  - At startup and hourly, SAB checks the channels of stopped sessions. For
+    each archived one it removes the records and saved handoffs, and it closes
+    a team whose channels are all archived. Session records that nothing can
+    reach any more are removed too. The control channel gets a summary.
+  - Channels still used by a provider switch, an active team task, an owning
+    automation or an unfinished account handover are skipped, and so are the
+    channels of a team that still has an open channel.
+  - `/sab-cleanup` now also removes the records of a dormant channel that is
+    already archived, instead of skipping it.
 - A provider switch to Claude Code no longer rolls back after Claude has
   confirmed the handoff.
   - SAB asks the new leg for "Objective:" and "Next action:" lines. Claude
