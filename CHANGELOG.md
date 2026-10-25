@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-10-25
+
 ### Added
 
 - Explicit non-destructive `sab automation release` for completed bootstrap
@@ -408,6 +410,8 @@ Notable changes to this project. Format based on
   a collaborator. Outbound Slack text now has `--grant <token>` replaced with
   `--grant [redacted]`, so no present or future path that republishes prompt
   text can hand out a usable capability.
+
+[2.2.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.2.0
 
 ## [2.1.0] — 2026-09-08
 
