@@ -20,7 +20,7 @@ export function accountPoolMode(value) {
 export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, persist, readQuota,
   blockReason = () => null, restart, writeRegistry, verifyIdentity = async () => 'credential-unavailable',
   onSettled = () => {}, notify = async () => {}, now = Date.now,
-  isDormant = async session => !session.pid && !session.tmux,
+  isDormant = async session => !session.pid && !session.tmux, adoptReplacement = async () => null,
 }) {
   mode = accountPoolMode(mode)
   const enabled = mode !== 'off', enforcing = ['manual', 'auto'].includes(mode), flights = new Map(), switching = new Set()
@@ -262,13 +262,29 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       fail(rejected ? 'account_handover_rejected' : 'account_handover_uncertain')
     } finally { switching.delete(channelId) }
   }
+  // A daemon restart between the replacement launch and its SessionStart loses
+  // the only hook that binds its PID, and the interrupted journal fences the
+  // Slack input that would bind it next. Adopt only the exact provider root the
+  // daemon proves inside the journaled replacement tmux; never launch or replay.
+  const adoptLostReplacement = async (session, journal, expectedSessionId) => {
+    const tmux = session.tmux
+    let pid
+    switching.add(session.channel)
+    try { pid = await adoptReplacement(session) } finally { switching.delete(session.channel) }
+    if (session.pid || !pid || session.tmux !== tmux || !authoritative(session, expectedSessionId) ||
+        poolState().switches[session.channel] !== journal) return
+    session.pid = pid
+    save()
+  }
   const reconcile = async (session, { requestId, expectedSessionId = session?.id } = {}) => {
     if (!enforcing || persistenceFailed) fail('account_pool_read_only')
     if (!authoritative(session, expectedSessionId) || switching.has(session.channel)) fail('stale_account_session')
     const journal = poolState().switches[session.channel]
     if (!journal || journal.requestId !== requestId || journal.sessionId !== session.id) fail('account_request_conflict')
     if (journal.phase === 'reconciled') return { status: 'reconciled', requestId }
-    if (journal.phase !== 'interrupted' || !session.pid || !session.tmux || maintenanceBlockReason(session, journal.taskMaintenance)) fail('account_switch_blocked')
+    if (journal.phase !== 'interrupted' || !session.tmux) fail('account_switch_blocked')
+    if (!session.pid) await adoptLostReplacement(session, journal, expectedSessionId)
+    if (!session.pid || maintenanceBlockReason(session, journal.taskMaintenance)) fail('account_switch_blocked')
     const { record, view } = registry(), account = currentAccount(view, session)
     if (!account || account.id !== journal.targetAccountId) fail('account_identity_unverified')
     previewPoolAccountSelection(record, { channelId: session.channel, provider: providerOf(session), account: account.id })

@@ -604,6 +604,11 @@ login-claude PROFILE` / `login-codex PROFILE` and referenced as `claude-profile`
 / `codex-profile` credentials. Authentication is
 isolated; native history/settings/resources are shared without SAB reading
 transcripts. Installation and staging never log in or enable runtime modes.
+A new Claude profile inherits only the native login's first-run completion
+markers, so a detached launch does not stop at the theme, security-notes or
+Chrome intro screens. Claude in Chrome follows the claude.ai account of the
+Chrome extension: a session switched to another subscription has no browser
+tools unless a browser signed in to that account is available.
 Use a controlled canary before manual/automatic handover. Claude setup tokens
 without profile/usage scope cannot supply automatic capacity proof. Instant
 mid-tool switching or never hitting provider limits cannot be guaranteed.

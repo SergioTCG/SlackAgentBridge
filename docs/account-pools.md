@@ -355,7 +355,10 @@ operator inspection. The next Slack prompt never silently retries them.
 `sab account pool reconcile --channel ID --session NATIVE_ID --request-id
 ORIGINAL_ID` (or `/sab-account reconcile ORIGINAL_ID`) verifies an already-live
 exact target without restarting or replaying input, and creates no automatic
-proof. A dead/incorrect replacement needs an explicit new manual handover after
+proof. If a daemon restart lost the replacement's only SessionStart, it first
+adopts the shallowest Claude process of the journaled single-pane replacement
+tmux, and only when that process resumes the exact native session. A
+dead/incorrect replacement needs an explicit new manual handover after
 credential correction, not automatic resurrection. Failed
 disk persistence fences further pool mutations without stopping providers.
 
@@ -444,6 +447,20 @@ allowlisted shared resources. Authentication and global account metadata are
 not linked. This preserves native project memory access, not a cross-provider
 memory consolidation. Login refuses profiles referenced by durable sessions;
 use a new profile name for re-enrollment while old sessions remain available.
+
+Claude records first-run completion in each profile's own `.claude.json`. A
+fresh profile would otherwise open the theme picker, the security notes and,
+with `--chrome`, the Claude in Chrome intro, which a detached launch can never
+answer. After a successful login, and on every profile launch, SAB copies only
+`hasCompletedOnboarding`, `lastOnboardingVersion`,
+`hasCompletedClaudeInChromeOnboarding` and `theme` from the native config, and
+only once the native login has completed onboarding. It fills missing keys and
+never overwrites one. Folder trust stays with the launch-time consent helper.
+
+Claude in Chrome pairs with the claude.ai account the Chrome extension is
+signed in to. A session switched to another subscription keeps working, but its
+browser tools report that the extension is not connected unless a browser
+signed in with that account is available.
 
 Attach it to an existing owner-confirmed logical account with an
 `account-credential` edit. Old legacy aliases remain readable and running
