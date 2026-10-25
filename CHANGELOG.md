@@ -88,6 +88,26 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- The first account switch to a newly signed-in Claude profile no longer
+  leaves the session stopped.
+  - A fresh profile opened Claude's first-run screens: the theme picker, the
+    security notes and, with `--chrome`, the Claude in Chrome intro. Nothing
+    answers them in a detached launch, so the replacement never reported
+    SessionStart and the handover ended interrupted.
+  - After `sab account login-claude` and on every profile launch, SAB now
+    copies only the first-run completion markers from the native Claude
+    config. Profiles enrolled earlier heal on their next launch.
+  - The account-pool guide now notes that Claude in Chrome follows the Chrome
+    extension's claude.ai account, so browser tools are unavailable in a
+    session switched to another subscription.
+- Reconciling an account handover now works after a bridge restart lost the
+  replacement's SessionStart.
+  - The replacement kept running, but SAB never learned its process ID.
+    Reconcile refused it, and the interrupted handover blocked the Slack input
+    that would otherwise have bound it.
+  - Reconcile now adopts the exact Claude process in the replacement's own
+    tmux, and only when it resumes the same native session. It still starts,
+    restarts and replays nothing.
 - SAB now removes the records of archived session channels.
   - A channel archived after its session had stopped, for example after
     `/sab-kill`, kept its session records, standby legs and team forever.

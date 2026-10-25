@@ -224,7 +224,10 @@ Manual/auto policy also gates fresh channel input, synthetic automation input,
 queued drains, and provider-switch targets; a launch-only check is insufficient.
 An interrupted journal fences input and ordinary resume until exact explicit
 reconciliation or a new owner handover. Reconciliation verifies the live target
-without restarting or replaying anything and never mints canary proof. Backend
+without restarting or replaying anything and never mints canary proof. When a
+daemon restart lost the replacement's SessionStart, it may first bind the exact
+Claude provider root of the journaled replacement tmux whose argv resumes that
+native session. Backend
 identity is checked before teardown and against the verified replacement
 credential namespace before proof commit; legacy scope-limited tokens cannot
 provide automatic proof. Shadow mode remains observational for legacy launches.

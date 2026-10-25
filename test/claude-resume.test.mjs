@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { waitForClaudeResumeClaim } from '../daemon/claude-resume.mjs'
+import { waitForClaudeResumeClaim, selectClaudeResumeProcessPid } from '../daemon/claude-resume.mjs'
 
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 const runnerPath = fileURLToPath(new URL('../scripts/run-session.sh', import.meta.url))
@@ -138,4 +138,22 @@ test('a disarmed successful Claude launch leaves no later startup status', () =>
     assert.equal(result.status, 0)
     assert.equal(fs.existsSync(statusFile), false)
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+})
+
+test('a lost SessionStart is adopted only from the exact Claude root resuming this session', () => {
+  const sid = '2abecd64-1219-4dc1-82d8-4f10846f0cba'
+  const resumed = [
+    { pid: 500, ppid: 1, comm: 'bash', args: '/bin/bash /bridge/scripts/run-session.sh claude' },
+    { pid: 501, ppid: 500, comm: 'claude', args: `claude --mcp-config /c/mcp.json --dangerously-skip-permissions --resume ${sid}` },
+    { pid: 502, ppid: 501, comm: 'node', args: 'node /bridge/channel/server.mjs' },
+    { pid: 503, ppid: 501, comm: 'claude', args: `claude --agent helper --resume ${sid}` },
+  ]
+  assert.equal(selectClaudeResumeProcessPid(resumed, [500], sid), 501)
+  // Fresh launches exec Claude, so the pane process itself is the provider root.
+  assert.equal(selectClaudeResumeProcessPid([{ pid: 600, ppid: 1, comm: 'claude', args: `claude --resume=${sid}` }], ['600'], sid), 600)
+  assert.equal(selectClaudeResumeProcessPid(resumed, [500], 'ffffffff-1219-4dc1-82d8-4f10846f0cba'), null)
+  assert.equal(selectClaudeResumeProcessPid(resumed.filter(row => row.pid !== 501), [500], sid), null, 'a nested child never stands in for the root')
+  assert.equal(selectClaudeResumeProcessPid(resumed, [500, 600], sid), null, 'only a single-pane tmux is exact')
+  assert.equal(selectClaudeResumeProcessPid(resumed, [500], `${sid} --dangerously-skip-permissions`), null)
+  assert.equal(selectClaudeResumeProcessPid([{ pid: 700, ppid: 1, comm: 'claude', args: `claude --resume ${sid}-other` }], [700], sid), null)
 })

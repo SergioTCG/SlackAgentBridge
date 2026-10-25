@@ -456,7 +456,10 @@ handover proof and does not relax bulk updates, running-work or Pi/Codex guards.
 An interrupted handover fences fresh/queued provider input and ordinary resume;
 the next owner message cannot silently retry it. Explicit reconciliation is
 bound to its exact request/native session/process/profile and fresh backend
-identity, starts no process, and creates no automatic proof. New session and
+identity, starts no process, and creates no automatic proof. A replacement whose
+SessionStart a restart lost is adopted only from its journaled single-pane tmux,
+as the shallowest Claude process resuming that exact native session, and must
+still pass the provider-root claim. New session and
 automation prompts and private provider-switch targets must satisfy their exact
 channel route, not merely an earlier launch check. Scope-limited legacy tokens
 are manual-only. Shadow mode cannot enforce policy or alter launch auth.

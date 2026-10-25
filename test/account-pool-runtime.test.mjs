@@ -168,6 +168,41 @@ test('an unverified replacement cannot mint resume proof or receive input; exact
   assert.ok(Object.values(state.accountPools.receipts).every(r => r.phase === 'reconciled'))
 })
 
+test('reconcile adopts the exact live replacement whose SessionStart a daemon restart lost, without restarting it', async () => {
+  const f = setup({ restart: async (session, alias) => { session.account = alias; session.pid = 200; throw new Error('daemon stopped before SessionStart') } })
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'lost-start' }), /account_handover_uncertain/)
+  const disk = JSON.parse(JSON.stringify(f.state))
+  disk.sessions['native-one'].pid = null // its only SessionStart reached the stopped daemon
+  const adopted = []
+  const recovered = setup({ initialState: disk, readRegistry: () => f.registry,
+    blockReason: session => session.pid ? null : 'provider is dormant',
+    restart: async () => assert.fail('reconcile must not restart'),
+    adoptReplacement: async session => { adopted.push(session.tmux); return 300 },
+    verifyIdentity: async (session, account, { stage }) => stage === 'replacement' && session.pid === 300 ? 'verified' : 'identity-mismatch' })
+  await recovered.runtime.recover()
+  assert.throws(() => recovered.runtime.assertInputAllowed(recovered.session), /account_handover_uncertain/)
+  assert.equal((await recovered.runtime.reconcile(recovered.session, { requestId: 'lost-start' })).status, 'reconciled')
+  assert.equal(recovered.session.pid, 300)
+  assert.deepEqual(adopted, ['sab-one'])
+  recovered.runtime.assertInputAllowed(recovered.session)
+  assert.equal(Object.keys(disk.accountPools.proofs).length, 0)
+})
+
+test('reconcile without a provable replacement process stays fenced and binds nothing', async () => {
+  const f = setup({ restart: async (session, alias) => { session.account = alias; session.pid = 200; throw new Error('daemon stopped before SessionStart') } })
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'lost-start' }), /account_handover_uncertain/)
+  f.session.pid = null
+  const persisted = f.events.length
+  const recovered = setup({ initialState: f.state, readRegistry: () => f.registry, adoptReplacement: async () => null,
+    blockReason: session => session.pid ? null : 'provider is dormant' })
+  await assert.rejects(recovered.runtime.reconcile(recovered.session, { requestId: 'lost-start' }), /account_switch_blocked/)
+  assert.equal(recovered.session.pid, null)
+  assert.equal(recovered.state.accountPools.switches.CMINE.phase, 'interrupted')
+  assert.equal(recovered.events.length, 0)
+  assert.equal(f.events.length, persisted)
+  assert.throws(() => recovered.runtime.assertInputAllowed(recovered.session), /account_handover_uncertain/)
+})
+
 test('scope-limited legacy manual switching is visibly unverified and never authorizes automatic rotation', async () => {
   const { runtime, session, state, notices } = setup({ verifyIdentity: async () => 'scope-unavailable' })
   await runtime.switchAccount(session, 'second', { requestId: 'legacy-manual' })

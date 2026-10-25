@@ -161,7 +161,7 @@ import {
   applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
   tmuxCodexProcessPid, waitForCodexResumeClaim,
 } from './codex-resume.mjs'
-import { waitForClaudeResumeClaim } from './claude-resume.mjs'
+import { waitForClaudeResumeClaim, tmuxClaudeResumeProcessPid } from './claude-resume.mjs'
 import {
   accountPickerBlocks, authoritativeManagementBinding, bridgeDashboardBlocks, modelPickerBlocks, newSessionBlocks,
   parseManagementActionId, sessionDashboardBlocks,
@@ -211,6 +211,13 @@ const accountPools = createAccountPoolRuntime({
     return true
   } }),
   isDormant: async session => !(session.pid && pidAlive(session.pid)) && !(session.tmux && await tmuxAlive(session.tmux)),
+  // Reconcile only: bind the exact Claude replacement whose SessionStart a
+  // daemon restart lost. Nothing is launched, restarted or replayed here.
+  adoptReplacement: async session => {
+    if (providerOf(session) !== 'claude') return null
+    const pid = await tmuxClaudeResumeProcessPid(session.tmux, session.id, { execFile })
+    return pid && pidAlive(pid) && await validProviderRootClaim(pid, session.tmux, 'claude') ? pid : null
+  },
   blockReason: session => accountPoolBlockReason(session),
   verifyIdentity: async (session, account, { stage }) => {
     const expected = { id: session.id, pid: session.pid, tmux: session.tmux }
