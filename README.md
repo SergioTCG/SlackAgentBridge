@@ -359,7 +359,9 @@ private structured handoff, starts or resumes the target's own native
 conversation, validates it privately, and changes the channel mapping only
 after success. The source native leg is then dormant standby state; its terminal
 and provider process have stopped, but its resumable native ID and settings are
-preserved for a round trip.
+preserved for a round trip. Claude Code deletes conversations idle for 30 days
+by default (`cleanupPeriodDays`). When a standby Claude leg's conversation is
+gone, `/sab-switch claude new` replaces it with a new native leg.
 
 Messages arriving during the transaction are queued. Failure or daemon restart
 rolls back to the source. Provider-specific model, effort, flags, and Claude

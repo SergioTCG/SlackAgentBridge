@@ -99,10 +99,14 @@ ${text}--- END HANDOFF ---
 Target provider: ${targetProvider}`
 }
 
+// Claude may render the labels in Markdown, as in `**Objective:**` or a list
+// item. That still confirms readiness.
+const readinessLabel = label => new RegExp(String.raw`^[ \t>#*_+-]*${label}[*_]*[ \t]*:`, 'mi')
+
 export function validateBootstrapReply(reply) {
   const text = String(reply || '').trim()
   if (Buffer.byteLength(text) > 16 * 1024) throw new Error('target readiness reply is unexpectedly large')
-  if (!/^Objective:/mi.test(text) || !/^Next action:/mi.test(text)) {
+  if (!readinessLabel('Objective').test(text) || !readinessLabel('Next action').test(text)) {
     throw new Error('target did not confirm the objective and next action')
   }
   return text

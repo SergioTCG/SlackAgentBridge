@@ -53,3 +53,17 @@ test('target bootstrap is read-only and requires a structured readiness reply', 
   assert.equal(validateBootstrapReply('Objective: finish tests\nNext action: inspect status'), 'Objective: finish tests\nNext action: inspect status')
   assert.throws(() => validateBootstrapReply('looks good'), /did not confirm/)
 })
+
+test('a readiness reply may format its labels as Markdown', () => {
+  // Claude Code answered a real switch this way, and the switch rolled back.
+  const claude = '**Objective:** Keep investigating, read-only.\n\n**Next action:** Search the pinned commit.'
+  assert.equal(validateBootstrapReply(claude), claude)
+  for (const reply of [
+    '**Objective**: finish tests\n**Next action**: inspect status',
+    '- Objective: finish tests\n- Next Action: inspect status',
+    '### Objective: finish tests\n### Next action: inspect status',
+    '__Objective:__ finish tests\n> Next action: inspect status',
+  ]) assert.equal(validateBootstrapReply(reply), reply)
+  assert.throws(() => validateBootstrapReply('The objective: finish tests\nMy next action: inspect status'), /did not confirm/)
+  assert.throws(() => validateBootstrapReply('**Objective:** finish tests'), /did not confirm/)
+})
