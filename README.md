@@ -167,6 +167,12 @@ run from the checkout already named by the live LaunchAgent; invoking it from
 an isolated development worktree fails before changing hooks, configuration,
 Git state, or the public `sab` link.
 
+Existing 2.1 installations should read [Migrating to
+2.2](docs/migrating-to-2.2.md). Version 2.2 adds opt-in account pools for
+switching between Claude or Codex subscriptions, two-phase team task release,
+per-provider updates, and automation release. Nothing new is activated and no
+session state is migrated by the upgrade.
+
 Existing 2.0 installations should read [Migrating to
 2.1](docs/migrating-to-2.1.md). Version 2.1 adds interactive management, App
 Home, durable team scheduling, and the lifecycle/delivery hardening needed for
