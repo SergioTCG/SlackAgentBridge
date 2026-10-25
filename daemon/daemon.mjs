@@ -61,6 +61,7 @@ import {
 import {
   deleteHandoffs, handoffPrompt, readHandoff, targetBootstrapPrompt, validateBootstrapReply, writeHandoff,
 } from './handoffs.mjs'
+import { archivedTeams, dormantChannelCandidates, orphanSessionIds } from './stale-records.mjs'
 import {
   normalizeManagedPolicy, parseManagedRunCommand, sanitizeManagedSnapshot, sanitizeRoutingSnapshot,
 } from '../pi/managed-core.mjs'
@@ -7397,7 +7398,10 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
     let n = 0
     for (const s of dead) {
       try { await web.conversations.archive({ channel: s.channel }); n++ }
-      catch (e) { log('archive failed', s.channel, e?.data?.error); continue }
+      catch (e) {
+        // A channel archived in Slack already only needs its records dropped.
+        if (e?.data?.error !== 'already_archived') { log('archive failed', s.channel, e?.data?.error); continue }
+      }
       deleteLineage(state, s.channel)
       deleteHandoffs(CONFIG_DIR, s.channel)
     }
@@ -8774,6 +8778,78 @@ setInterval(async () => {
     }
   }
 }, 30000)
+
+// ---- archived-channel sweep -------------------------------------------------
+// This Slack app receives no archive events. The liveness sweep notices an
+// archived channel only when its running session ends, so a channel archived
+// after its session stopped kept its records forever. Check stopped sessions'
+// channels at boot and hourly; a running session is left to the liveness sweep.
+let archivedSweepRunning = false
+async function sweepArchivedChannels() {
+  if (archivedSweepRunning) return
+  archivedSweepRunning = true
+  try {
+    // A session has stopped only when its process and terminal are both gone.
+    // A session on another execution node cannot be checked from here.
+    const liveTmux = new Set()
+    for (const session of Object.values(state.sessions || {})) {
+      if (session.tmux && !liveTmux.has(session.tmux) && await tmuxAlive(session.tmux)) liveTmux.add(session.tmux)
+    }
+    const alive = session => {
+      if (!session) return false
+      try { if (nodeIdForSession(session) !== LOCAL_NODE_ID) return true } catch { return true }
+      return Boolean((session.pid && pidAlive(session.pid)) || liveTmux.has(session.tmux) ||
+        resurrectInFlight.has(session.id) || restarting.has(session.id))
+    }
+    const archived = new Set()
+    let failed = 0, lastError = null
+    for (const channel of dormantChannelCandidates(state, { alive })) {
+      try {
+        const info = await web.conversations.info({ channel })
+        if (info.channel?.is_archived) archived.add(channel)
+      } catch (e) { failed++; lastError = e?.data?.error || String(e) }
+      await sleep(200)
+    }
+    if (failed) log('archived sweep:', failed, 'channel check(s) failed, last:', lastError)
+    // The Slack calls yield, so act only on channels still stopped and unused.
+    const stillDormant = new Set(dormantChannelCandidates(state, { alive }))
+    for (const channel of archived) if (!stillDormant.has(channel)) archived.delete(channel)
+    const teams = archivedTeams(state, archived)
+    for (const team of teams) {
+      revokeCancelledTeamTasks(closeTeam(state, team.id).cancelled)
+      for (const memberChannel of Object.keys(team.members)) clearTeamTurn(sessionByChannel(memberChannel))
+    }
+    let channels = 0
+    for (const channel of archived) {
+      // A team with a channel still open keeps all its members; the owner
+      // removes an archived worker with /sab-team remove.
+      try { if (activeTeamForChannel(state, channel)) continue } catch { continue }
+      deleteLineage(state, channel)
+      deleteHandoffs(CONFIG_DIR, channel)
+      channels++
+    }
+    const orphans = orphanSessionIds(state, { alive })
+    for (const sid of orphans) delete state.sessions[sid]
+    if (!teams.length && !channels && !orphans.length) return
+    saveStateNow(state)
+    const removed = [
+      channels && `${channels} archived channel(s)`,
+      orphans.length && `${orphans.length} unreachable session record(s)`,
+    ].filter(Boolean).join(' and ')
+    const closed = teams.map(team => `\`${team.name}\``).join(', ')
+    log('archived sweep: removed', channels, 'channel(s),', orphans.length, 'orphan(s), closed', teams.length, 'team(s)')
+    if (state.control) {
+      await post(state.control, `🧹 Removed SAB records of ${removed || 'no channels'}` +
+        (teams.length ? `, and closed team(s) ${closed} whose channels are all archived.` : '.')).catch(() => {})
+    }
+  } finally {
+    archivedSweepRunning = false
+  }
+}
+setTimeout(() => sweepArchivedChannels().catch(error =>
+  log('archived sweep failed', String(error?.message || error))), 2 * 60000).unref?.()
+setInterval(() => sweepArchivedChannels().catch(error =>
+  log('archived sweep failed', String(error?.message || error))), 60 * 60000).unref?.()
 
 // Input transport failures are independent from process liveness. A live,
 // authoritative provider which has returned to its idle prompt can safely

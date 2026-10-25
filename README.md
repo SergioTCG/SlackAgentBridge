@@ -273,6 +273,12 @@ terminal is never required. A Claude wake is successful only after its exact
 `SessionStart` claim; a provider that exits after briefly creating tmux is
 retried once and then reported visibly while the queued message remains safe.
 
+Archiving a session channel in Slack retires it. Once its sessions have
+stopped, SAB removes the channel's records and saved handoffs within the hour
+and reports this in the control channel; a team whose channels are all
+archived is closed. A session still running in an archived channel continues
+until it ends or you run `/sab-kill <id-prefix>` from any SAB channel.
+
 Management commands are interactive when invoked without arguments. `/sab-model`
 and `/sab-effort` show provider-valid selectors; `/sab-terminal`, `/sab-update`,
 `/sab-switch`, `/sab-new`, and `/sab-team` show bounded buttons or pickers.
