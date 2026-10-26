@@ -32,6 +32,21 @@ Notable changes to this project. Format based on
 - Liaison labelling: a `sab team reply` written in a collaborator-started turn
   is labelled collaborator-originated in JSON and Slack.
 - `sab team inbox --team NAME` filters a nested channel's tasks by team.
+- Scheduled coordinator wakes: `sab team schedule --every 15m|--at ISO
+  [--note TEXT]`, `sab team schedules` and `sab team unschedule`. A due wake is
+  one durable continuation event for that automatic team, with the usual
+  bounded budget and audit trail. Wakes are bounded in number, interval and
+  lifetime, and skipped while draining.
+- `sab team wake --to ALIAS` resumes a dormant worker of the coordinator's team
+  only while it holds an active task there, rate-limited. SAB also wakes a
+  dormant standing worker once per pending coordinator follow-up. No wake ever
+  resurrects a session the owner ended with `/sab-kill`, and automatic
+  continuations now respect that too.
+- `/sab-team unschedule ID` removes a scheduled wake, and `/sab-team manual`
+  removes them all.
+- `sab team tree --json` and the owner's `/sab-team tree` show the team
+  hierarchy: members, roles, availability, active tasks and their states,
+  pending slots and scheduled wakes.
 
 ### Changed
 

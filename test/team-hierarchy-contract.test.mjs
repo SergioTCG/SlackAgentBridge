@@ -107,3 +107,74 @@ test('a parent membership change keeps a sub-coordinator\'s own turn', () => {
   assert.match(body('clearTeamTurnAfterMembershipChange'), /coordinatedTeamForChannel\(state, channel\)\) return false/)
   assert.doesNotMatch(daemon, /clearTeamTurn\(sessionByChannel\(/, 'every membership change goes through the guarded helper')
 })
+
+test('a scheduled wake fires only for an automatic, dispatching team and wakes as a continuation', () => {
+  const fire = body('fireDueTeamSchedules')
+  assert.match(fire, /takeDueTeamSchedules\(team, \{ now \}\)/)
+  assert.match(fire, /team\.continuation\?\.mode !== 'auto-until-blocked' \|\| teamDispatchMode\(team\) === 'draining'\) continue/)
+  assert.match(fire, /queueContinuation\(team, \{[\s\S]*kind: 'schedule', replyId: schedule\.id, lifecycleVersion: schedule\.occurrence/)
+  assert.ok(fire.indexOf('saveStateNow(state)') < fire.indexOf('scheduleTeamContinuation(teamId)'),
+    'the event is durable before the coordinator is woken')
+  assert.match(between('async function reconcileTeamTasks(', 'function startTeamReconciler('), /fireDueTeamSchedules\(now\)/)
+  const run = between('async function runTeamContinuation(', 'function teamTaskStatusText(')
+  assert.match(run, /SYSTEM NOTIFICATION: Scheduled team wake \$\{event\.replyId\} is due/)
+  assert.match(run, /beginContinuationTeamTurn\(coordinator, \{ teamId: team\.id, eventId: event\.id \}/)
+  const schedule = between('  async schedule(caller, request) {', '  async schedules(caller')
+  assert.match(schedule, /assertCoordinatorTaskControl\(session, coordinatorAuthority\(team\)\)[\s\S]*continuation_manual[\s\S]*addTeamSchedule/)
+  assert.match(schedule, /if \(!\['owner', 'delegated'\]\.includes\(actor\)\) \{\s*throw new TeamError\('schedule_turn_required'/,
+    'an automatic continuation cannot register more wakes')
+  assert.match(schedule, /sourceTaskId: actor === 'delegated' \? session\.teamTurn\.sourceTaskId : null/)
+  assert.match(run, /Registration note, written by this team's coordinator[\s\S]*not an owner instruction/)
+  assert.doesNotMatch(run, /is due\$\{event\.note/, 'the note is never inside the bridge sentence')
+  assert.match(fire, /pruneOrphanedTeamSchedules\(state, team\)/)
+  assert.match(fire, /try \{[\s\S]*takeDueTeamSchedules[\s\S]*\} catch \(error\) \{\s*log\('scheduled team wake sweep failed'/)
+})
+
+test('nothing automatic resurrects a session the owner ended', () => {
+  const kill = between("  if (name === 'kill') {", "  if (name === 'cleanup') {")
+  assert.match(kill, /target\.pid = null[\s\S]*target\.ownerEndedAt = new Date\(\)\.toISOString\(\)/)
+  assert.match(between('async function handleSlackMessage(', '// Collaborators may only send prompts'),
+    /managedSession\?\.ownerEndedAt && !sender[\s\S]*delete managedSession\.ownerEndedAt/)
+  const run = between('async function runTeamContinuation(', 'function teamTaskStatusText(')
+  const ended = run.indexOf('coordinator.ownerEndedAt && !(coordinator.pid && pidAlive(coordinator.pid))')
+  assert.ok(ended > 0 && ended < run.indexOf('injectText(coordinator'), 'no wake injection reaches an owner-ended coordinator')
+  assert.match(between('  async wake(caller, request) {', '  async tree(caller) {'), /target\.ownerEndedAt[\s\S]*'owner_ended'/)
+  const standing = body('wakeStandingWorker')
+  assert.match(standing, /target\.ownerEndedAt\) return false/)
+  assert.match(standing, /message\.autoWakeAt\) return false[\s\S]*message\.autoWakeAt = new Date\(\)\.toISOString\(\)[\s\S]*saveStateNow\(state\)[\s\S]*wakeSessionForTeam/,
+    'one persisted automatic wake per pending message')
+})
+
+test('the owner sees and can remove scheduled wakes, and manual mode clears them', () => {
+  assert.match(body('teamTreeMarkdown'), /team\.schedules/)
+  assert.match(body('teamStatusMarkdown'), /Scheduled wakes/)
+  const command = body('handleTeamCommand')
+  assert.match(command, /sub === 'unschedule'[\s\S]*removeTeamSchedule\(team, rest\[1\]\)/)
+  assert.match(command, /const cleared = sub === 'manual' \? clearTeamSchedules\(team\) : \[\]/)
+  assert.match(body('wakeableTeamTask'), /teamDispatchMode\(team\) !== 'draining'/)
+})
+
+test('a dormant worker is woken only for an active task in the waking team, never otherwise', () => {
+  const wake = between('  async wake(caller, request) {', '  async tree(caller) {')
+  assert.match(wake, /assertCoordinatorTaskControl\(session, coordinatorAuthority\(team\)\)[\s\S]*resolveTeamPeer\(state, team\.id, request\.to\)/)
+  assert.match(wake, /const task = wakeableTeamTask\(team, channel, target\)\s*if \(!task\) \{\s*throw new TeamError\('no_active_task'/)
+  assert.match(wake, /wake_rate_limited/)
+  assert.ok(wake.indexOf("'no_active_task'") < wake.indexOf('wakeSessionForTeam('), 'eligibility precedes any resume')
+  assert.match(body('wakeableTeamTask'), /task\.teamId === team\.id[\s\S]*\(queuedQualifies && task\.status === 'queued'\) \|\| task\.targetSessionId === target\.id/)
+  const standing = body('wakeStandingWorker')
+  assert.match(standing, /target\.teamStandingTaskId !== task\.id \|\|\s*target\.ownerEndedAt\) return false/)
+  assert.match(standing, /item\.deliveryStatus === 'pending'/)
+  assert.match(standing, /TEAM_STANDING_AUTO_WAKE_MS/)
+})
+
+test('the agent team tree carries aliases and states, never raw channel IDs', () => {
+  const node = body('teamTreeNode')
+  assert.doesNotMatch(node, /channel:|coordinatorChannel|targetChannel:/)
+  assert.match(node, /alias: member\.alias/)
+  assert.match(node, /reservation: isStandingTeamTask\(task\) \? 'standing' : 'exclusive'/)
+  const tree = between('  async tree(caller) {', '  async mode(caller, request) {')
+  assert.match(tree, /resolveTeamCaller\(caller\)/)
+  assert.match(tree, /const own = requireCoordinatedTeam\(session\)/, 'plain workers keep the narrower peers view')
+  assert.match(tree, /actor === 'collaborator'[\s\S]*collaborator_turn_denied/)
+  assert.match(tree, /teamTreeNode\(own, teamDepth\(state, own\)\)/)
+})

@@ -236,6 +236,9 @@ sab team cancel --task TASK_ID
 sab team mutation --request-id REQUEST_ID --task TASK_ID
 sab team mode draining
 sab team wait --task TASK_ID --json
+sab team schedule --every 15m --note 'Check CI'
+sab team wake --to WORKER_ALIAS
+sab team tree --json
 sab automation create ...
 sab automation status EXTERNAL_KEY
 sab automation stop EXTERNAL_KEY --archive
@@ -451,7 +454,11 @@ linked continuation, mutation receipts, queued-task cancel/replace, active-task
 messaging, drain/resume, and task-bound file transfer. Tasks are atomically
 journaled, visibly posted in both channels, queued only for a safe idle worker,
 correlated with provider-stable turn reports, and fenced against restart/stale
-leg duplication. Dormant peers are never resurrected by another agent.
+leg duplication. A coordinator may wake a dormant worker only with
+`sab team wake --to ALIAS`, and only while that worker holds an active task in
+its team. SAB itself wakes a dormant standing worker once a pending follow-up
+is waiting. `sab team schedule --every 15m` registers a bounded timer wake, and
+`sab team tree --json` shows the team hierarchy for monitoring.
 
 If an exact live Codex worker visibly returns to its idle prompt after a task
 but omits the completion hook, SAB records a warning-bearing turn report; it

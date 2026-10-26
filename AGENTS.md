@@ -140,7 +140,9 @@ generated MCP configuration. Do not print secrets during diagnostics.
   reserves or reports its provider turns; its follow-ups enter only an idle
   input surface. Opt-in auto-release may perform only an exact release that
   the coordinator could perform. A team closes when its coordinator channel is
-  archived. An exhausted automatic turn may renew one bounded
+  archived. A coordinator-registered scheduled wake is a bounded continuation
+  event for its exact automatic team. A dormant worker may be woken only for
+  an active task of the waking team, never otherwise. An exhausted automatic turn may renew one bounded
   dispatch budget only by atomically claiming an authenticated pending worker
   event for that exact team. Durable drain mode must let active work finish while
   blocking queued claims and continuation wakes. Worker replies, checkpoints,

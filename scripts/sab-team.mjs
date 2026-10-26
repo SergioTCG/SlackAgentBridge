@@ -30,6 +30,11 @@ function usage(message = '') {
   sab team cancel --task TASK_ID [--reason TEXT] [--request-id ID]
   sab team mutation --request-id ID [--task TASK_ID]
   sab team mode <active|draining> [--team TEAM]
+  sab team schedule (--every 15m | --at ISO) [--note TEXT] [--team TEAM] [--request-id ID]
+  sab team schedules [--team TEAM] [--json]
+  sab team unschedule --id SCHEDULE_ID [--team TEAM]
+  sab team wake --to ALIAS [--team TEAM]
+  sab team tree [--json]
 
 Team identity and destinations are resolved by the bridge. These commands must
 run inside an authoritative live Slack Agent Bridge session. A channel that
@@ -345,6 +350,65 @@ try {
     const rest = teamIndex >= 0 ? args.filter((_, index) => index !== teamIndex && index !== teamIndex + 1) : args
     if (rest.length !== 1 || !['active', 'draining'].includes(rest[0])) usage('mode requires active or draining')
     output(await request('/team/mode', { method: 'POST', body: { mode: rest[0], ...(team ? { team } : {}) } }))
+  } else if (command === 'schedule') {
+    let every = null
+    let at = null
+    let note = ''
+    let team = null
+    let requestId = null
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--every') { every = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--at') { at = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--note') { note = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--team') { team = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--request-id') { requestId = value(args, i, args[i]); i++; continue }
+      usage(`unknown schedule option: ${args[i]}`)
+    }
+    if (Boolean(every) === Boolean(at)) usage('schedule requires exactly one of --every or --at')
+    const stableId = requestId || crypto.randomUUID()
+    let result
+    try {
+      result = await request('/team/schedule', {
+        method: 'POST', body: { every, at, note, requestId: stableId, ...(team ? { team } : {}) },
+      })
+    } catch (error) {
+      error.message = `${error.message}; retry safely with --request-id ${stableId}`
+      throw error
+    }
+    output({ ...result.schedule, created: result.created })
+  } else if (command === 'schedules') {
+    let team = null
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--json') continue
+      if (args[i] === '--team') { team = value(args, i, args[i]); i++; continue }
+      usage(`unknown schedules option: ${args[i]}`)
+    }
+    output((await request(`/team/schedules${team ? `?${new URLSearchParams({ team })}` : ''}`)).schedules)
+  } else if (command === 'unschedule') {
+    let id = null
+    let team = null
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--id') { id = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--team') { team = value(args, i, args[i]); i++; continue }
+      usage(`unknown unschedule option: ${args[i]}`)
+    }
+    if (!id) usage('unschedule requires --id')
+    output((await request('/team/unschedule', { method: 'POST', body: { id, ...(team ? { team } : {}) } })).schedule)
+  } else if (command === 'wake') {
+    let to = null
+    let team = null
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--to') { to = value(args, i, args[i]); i++; continue }
+      if (args[i] === '--team') { team = value(args, i, args[i]); i++; continue }
+      usage(`unknown wake option: ${args[i]}`)
+    }
+    if (!to) usage('wake requires --to')
+    const result = await request('/team/wake', { method: 'POST', body: { to, ...(team ? { team } : {}) } })
+    delete result.ok
+    output(result)
+  } else if (command === 'tree') {
+    if (args.some(arg => arg !== '--json')) usage('tree accepts only --json')
+    output((await request('/team/tree')).tree)
   } else if (command === 'wait') {
     let taskId = null
     let timeoutSeconds = 3600

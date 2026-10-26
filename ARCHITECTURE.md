@@ -487,6 +487,14 @@ coordinator with a `released` event. A team whose coordinator channel is
 archived is closed by the hourly sweep, which removes that coordinator from its
 parent team.
 
+`team.schedules` holds at most eight coordinator-registered wakes. The team
+reconciler turns each due wake into one `schedule` continuation event, keyed by
+schedule and occurrence and carrying its sanitized note. It does so only in
+automatic, dispatching teams; elsewhere occurrences are skipped. `sab team
+wake` resumes a dormant worker through the ordinary `resurrect` path, only for
+an active task of the caller's team and at a bounded rate. The reconciler does
+the same for a dormant standing worker with a pending coordinator message.
+
 The agent surface is `sab team`, never Slack Web API access. Its loopback request
 derives the source from process ancestry and requires exact PID, tmux, provider,
 native session, active channel mapping, and local node. Agent-visible peers and
@@ -894,6 +902,9 @@ Team endpoints are:
 - `POST /team/send`, `/team/reply`, `/team/checkpoint`, `/team/complete`,
   `/team/release`, `/team/continue`, `/team/message`, `/team/replace`,
   `/team/cancel`, and `/team/mode`
+- `POST /team/schedule`, `/team/unschedule` and `/team/wake`; `GET
+  /team/schedules` and `/team/tree` (coordinator controls with their own
+  receipts, not task mutations)
 
 Every endpoint rejects browser origins and non-loopback Host values. Team
 mutations additionally require exact provider-process/tmux ancestry; no bearer
