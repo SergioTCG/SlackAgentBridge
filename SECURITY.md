@@ -103,9 +103,14 @@ accounts, and the Mac user running the daemon.
   delegated turn, which handles its standing parent task or a coordinator
   message for it. Authority thus flows down only with an authorized task. A
   delegated turn is valid only while that exact standing task is active and
-  bound to that exact native session. Its acknowledgement after a restart
-  requires the digest journaled before submission. Collaborator and unrelated
-  terminal turns fail closed. A coordinator may cancel/replace only its queued
+  bound to that exact native session. A standing worker accepts Slack prompts,
+  so a prompt that merely quotes a standing envelope proves nothing. The hook
+  acknowledges a standing task or message only by the exact digest journaled
+  before SAB's own submission, for a delivery that is still pending. It never
+  converts an owner, collaborator or continuation turn into a delegated one.
+  Collaborator messages are refused while a standing delivery holds its fence.
+  A collaborator-started turn cannot checkpoint, complete, or wake or renew the
+  coordinator above. Collaborator and unrelated terminal turns fail closed. A coordinator may cancel/replace only its queued
   work and may message only the exact active task/session it created; the
   message is journaled before visible Slack and provider delivery, and an
   uncertain provider attempt is never replayed. A worker may reply only while

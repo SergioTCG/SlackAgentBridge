@@ -80,3 +80,30 @@ test('worker commands accept either exact bound projection and label collaborato
   assert.match(body('beginSlackTeamTurn'), /beginCollaboratorTeamTurn\(session, request, \{ sender \}\)/)
   assert.match(body('coordinatorAuthority'), /state \}/)
 })
+
+test('collaborator-started turns neither join a standing task turn nor move the lifecycle', () => {
+  const inbound = between('async function handleSlackMessage(', 'function uncertainTeamProviderInput(')
+  const collaborator = inbound.slice(inbound.indexOf('if (sender) {'))
+  const fence = collaborator.indexOf("startsWith('team-standing')")
+  const inject = collaborator.indexOf('injectText(session')
+  assert.ok(fence > 0 && inject > fence, 'collaborator text is refused while a standing fence is held')
+  const reply = between('  async reply(caller, request) {', '  async checkpoint(caller, request) {')
+  assert.match(reply, /if \(origin && request\.pendingGates !== undefined\) \{\s*throw new TeamError\('collaborator_turn_denied'/)
+  assert.match(reply, /const continuationTeamId = !reply\.origin && shouldWakeForTeamReply/)
+  assert.match(reply, /const continuationTeamId = !appended\.reply\.origin && shouldWakeForTeamReply/)
+  assert.match(between('  async complete(caller, request) {', '  async release(caller, request) {'),
+    /!priorRequest && session\.teamTurn\?\.actor === 'collaborator'[\s\S]*collaborator_turn_denied/)
+})
+
+test('standing deliveries respect Pi managed runs and recover from a Pi input rejection', () => {
+  assert.match(body('standingTargetIdle'), /\['active', 'paused'\]\.includes\(target\.managed\?\.status\) && target\.piRouting\?\.status !== 'routing'/)
+  const inputError = daemon.slice(daemon.indexOf("if (provider === 'pi' && ev === 'InputError') {"),
+    daemon.indexOf("if (provider === 'pi' && ev === 'ManagedCheckpoint') {"))
+  assert.match(inputError, /session\.teamTurn\?\.actor === 'delegated' && session\.teamTurn\.sourceTaskId === standing\.id[\s\S]*clearTeamTurn\(session\)/)
+  assert.match(inputError, /rejected input while receiving standing task/)
+})
+
+test('a parent membership change keeps a sub-coordinator\'s own turn', () => {
+  assert.match(body('clearTeamTurnAfterMembershipChange'), /coordinatedTeamForChannel\(state, channel\)\) return false/)
+  assert.doesNotMatch(daemon, /clearTeamTurn\(sessionByChannel\(/, 'every membership change goes through the guarded helper')
+})

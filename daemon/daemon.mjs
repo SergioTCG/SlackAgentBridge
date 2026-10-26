@@ -2524,11 +2524,25 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
   }
   if (provider === 'pi' && ev === 'InputError') {
     const reason = String(body.error || 'Pi could not accept that input.').slice(0, 500)
+    const standingFence = String(session.teamInputReservation?.source || '').startsWith('team-standing')
     clearTeamInputReservation(session)
     if (session.teamActiveTaskId) {
       discardQueuedTeamTaskPrompt(session, session.teamActiveTaskId)
       await failTeamTaskForSession(session, `Pi rejected the delegated input: ${reason}`)
-    } else saveStateNow(state)
+    } else {
+      // A standing task's input was written over the stream, so its record
+      // may say delivered although Pi refused it. Release its authority and
+      // say so in both channels rather than guess which prompt was refused.
+      const standing = session.teamStandingTaskId ? state.teamTasks?.[session.teamStandingTaskId] : null
+      if (standing && session.teamTurn?.actor === 'delegated' && session.teamTurn.sourceTaskId === standing.id) {
+        clearTeamTurn(session)
+      }
+      saveStateNow(state)
+      if (standing && standingFence) {
+        await post(standing.sourceChannel,
+          `⚠️ Pi in <#${standing.targetChannel}> rejected input while receiving standing task \`${standing.id}\` or its latest coordinator message: ${reason} Check \`sab team inbox\` and resend with \`sab team message\` if needed.`).catch(() => {})
+      }
+    }
     if (session.channel) await post(session.channel, `⚠️ ${reason}`)
     return
   }
@@ -3950,6 +3964,11 @@ async function handleSlackMessage(channel, text, sender, request) {
     if (!(session.pid && pidAlive(session.pid))) {
       return post(channel, `💤 Session is dormant — <@${sender.id}>’s message wasn’t delivered. Only the owner can resume it.`)
     }
+    // A turn handling a standing team task or its coordinator message carries
+    // team authority; collaborator text must not join that turn.
+    if (String(session.teamInputReservation?.source || '').startsWith('team-standing')) {
+      return post(channel, `⏳ This session is handling a coordinator task — <@${sender.id}>’s message wasn’t delivered. Send it again when the turn finishes.`)
+    }
     const attributed = `[Slack collaborator ${sender.name}]\n${trimmed}`
     beginSlackTeamTurn(session, sender, request)
     reserveTeamInput(session, 'slack')
@@ -4968,7 +4987,9 @@ function standingTargetIdle(target, task, fence = null) {
     !target.codexTurnStartedAt && !target.piTurnStartedAt && !pollers.has(target.id) &&
     !codexPollers.has(target.id) && !piPollers.has(target.id) && !internalTurns.has(target.id) &&
     !switchingSids.has(target.id) && !activeTransition(target.channel) && !restarting.has(target.id) &&
-    !resurrectInFlight.has(target.id))
+    !resurrectInFlight.has(target.id) &&
+    // A managed Pi run, even paused, rejects ordinary prompts.
+    !['active', 'paused'].includes(target.managed?.status) && target.piRouting?.status !== 'routing')
 }
 
 function coordinatorTaskMessageTargetMatches(task, target, expected, { fence = null } = {}) {
@@ -5404,6 +5425,8 @@ function repairDurableTeamBindings({ now = Date.now() } = {}) {
     saveStateNow(state)
     for (const repair of bindingRepair.repairs) {
       log('reconciled team/session binding', repair.sessionId.slice(0, 8), repair.taskId, repair.reason)
+      // A standing binding owns no provider turn, so there is no proof to restore.
+      if (repair.field === 'teamStandingTaskId') continue
       if (repair.reason === 'restored_durable_task_binding' &&
           (pollers.has(repair.sessionId) || codexPollers.has(repair.sessionId) || piPollers.has(repair.sessionId))) {
         const session = state.sessions?.[repair.sessionId]
@@ -6087,7 +6110,7 @@ const teamService = {
       const workerProof = !isStandingTeamTask(task) && (appended.accepted ||
         (task.status === 'running' && session.teamActiveTaskId === task.id))
       const startCodexStatus = workerProof && recordTeamWorkerProof(session, task)
-      const continuationTeamId = shouldWakeForTeamReply(state.teams?.[task.teamId], appended)
+      const continuationTeamId = !appended.reply.origin && shouldWakeForTeamReply(state.teams?.[task.teamId], appended)
         ? stageTeamContinuation(task, {
             kind: 'reply', replyId: appended.reply.id,
             lifecycleVersion: appended.reply.lifecycleVersion || task.lifecycleVersion,
@@ -6116,10 +6139,14 @@ const teamService = {
     }
     const { member } = resolveTeamPeer(state, task.teamId, session.channel)
     // Collaborators gain no authority from a reply, but a liaison's coordinator
-    // sees which updates a collaborator's turn produced.
+    // sees which updates a collaborator's turn produced. Such a turn may not
+    // move the task lifecycle: gates and completion stay the worker's own.
     const origin = session.teamTurn?.actor === 'collaborator'
       ? { kind: 'collaborator', ...(session.teamTurn.collaborator || {}) }
       : null
+    if (origin && request.pendingGates !== undefined) {
+      throw new TeamError('collaborator_turn_denied', 'A collaborator-started turn cannot change task gates.', 403)
+    }
     const replyId = `reply_${crypto.randomBytes(12).toString('base64url')}`
     if (request.paths?.length && !member.files) throw new TeamError('files_not_allowed', 'File relay is not enabled for this worker.', 403)
     let files = []
@@ -6151,7 +6178,9 @@ const teamService = {
       }
     }
     const startCodexStatus = !isStandingTeamTask(task) && recordTeamWorkerProof(session, task)
-    const continuationTeamId = shouldWakeForTeamReply(state.teams?.[task.teamId], appended)
+    // A collaborator-originated update is delivered and kept in the inbox, but
+    // it never wakes, or renews the budget of, the coordinator above.
+    const continuationTeamId = !reply.origin && shouldWakeForTeamReply(state.teams?.[task.teamId], appended)
       ? stageTeamContinuation(task, {
           kind: 'reply', replyId: reply.id,
           lifecycleVersion: reply.lifecycleVersion || task.lifecycleVersion,
@@ -6191,6 +6220,9 @@ const teamService = {
       .find(item => item?.requestId === request.requestId)
     if (!priorRequest && boundTeamTaskIdFor(session, task) !== task.id) {
       throw new TeamError('completion_not_allowed', 'This live worker session does not own that active task.', 403)
+    }
+    if (!priorRequest && session.teamTurn?.actor === 'collaborator') {
+      throw new TeamError('collaborator_turn_denied', 'A collaborator-started turn cannot declare a task complete.', 403)
     }
     if (!Number.isSafeInteger(Number(request.providerWorkGeneration)) || Number(request.providerWorkGeneration) < 1) {
       throw new TeamError('invalid_work_generation',
@@ -7153,6 +7185,16 @@ async function autoReleaseTeamTask(task) {
   return true
 }
 
+// A membership change ends the turn authority that membership granted. A
+// member that also coordinates its own, still-active team keeps its owner or
+// continuation turn there; a delegated turn sourced from this team's task is
+// revoked with that task by revokeCancelledTeamTasks.
+function clearTeamTurnAfterMembershipChange(channel) {
+  const session = sessionByChannel(channel)
+  if (!session?.teamTurn || coordinatedTeamForChannel(state, channel)) return false
+  return clearTeamTurn(session)
+}
+
 function revokeCancelledTeamTasks(ids) {
   for (const id of ids) {
     const task = state.teamTasks?.[id]
@@ -7286,7 +7328,7 @@ async function handleTeamCommand(channel, rest, request = null) {
     try {
       const result = removeTeamWorker(state, team.id, rest[1])
       revokeCancelledTeamTasks(result.cancelled)
-      clearTeamTurn(sessionByChannel(result.channel))
+      clearTeamTurnAfterMembershipChange(result.channel)
       saveStateNow(state)
       await announceCancelledTeamTasks(result.cancelled)
       const targetNotified = await post(result.channel,
@@ -7304,7 +7346,7 @@ async function handleTeamCommand(channel, rest, request = null) {
     const memberChannels = Object.keys(team.members)
     const result = closeTeam(state, team.id)
     revokeCancelledTeamTasks(result.cancelled)
-    for (const memberChannel of memberChannels) clearTeamTurn(sessionByChannel(memberChannel))
+    for (const memberChannel of memberChannels) clearTeamTurnAfterMembershipChange(memberChannel)
     saveStateNow(state)
     await announceCancelledTeamTasks(result.cancelled)
     for (const memberChannel of memberChannels) {
@@ -7949,7 +7991,7 @@ async function terminateAutomation(record) {
   for (const departure of teamDepartures) {
     revokeCancelledTeamTasks(departure.cancelled)
     if (departure.kind === 'closed') {
-      for (const memberChannel of departure.memberChannels) clearTeamTurn(sessionByChannel(memberChannel))
+      for (const memberChannel of departure.memberChannels) clearTeamTurnAfterMembershipChange(memberChannel)
     }
   }
   detachAutomationState(state, record)
@@ -9150,7 +9192,7 @@ async function sweepArchivedChannels() {
     const departures = []
     for (const team of teams) {
       revokeCancelledTeamTasks(closeTeam(state, team.id).cancelled)
-      for (const memberChannel of Object.keys(team.members)) clearTeamTurn(sessionByChannel(memberChannel))
+      for (const memberChannel of Object.keys(team.members)) clearTeamTurnAfterMembershipChange(memberChannel)
       // The archived coordinator can no longer work for a team above it.
       const parent = archivedCoordinators.has(team.coordinatorChannel)
         ? parentTeamForChannel(state, team.coordinatorChannel) : null

@@ -197,7 +197,16 @@ A worker with a standing task may take prompts from its invited collaborators,
 since a standing task does not reserve its turns. A `sab team reply` written
 in a turn a collaborator started is labelled `origin: collaborator` in JSON
 and *collaborator-originated* in Slack, so the coordinator can weigh it as a
-suggestion. Collaborators still gain no dispatch or membership authority.
+suggestion. Collaborators still gain no dispatch or membership authority:
+
+- such an update reaches the coordinator's channel and inbox, but never wakes
+  the coordinator or renews its budget;
+- a collaborator-started turn cannot change gates or declare completion;
+- collaborator messages are refused while the worker is handling a coordinator
+  task or follow-up;
+- a prompt that quotes a standing envelope is never mistaken for one, because
+  acknowledgement requires the exact digest SAB journaled for a delivery that
+  is still pending.
 
 ### Closing
 

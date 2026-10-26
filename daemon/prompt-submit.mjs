@@ -10,23 +10,26 @@ import {
   retireTeamProviderTurn, teamPromptDigest, unacknowledgedPromptTeamEffect,
 } from './team-provider-turn.mjs'
 
-// A standing task's envelope or coordinator message is the bridge's own input
-// only with exact provenance: the in-memory injection record, or the digest
-// journaled before submission. Returns what the prompt acknowledges, if any.
+// A standing worker accepts Slack prompts, so a prompt that merely quotes a
+// standing envelope proves nothing: every Slack message is bridge-injected
+// text. Only the exact digest journaled before SAB's own submission, for a
+// delivery that is still pending, acknowledges a standing task or message.
 export function standingTeamPromptAcknowledgement(state, session, {
-  promptTurn, prompt, injected = false, isTaskEnvelope = false,
+  promptTurn, prompt, isTaskEnvelope = false,
 } = {}) {
   const task = session?.teamStandingTaskId ? state.teamTasks?.[session.teamStandingTaskId] : null
   if (!task || !isStandingTeamTask(task) || promptTurn?.taskId !== task.id ||
       task.targetSessionId !== session.id || task.targetChannel !== session.channel) return null
   const digest = teamPromptDigest(prompt)
+  if (!digest) return null
   if (isTaskEnvelope) {
-    if (!injected && !(task.promptHash && digest === task.promptHash)) return null
+    if (task.status !== 'dispatching' || !task.promptHash || digest !== task.promptHash) return null
     return { task, message: null }
   }
   const generation = Number(promptTurn.providerWorkGeneration)
   const message = (task.messages || []).find(item => Number(item.workGeneration) === generation) || null
-  if (!message || (!injected && !(message.promptHash && digest === message.promptHash))) return null
+  if (!message || !message.promptHash || digest !== message.promptHash ||
+      !['delivering', 'uncertain'].includes(message.providerDeliveryStatus)) return null
   return { task, message }
 }
 import { unwrapPastedContent } from './util.mjs'
@@ -108,7 +111,7 @@ export function createPromptSubmitHandler({
       Number.isSafeInteger(promptTeamTurn.providerWorkGeneration) &&
       promptTeamTurn.providerWorkGeneration < teamTaskProviderWorkGeneration(task))
     const standingAck = providerInternal ? null : standingTeamPromptAcknowledgement(state, session, {
-      promptTurn: promptTeamTurn, prompt: deliveredPrompt, injected,
+      promptTurn: promptTeamTurn, prompt: deliveredPrompt,
       isTaskEnvelope: Boolean(teamTaskId && teamTaskId === promptTeamTurn?.taskId),
     })
     let acknowledgedCoordinatorMessage = null
@@ -184,8 +187,11 @@ export function createPromptSubmitHandler({
       // settles the exact dispatch or coordinator message it carries, and
       // attaches the sub-team authority it carries to this exact turn.
       try {
+        // Authority re-attaches only where the attempt's own fence was
+        // released (an uncertain write). An owner, collaborator or
+        // continuation turn is never converted into a delegated one.
         const ownTeam = coordinatedTeamForChannel(state, session.channel)
-        if (ownTeam && session.teamTurn?.actor !== 'delegated') {
+        if (ownTeam && !session.teamTurn) {
           beginDelegatedTeamTurn(session, { teamId: ownTeam.id, sourceTaskId: standingAck.task.id })
           saveStateNow(state)
         }
