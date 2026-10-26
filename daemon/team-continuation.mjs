@@ -37,7 +37,7 @@ const eventKeys = event => Array.isArray(event?.coalescedKeys)
   : event?.key ? [event.key] : []
 
 export function queueContinuation(team, {
-  taskId, kind = 'completed', replyId = null, lifecycleVersion = null, now = Date.now(),
+  taskId, kind = 'completed', replyId = null, lifecycleVersion = null, note = null, now = Date.now(),
 } = {}) {
   const continuation = continuationFor(team, { create: true })
   if (continuation.mode !== 'auto-until-blocked') return { created: false, event: null }
@@ -56,6 +56,8 @@ export function queueContinuation(team, {
     id: `team_event_${crypto.randomBytes(10).toString('base64url')}`,
     key, taskId: String(taskId || ''), replyId: replyId ? String(replyId) : null, kind: String(kind || 'completed'),
     lifecycleVersion: lifecycleVersion == null ? null : Number(lifecycleVersion),
+    // A scheduled wake carries its coordinator-written note into the prompt.
+    ...(note ? { note: String(note).slice(0, 500) } : {}),
     status: 'queued', createdAt: nowIso(now), updatedAt: nowIso(now),
   }
   continuation.pending.push(event)

@@ -122,7 +122,8 @@ import {
 import {
   LEGACY_COMPLETION_POLICY, TeamError, activeTeamForChannel, activeTeams, addTeamWorker, appendCoordinatorTaskMessage, appendTeamTaskCheckpoint,
   appendTeamTaskReply, beginDelegatedTeamTurn, boundTeamTaskIdFor, coordinatedTeamForChannel, isStandingTeamTask,
-  parentTeamForChannel, setTeamAutoRelease, teamAutoRelease,
+  parentTeamForChannel, setTeamAutoRelease, teamAutoRelease, addTeamSchedule, publicTeamSchedule, removeTeamSchedule,
+  takeDueTeamSchedules, teamDepth,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
   beginCoordinatorTaskMessageDelivery,
@@ -4562,10 +4563,15 @@ async function runTeamContinuation(teamId) {
     beginContinuationTeamTurn(coordinator, { teamId: team.id, eventId: event.id }, { budget: 20 })
     saveStateNow(state)
     const eventDescription = Number(event.coalescedCount) > 1
-      ? `${event.coalescedCount} queued team events (latest task ${event.taskId})`
+      ? `${event.coalescedCount} queued team events (latest ${event.kind === 'schedule' ? `scheduled wake ${event.replyId}` : `task ${event.taskId}`})`
       : `a new ${event.kind} event (task ${event.taskId})`
+    // A scheduled wake is this coordinator's own registration coming due; its
+    // note is text the coordinator wrote, with any envelope-like brackets removed.
+    const lead = event.kind === 'schedule' && !(Number(event.coalescedCount) > 1)
+      ? `SYSTEM NOTIFICATION: Scheduled team wake ${event.replyId} is due${event.note ? ` (note: ${event.note})` : ''}. `
+      : `SYSTEM NOTIFICATION: Team executors produced ${eventDescription}. `
     await injectText(coordinator,
-      `SYSTEM NOTIFICATION: Team executors produced ${eventDescription}. ` +
+      lead +
       'Read the authoritative team inbox and context now. Handle any blocker or dispatch the next approved, non-overlapping slice. ' +
       'Do not assume the event payload is complete.',
       { privateContext: `\n\n${coordinatorPromptContext(state, coordinator.channel)}` })
@@ -5452,11 +5458,39 @@ function repairDurableTeamBindings({ now = Date.now() } = {}) {
   return bindingRepair
 }
 
+// A due scheduled wake becomes one durable continuation event for its exact
+// team. It fires only while the team is automatic and dispatching; otherwise
+// the occurrence is skipped rather than saved up into a burst.
+function fireDueTeamSchedules(now = Date.now()) {
+  const woken = []
+  let changed = false
+  for (const team of activeTeams(state)) {
+    if (!team.schedules?.length) continue
+    const due = takeDueTeamSchedules(team, { now })
+    if (!due.length) continue
+    changed = true
+    if (team.continuation?.mode !== 'auto-until-blocked' || teamDispatchMode(team) === 'draining') continue
+    for (const schedule of due) {
+      try {
+        const queued = queueContinuation(team, {
+          taskId: '', kind: 'schedule', replyId: schedule.id, lifecycleVersion: schedule.occurrence,
+          note: schedule.note || null, now,
+        })
+        if (queued.event) woken.push(team.id)
+      } catch (error) { log('scheduled team wake not queued', team.id, schedule.id, String(error?.message || error)) }
+    }
+  }
+  if (!changed) return
+  saveStateNow(state)
+  for (const teamId of new Set(woken)) scheduleTeamContinuation(teamId)
+}
+
 async function reconcileTeamTasks() {
   if (teamReconcileRunning) return
   teamReconcileRunning = true
   try {
     const now = Date.now()
+    fireDueTeamSchedules(now)
     repairDurableTeamBindings({ now })
     // A daemon crash can occur after provider submission was promoted but
     // before its overtaking final was flushed. Consume settled exact boundaries
@@ -5514,7 +5548,12 @@ async function reconcileTeamTasks() {
         }
         if (task.status === 'awaiting_release' || isStandingTeamTask(task)) {
           const target = task.targetSessionId ? state.sessions?.[task.targetSessionId] : null
-          if (!target?.pid || !pidAlive(target.pid) || !target.tmux || !(await tmuxAlive(target.tmux))) continue
+          if (!target?.pid || !pidAlive(target.pid) || !target.tmux || !(await tmuxAlive(target.tmux))) {
+            // A standing worker is expected to be reachable: SAB wakes it once
+            // for a pending follow-up rather than leaving it dormant for days.
+            if (isStandingTeamTask(task) && !(target?.pid && pidAlive(target.pid))) wakeStandingWorker(task, target)
+            continue
+          }
         }
         await ensureCoordinatorTaskMessageDelivery(task, message).catch(error => {
           // Dormancy and ordered predecessors are expected durable deferrals,
@@ -5919,6 +5958,91 @@ function requireCoordinatorDispatch(session, team, authority = coordinatorAuthor
     assertCoordinatorDispatch(session, authority)
   }
   return authority
+}
+
+// ---- waking dormant workers ----------------------------------------------
+// A dormant worker is resumed only when it holds an active task in the
+// waking team: queued for its channel, or bound to its exact native session.
+// Waking never resurrects a session without one, and is rate-limited.
+const TEAM_WAKE_INTERVAL_MS = 2 * 60 * 1000
+const TEAM_STANDING_AUTO_WAKE_MS = 10 * 60 * 1000
+const teamWakeAttempts = new Map() // session ID → last wake request
+const standingAutoWakes = new Map() // task ID → last automatic wake
+
+function wakeableTeamTask(team, channel, target) {
+  return Object.values(state.teamTasks || {}).find(task => task.teamId === team.id &&
+    task.targetChannel === channel && isActiveTeamTask(task) &&
+    (task.status === 'queued' || task.targetSessionId === target.id)) || null
+}
+
+function wakeSessionForTeam(target, reason) {
+  if (activeTransition(target.channel) || updatingSessions.has(target.id) || restarting.has(target.id) ||
+      resurrectInFlight.has(target.id)) return false
+  teamWakeAttempts.set(target.id, Date.now())
+  log('team wake', target.id.slice(0, 8), reason)
+  setImmediate(() => resurrect(target).catch(error =>
+    log('team wake failed', target.id.slice(0, 8), String(error?.message || error))))
+  return true
+}
+
+function wakeStandingWorker(task, target) {
+  if (!target || state.sessions?.[target.id] !== target || target.channel !== task.targetChannel ||
+      state.channels?.[task.targetChannel] !== target.id || target.teamStandingTaskId !== task.id) return false
+  if (!(task.messages || []).some(message => message.deliveryStatus === 'pending')) return false
+  const last = standingAutoWakes.get(task.id) || 0
+  if (Date.now() - last < TEAM_STANDING_AUTO_WAKE_MS) return false
+  standingAutoWakes.set(task.id, Date.now())
+  if (!wakeSessionForTeam(target, `standing task ${task.id} has a pending coordinator message`)) return false
+  void post(task.targetChannel, `⏰ Waking this standing worker: task \`${task.id}\` has a pending coordinator message.`).catch(() => {})
+  return true
+}
+
+function teamTreeNode(team, depth = 1) {
+  return {
+    name: team.name,
+    depth,
+    dispatchMode: teamDispatchMode(team),
+    continuation: team.continuation?.mode || 'manual',
+    autoRelease: teamAutoRelease(team),
+    members: Object.entries(team.members || {}).map(([channel, member]) => {
+      const session = sessionByChannel(channel)
+      const authoritative = Boolean(session && state.channels?.[channel] === session.id && session.channel === channel)
+      const live = authoritative && Boolean(session.pid && pidAlive(session.pid))
+      const sub = member.role === 'worker' ? coordinatedTeamForChannel(state, channel) : null
+      return {
+        alias: member.alias,
+        role: member.role,
+        provider: authoritative ? providerOf(session) : null,
+        availability: !authoritative ? 'unavailable' : live ? 'live' : 'dormant',
+        ...(member.addedBy?.kind ? { addedBy: member.addedBy.kind } : {}),
+        coordinatesTeam: sub?.name || null,
+        activeTasks: Object.values(state.teamTasks || {})
+          .filter(task => task.teamId === team.id && task.targetChannel === channel && isActiveTeamTask(task))
+          .map(task => ({
+            id: task.id,
+            status: task.status,
+            reservation: isStandingTeamTask(task) ? 'standing' : 'exclusive',
+            pendingGates: [...(task.pendingGates || [])],
+            releaseReady: teamTaskReleaseReady(task),
+            updatedAt: task.updatedAt || task.createdAt,
+          })),
+        ...(sub && depth < 4 ? { team: teamTreeNode(sub, depth + 1) } : {}),
+      }
+    }),
+    pending: Object.values(team.pendingMembers || {}).map(reservation => ({
+      alias: reservation.alias, ...(reservation.createsTeam ? { createsTeam: reservation.createsTeam } : {}),
+    })),
+    schedules: (team.schedules || []).map(publicTeamSchedule),
+  }
+}
+
+function requireCoordinatedTeam(session, selector = null) {
+  const team = coordinatedTeamForChannel(state, session.channel)
+  if (!team) throw new TeamError('task_control_not_allowed', 'Only a team coordinator may do that.', 403)
+  if (selector != null && String(selector) !== team.id && String(selector).toLowerCase() !== team.name) {
+    throw new TeamError('team_not_coordinated', 'This session coordinates a different team.', 403)
+  }
+  return team
 }
 
 function acceptedTeamMutation(session, task, requestId) {
@@ -6351,6 +6475,85 @@ const teamService = {
       message: publicTeamMessage(result.message),
       task: publicTeamTask(task, session.channel), created: result.created,
       mutation: acceptedTeamMutation(session, task, request.requestId),
+    }
+  },
+  async schedule(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    const team = requireCoordinatedTeam(session, request.team)
+    assertCoordinatorTaskControl(session, coordinatorAuthority(team))
+    if (team.continuation?.mode !== 'auto-until-blocked') {
+      throw new TeamError('continuation_manual',
+        'Scheduled wakes need automatic continuation; the owner enables it with `/sab-team auto`.', 409)
+    }
+    const result = addTeamSchedule(team, {
+      every: request.every || null, at: request.at || null, note: request.note, requestId: request.requestId,
+      createdBy: { actor: session.teamTurn?.actor || null, sessionId: session.id },
+    })
+    saveStateNow(state)
+    if (result.created) {
+      const cadence = result.schedule.kind === 'every'
+        ? `every ${Math.round(result.schedule.intervalMs / 60_000)} min until ${result.schedule.expiresAt}`
+        : `at ${result.schedule.nextAt}`
+      await post(team.coordinatorChannel,
+        `⏰ Scheduled team wake \`${result.schedule.id}\` ${cadence}${result.schedule.note ? ` — ${result.schedule.note}` : ''}.`).catch(() => {})
+    }
+    return { schedule: publicTeamSchedule(result.schedule), created: result.created }
+  },
+  async schedules(caller, request = {}) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    const team = requireCoordinatedTeam(session, request.team)
+    return (team.schedules || []).map(publicTeamSchedule)
+  },
+  async unschedule(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    const team = requireCoordinatedTeam(session, request.team)
+    assertCoordinatorTaskControl(session, coordinatorAuthority(team))
+    const removed = removeTeamSchedule(team, String(request.id || ''))
+    saveStateNow(state)
+    await post(team.coordinatorChannel, `⏰ Removed scheduled team wake \`${removed.id}\`.`).catch(() => {})
+    return { schedule: publicTeamSchedule(removed), removed: true }
+  },
+  async wake(caller, request) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    const team = requireCoordinatedTeam(session, request.team)
+    assertCoordinatorTaskControl(session, coordinatorAuthority(team))
+    const { channel, member } = resolveTeamPeer(state, team.id, request.to)
+    const target = sessionByChannel(channel)
+    if (!target || state.channels?.[channel] !== target.id || target.channel !== channel ||
+        nodeIdForSession(target) !== LOCAL_NODE_ID) {
+      throw new TeamError('target_authority_lost', 'That worker no longer has an authoritative local SAB session.', 409)
+    }
+    if (target.pid && pidAlive(target.pid)) return { woke: false, reason: 'already_live', alias: member.alias }
+    const task = wakeableTeamTask(team, channel, target)
+    if (!task) {
+      throw new TeamError('no_active_task',
+        'That worker holds no active task in this team; SAB never wakes a session without one.', 409)
+    }
+    if (Date.now() - (teamWakeAttempts.get(target.id) || 0) < TEAM_WAKE_INTERVAL_MS) {
+      throw new TeamError('wake_rate_limited', 'That worker was woken moments ago; wait for its SessionStart.', 429)
+    }
+    if (!wakeSessionForTeam(target, `coordinator wake for task ${task.id}`)) {
+      return { woke: false, reason: 'already_waking_or_in_maintenance', alias: member.alias, taskId: task.id }
+    }
+    await post(team.coordinatorChannel,
+      `⏰ Waking <#${channel}> (\`${member.alias}\`) for its active task \`${task.id}\`.`).catch(() => {})
+    await post(channel, `⏰ The coordinator <#${team.coordinatorChannel}> is waking this session for task \`${task.id}\`.`).catch(() => {})
+    return { woke: true, alias: member.alias, taskId: task.id }
+  },
+  async tree(caller) {
+    const session = await resolveTeamCaller(caller)
+    requireTeamCallerContext(session)
+    const own = coordinatedTeamForChannel(state, session.channel)
+    const parent = parentTeamForChannel(state, session.channel)
+    const team = own || parent
+    return {
+      observedAt: new Date().toISOString(),
+      team: teamTreeNode(team, teamDepth(state, team)),
+      parent: own && parent ? { name: parent.name, alias: parent.members[session.channel]?.alias || null } : null,
     }
   },
   async mode(caller, request) {
@@ -7214,11 +7417,52 @@ function revokeCancelledTeamTasks(ids) {
   }
 }
 
+// The topmost team above `team`, so a tree shown from any level starts at its root.
+function teamsForRootOf(team) {
+  let current = team
+  for (let hop = 0; hop < 4; hop++) {
+    const parent = parentTeamForChannel(state, current.coordinatorChannel)
+    if (!parent) return current
+    current = parent
+  }
+  return current
+}
+
+// The owner's view of a team and the sub-teams below it, with channel links.
+function teamTreeMarkdown(team, depth = 0) {
+  const indent = '    '.repeat(depth)
+  const lines = [`${indent}• *\`${team.name}\`* · <#${team.coordinatorChannel}> · continuation ${team.continuation?.mode || 'manual'} · auto-release ${teamAutoRelease(team) ? 'on' : 'off'} · dispatch ${teamDispatchMode(team)}`]
+  for (const [channel, member] of Object.entries(team.members || {})) {
+    if (member.role !== 'worker') continue
+    const session = sessionByChannel(channel)
+    const live = Boolean(session?.pid && pidAlive(session.pid))
+    const tasks = Object.values(state.teamTasks || {})
+      .filter(task => task.teamId === team.id && task.targetChannel === channel && isActiveTeamTask(task))
+      .map(task => `\`${task.id}\` ${task.status}${isStandingTeamTask(task) ? ' (standing)' : ''}${teamTaskReleaseReady(task) ? ' · ready' : ''}`)
+    lines.push(`${indent}    ◦ \`${member.alias}\` <#${channel}> ${live ? '🟢' : '💤'}${tasks.length ? ` · ${tasks.join(', ')}` : ''}`)
+    const sub = coordinatedTeamForChannel(state, channel)
+    if (sub && depth < 3) lines.push(...teamTreeMarkdown(sub, depth + 2))
+  }
+  for (const reservation of Object.values(team.pendingMembers || {})) {
+    lines.push(`${indent}    ◦ \`${reservation.alias}\` ⏳ automation creating its channel`)
+  }
+  return lines
+}
+
 async function handleTeamCommand(channel, rest, request = null) {
+  const sub = String(rest[0] || 'status').toLowerCase()
+  if (sub === 'tree') {
+    const primary = activeTeamForChannel(state, channel)
+    // From the control channel (or any channel outside a team) show every root.
+    const roots = primary
+      ? [teamsForRootOf(primary)]
+      : activeTeams(state).filter(team => !parentTeamForChannel(state, team.coordinatorChannel))
+    if (!roots.length) return post(channel, 'No active session teams.')
+    return postMd(channel, ['*Session team tree*', ...roots.flatMap(team => teamTreeMarkdown(team))].join('\n'))
+  }
   const session = sessionByChannel(channel)
   if (!session) return post(channel, 'Use `/sab-team` in an authoritative SAB session channel.')
   const interactive = rest.length === 0 || request?.interactiveManagement === true
-  const sub = String(rest[0] || 'status').toLowerCase()
   if (sub === 'create') {
     if (rest.length !== 2) return post(channel, 'Usage: `/sab-team create <name>`')
     if (activeTransition(channel)) return post(channel, '⏳ Wait for the provider switch to finish before creating a team.')
@@ -7355,7 +7599,7 @@ async function handleTeamCommand(channel, rest, request = null) {
     return
   }
   return post(channel,
-    'Usage: `/sab-team create <name>`, `/sab-team add`, `/sab-team status`, `/sab-team auto|manual`, `/sab-team auto-release on|off`, `/sab-team drain|resume`, `/sab-team permissions`, `/sab-team remove <alias>`, or `/sab-team close`.')
+    'Usage: `/sab-team create <name>`, `/sab-team add`, `/sab-team status`, `/sab-team tree`, `/sab-team auto|manual`, `/sab-team auto-release on|off`, `/sab-team drain|resume`, `/sab-team permissions`, `/sab-team remove <alias>`, or `/sab-team close`.')
 }
 
 const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags', 'switch', 'run', 'terminal'])
@@ -7372,7 +7616,7 @@ function commandHelp(provider = null) {
     '`/sab-switch <claude|codex|pi> [new]` — hand this channel to another provider\n' +
     '`/sab-status [provider]` · `/sab-usage [provider] …` — current session or control-channel overview\n' +
     '`/sab-terminal [open|close|list|open-all|close-all]` — manage optional Ghostty viewports\n' +
-    '`/sab-team create|add|status|auto|manual|auto-release|drain|resume|permissions|remove|close` — link sessions for safe agent delegation\n' +
+    '`/sab-team create|add|status|tree|auto|manual|auto-release|drain|resume|permissions|remove|close` — link sessions for safe agent delegation\n' +
     '`/sab-run …` — Pi managed runs · `/sab-account …` — Claude subscriptions\n' +
     '`/sab-health` · `/sab-cleanup` · `/sab-claim` — bridge-wide operations'
 }

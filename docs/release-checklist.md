@@ -185,6 +185,14 @@
 - [ ] With auto-release on, both executors' releases happen without a
       coordinator turn and wake the epic once. Archiving the epic channel closes
       its team on the next sweep and removes it from main.
+- [ ] Register `sab team schedule --every 5m` in the epic. Confirm one wake per
+      due occurrence with the continuation budget, no wake while draining or
+      after `/sab-team manual`, and removal with `sab team unschedule`.
+- [ ] After a restart, `sab team wake --to ALIAS` resumes a dormant executor
+      that holds an active task, refuses one without a task, and rate-limits a
+      repeat. A dormant standing epic with a pending message is woken once.
+- [ ] `sab team tree --json` from main and the epic, and `/sab-team tree` from
+      the control channel, show the hierarchy with no raw channel IDs in JSON.
 - [ ] Restart while the epic holds its standing task, both idle and mid-turn.
       The binding survives, a stale delegated turn is cleared for an idle
       session, and a pending message is delivered exactly once.

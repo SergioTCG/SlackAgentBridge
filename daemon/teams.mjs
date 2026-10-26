@@ -343,6 +343,114 @@ export function createTeam(state, {
   return team
 }
 
+// ---- scheduled coordinator wakes ------------------------------------------
+// A coordinator registers a wake in an authorized turn. When due, it becomes a
+// durable continuation event for that exact team, so the woken turn has the
+// usual bounded continuation authority; nothing else can create one.
+export const TEAM_MAX_SCHEDULES = 8
+export const TEAM_SCHEDULE_MIN_INTERVAL_MS = 5 * 60 * 1000
+export const TEAM_SCHEDULE_MAX_INTERVAL_MS = 24 * 60 * 60 * 1000
+export const TEAM_SCHEDULE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const TEAM_SCHEDULE_NOTE_MAX = 500
+
+export function parseScheduleInterval(value) {
+  const match = /^([1-9][0-9]{0,3})(m|h)$/.exec(String(value || '').trim())
+  if (!match) throw new TeamError('invalid_schedule', 'Use an interval such as 15m or 2h.')
+  const ms = Number(match[1]) * (match[2] === 'h' ? 60 : 1) * 60 * 1000
+  if (ms < TEAM_SCHEDULE_MIN_INTERVAL_MS || ms > TEAM_SCHEDULE_MAX_INTERVAL_MS) {
+    throw new TeamError('invalid_schedule', 'A recurring wake runs every 5 minutes to 24 hours.')
+  }
+  return ms
+}
+
+// The note is coordinator-written text echoed into its own wake prompt. Strip
+// angle brackets so it can never imitate a bridge envelope.
+const scheduleNote = value => String(value || '').replace(/[\u0000-\u001f\u007f<>]+/g, ' ')
+  .replace(/\s+/g, ' ').trim().slice(0, TEAM_SCHEDULE_NOTE_MAX)
+
+export function addTeamSchedule(team, {
+  every = null, at = null, note = '', requestId, createdBy = null, now = Date.now(), id = randomId('sched'),
+} = {}) {
+  const key = String(requestId || '')
+  if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
+  if (Boolean(every) === Boolean(at)) throw new TeamError('invalid_schedule', 'Choose exactly one of --every or --at.')
+  const text = scheduleNote(note)
+  const payloadHash = hash(JSON.stringify({ every: every || null, at: at || null, note: text }))
+  team.schedules ||= []
+  const existing = team.schedules.find(item => item.requestId === key)
+  if (existing) {
+    if (existing.payloadHash !== payloadHash) {
+      throw new TeamError('request_conflict', 'That request ID was already used for a different schedule.', 409)
+    }
+    return { schedule: existing, created: false }
+  }
+  if (team.schedules.length >= TEAM_MAX_SCHEDULES) {
+    throw new TeamError('schedule_limit', `A team holds at most ${TEAM_MAX_SCHEDULES} scheduled wakes.`, 409)
+  }
+  let schedule
+  if (every) {
+    const intervalMs = parseScheduleInterval(every)
+    schedule = { kind: 'every', intervalMs, nextAt: nowIso(now + intervalMs), expiresAt: nowIso(now + TEAM_SCHEDULE_TTL_MS) }
+  } else {
+    const when = Date.parse(String(at))
+    if (!Number.isFinite(when) || when < now + 60_000 || when > now + TEAM_SCHEDULE_TTL_MS) {
+      throw new TeamError('invalid_schedule', 'A one-time wake must be an ISO time between one minute and 30 days ahead.')
+    }
+    schedule = { kind: 'at', nextAt: nowIso(when), expiresAt: nowIso(when) }
+  }
+  Object.assign(schedule, {
+    id: String(id), requestId: key, payloadHash, note: text, occurrences: 0,
+    createdAt: nowIso(now), ...(createdBy ? { createdBy } : {}),
+  })
+  team.schedules.push(schedule)
+  return { schedule, created: true }
+}
+
+export function removeTeamSchedule(team, scheduleId) {
+  const index = (team?.schedules || []).findIndex(item => item.id === scheduleId)
+  if (index < 0) throw new TeamError('schedule_not_found', 'No scheduled wake of this team matches that ID.', 404)
+  const [removed] = team.schedules.splice(index, 1)
+  if (!team.schedules.length) delete team.schedules
+  return removed
+}
+
+// Due wakes fire at most once per sweep: missed occurrences coalesce into one,
+// a one-time wake is removed after firing, and expired wakes are dropped. A
+// one-time wake missed while the bridge was down still fires within an hour.
+const TEAM_SCHEDULE_LATE_MS = 60 * 60 * 1000
+export function takeDueTeamSchedules(team, { now = Date.now() } = {}) {
+  const due = []
+  for (const schedule of [...(team?.schedules || [])]) {
+    if (Date.parse(schedule.nextAt) > now) continue
+    const expired = schedule.kind === 'at'
+      ? Date.parse(schedule.nextAt) + TEAM_SCHEDULE_LATE_MS < now
+      : Date.parse(schedule.expiresAt) < now
+    if (!expired) due.push({ ...schedule, occurrence: Number(schedule.occurrences || 0) + 1 })
+    schedule.occurrences = Number(schedule.occurrences || 0) + 1
+    schedule.lastFiredAt = nowIso(now)
+    if (schedule.kind === 'every' && !expired) {
+      let next = Date.parse(schedule.nextAt) + schedule.intervalMs
+      if (next <= now) next = now + schedule.intervalMs
+      if (next <= Date.parse(schedule.expiresAt)) { schedule.nextAt = nowIso(next); continue }
+    }
+    removeTeamSchedule(team, schedule.id)
+  }
+  return due
+}
+
+export function publicTeamSchedule(schedule) {
+  return {
+    id: schedule.id,
+    kind: schedule.kind,
+    ...(schedule.kind === 'every' ? { everyMinutes: Math.round(schedule.intervalMs / 60_000) } : {}),
+    nextAt: schedule.nextAt,
+    expiresAt: schedule.expiresAt,
+    note: schedule.note || '',
+    occurrences: Number(schedule.occurrences || 0),
+    createdAt: schedule.createdAt,
+  }
+}
+
 // Opt-in: SAB releases a worker's task itself once the release is ready.
 export function teamAutoRelease(team) {
   return team?.autoRelease === true

@@ -392,6 +392,13 @@ Slack when its scope or progress is no longer appropriate.
   proof, review, or merge state that SAB cannot independently observe. SAB
   compares the timestamp captured at the provider event boundary; delayed hook
   processing and Slack backoff cannot turn an earlier final into later proof.
+- Scheduled wakes and worker wakes are coordinator controls bound to the same
+  authorized turns as task control. A wake registration creates future
+  continuation authority only for its exact automatic team: at most eight per
+  team, bounded intervals, a 30-day lifetime, no wakes while draining, and
+  envelope-like brackets stripped from notes. `sab team wake` resumes a dormant
+  worker only for an active task of the caller's own team, at a bounded rate,
+  and never resurrects a session without such a task.
 - Auto-release is opt-in per team (`/sab-team auto-release on`). It performs
   only the release a coordinator could: exact binding, completion declared, all
   gates clear and every follow-up delivered, with a report covering the

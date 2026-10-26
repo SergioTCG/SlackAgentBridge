@@ -55,7 +55,8 @@ export async function handleTeamHttp(req, res, url, service) {
   const known = [
     '/team/context', '/team/peers', '/team/inbox', '/team/send', '/team/reply',
     '/team/checkpoint', '/team/complete', '/team/release', '/team/continue', '/team/cancel',
-    '/team/replace', '/team/message', '/team/mode',
+    '/team/replace', '/team/message', '/team/mode', '/team/schedule', '/team/schedules',
+    '/team/unschedule', '/team/wake', '/team/tree',
   ].includes(url.pathname) || taskMatch || mutationMatch
   if (!known) return false
   try {
@@ -143,6 +144,28 @@ export async function handleTeamHttp(req, res, url, service) {
     }
     if (url.pathname === '/team/mode' && req.method === 'POST') {
       sendJson(res, 200, { ok: true, ...(await service.mode(caller, await readJson(req))) })
+      return true
+    }
+    // Schedules and wakes are coordinator controls with their own receipts,
+    // not task mutations, so they bypass the task mutation lookup.
+    if (url.pathname === '/team/schedule' && req.method === 'POST') {
+      sendJson(res, 200, { ok: true, ...(await service.schedule(caller, await readJson(req))) })
+      return true
+    }
+    if (url.pathname === '/team/schedules' && req.method === 'GET') {
+      sendJson(res, 200, { ok: true, schedules: await service.schedules(caller, { team: url.searchParams.get('team') }) })
+      return true
+    }
+    if (url.pathname === '/team/unschedule' && req.method === 'POST') {
+      sendJson(res, 200, { ok: true, ...(await service.unschedule(caller, await readJson(req))) })
+      return true
+    }
+    if (url.pathname === '/team/wake' && req.method === 'POST') {
+      sendJson(res, 200, { ok: true, ...(await service.wake(caller, await readJson(req))) })
+      return true
+    }
+    if (url.pathname === '/team/tree' && req.method === 'GET') {
+      sendJson(res, 200, { ok: true, tree: await service.tree(caller) })
       return true
     }
     sendJson(res, 405, { ok: false, code: 'method_not_allowed', error: 'method not allowed' })

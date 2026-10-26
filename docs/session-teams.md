@@ -208,6 +208,61 @@ suggestion. Collaborators still gain no dispatch or membership authority:
   acknowledgement requires the exact digest SAB journaled for a delivery that
   is still pending.
 
+### Scheduled wakes
+
+A coordinator also acts on events other than worker replies, such as CI
+finishing, a new issue in its epic, or a timer. It registers a wake in an
+authorized turn:
+
+```bash
+sab team schedule --every 15m --note 'Check CI and new epic issues'
+sab team schedule --at 2026-10-27T07:00:00Z --note 'Morning triage'
+sab team schedules --json
+sab team unschedule --id SCHEDULE_ID
+```
+
+A due wake becomes one durable continuation event for that exact team, so the
+woken turn gets the usual bounded continuation budget and audit trail. Its
+authority comes only from the registration; provider background notifications
+and collaborator text cannot create one. The limits:
+
+- wakes need automatic continuation (`/sab-team auto`);
+- a team holds at most eight;
+- recurring intervals run from 5 minutes to 24 hours and expire after 30 days;
+- a one-time wake fires up to an hour late after downtime, then is dropped;
+- missed occurrences coalesce into one;
+- a draining or manual team skips them;
+- the note is echoed into the wake prompt with angle brackets removed.
+
+### Waking dormant workers
+
+After a reboot or daemon restart, workers are dormant until something wakes
+them. `sab team wake --to ALIAS`, from an authorized coordinator turn, resumes
+a dormant worker of the coordinator's own team. It works only while that worker
+holds an active task in the team: one queued for its channel, or bound to its
+exact native session. SAB never resurrects a session without one. Wakes are
+rate-limited to one per worker every two minutes, and are announced in both
+channels.
+
+For a standing task, SAB itself wakes the dormant worker once a coordinator
+follow-up is pending, at most every ten minutes, so a sub-team coordinator
+stays reachable. Exclusive tasks keep their historical behaviour: only the
+owner or an explicit `sab team wake` resumes them.
+
+### Monitoring
+
+`sab team tree --json` returns the caller's team and the sub-teams below it:
+
+- members, with roles, providers and availability;
+- active tasks, with status, reservation, pending gates and release readiness;
+- pending automation slots;
+- scheduled wakes;
+- the caller's parent team alias.
+
+Aliases stand in for raw channel IDs. The owner's `/sab-team tree` shows the
+same tree from the root, with channel links; from the control channel it
+shows every root team.
+
 ### Closing
 
 A team closes when its coordinator channel is archived. The hourly archive
@@ -274,6 +329,9 @@ sab team cancel --task TASK_ID --reason 'Merged elsewhere.' --request-id STABLE_
 sab team mutation --request-id STABLE_ID --task TASK_ID
 sab team mode draining
 sab team mode active
+sab team schedule --every 15m --note 'Check CI'
+sab team wake --to WORKER_ALIAS
+sab team tree --json
 sab team send-file --to WORKER_ALIAS --message 'Inspect these.' -- report.pdf
 sab team send-file --task TASK_ID --message 'Interim artifact.' -- result.json
 ```
@@ -381,9 +439,11 @@ fail visibly.
 
 SAB journals a unique task and request identity atomically before any Slack or
 provider side effect. It then posts the complete bounded task plus a status card
-in both channels. A busy worker remains visibly queued; a dormant worker is not
-resurrected by another agent. The owner may wake that session normally, after
-which the task waits for a safe idle input surface.
+in both channels. A busy worker remains visibly queued. A dormant worker is
+woken only by the owner, by its coordinator's explicit `sab team wake` while it
+holds an active task in that team, or by SAB for a standing task's pending
+follow-up (see [Waking dormant workers](#waking-dormant-workers)). The task then
+waits for a safe idle input surface.
 
 Before injection, SAB reserves the input surface and atomically claims the exact
 worker native session and the exact instruction revision already visible on
