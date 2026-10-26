@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-10-26
+
 ### Added
 
 - `sab automation create --channel-name NAME` creates the private channel under
@@ -47,6 +49,8 @@ Notable changes to this project. Format based on
     rejection up to four hours.
   - The single rejection notice names the cause and says when SAB retries.
   - An explicit `/sab-account` switch is never delayed.
+
+[2.3.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.3.0
 
 ## [2.2.0] — 2026-10-25
 
