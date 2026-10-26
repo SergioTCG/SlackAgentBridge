@@ -36,6 +36,33 @@ test('a standby Claude leg whose conversation Claude Code deleted is replaced on
   assert.match(gone, /resumeCwd\(session\)/)
 })
 
+test('a Claude session with no conversation yet is refused by every restart path before teardown', () => {
+  // Bulk and scheduled updates, their revalidation and account-pool handover
+  // all read the shared bulk-update context.
+  const context = /function bulkUpdateContext\(\) \{[\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(context, /conversationMissing: claudeConversationGone,/)
+  assert.match(daemon, /function accountPoolBlockReason\([\s\S]*?const context = bulkUpdateContext\(\)/)
+  const guarded = [
+    ['updateAndRestart', 'stopSessionForUpdate('],
+    ['switchAccount', 'restartSessionWithMutation('],
+    ['setFlags', 'restartSessionWithMutation('],
+  ]
+  for (const [name, teardown] of guarded) {
+    const body = new RegExp(`async function ${name}\\([\\s\\S]*?\\n\\}`).exec(daemon)?.[0] || ''
+    const check = body.indexOf('if (claudeConversationGone(session)) return post(session.channel, NO_CONVERSATION_NOTICE)')
+    assert.ok(check > 0 && check < body.indexOf(teardown), `${name} must refuse before ${teardown}`)
+  }
+  const restart = /async function restartSessionWithMutation\([\s\S]*?\n\}\n\nasync function switchAccount/.exec(daemon)?.[0] || ''
+  const refused = restart.indexOf('if (claudeConversationGone(session)) throw new Error(')
+  assert.ok(refused > 0 && refused < restart.indexOf('reserveSessionMaintenance('))
+  // Both owner-initiated pool switches explain the refusal instead of failing generically.
+  const switches = daemon.split('await accountPools.switchAccount(').slice(0, -1)
+  assert.equal(switches.length, 2)
+  for (const before of switches) {
+    assert.match(before.slice(-200), /if \(claudeConversationGone\(session\)\) return post\(channel, NO_CONVERSATION_NOTICE\)\n\s*const result = $/)
+  }
+})
+
 test('interactive actions are owner-only and revalidate exact authoritative bindings', () => {
   const handler = /async function handleSocketInteractive\(\{ body \}\) \{([\s\S]*?)\n\}\n\nconst socketCoordinator/.exec(daemon)?.[1] || ''
   assert.match(handler, /body\?\.user\?\.id !== USER/)
