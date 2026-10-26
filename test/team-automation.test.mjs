@@ -6,8 +6,8 @@ import path from 'node:path'
 
 import { AutomationRequestError, createAutomationLifecycle, validateAutomationRequest } from '../daemon/automation.mjs'
 import {
-  automationTaskRequestId, bootstrapTaskHold, createAutomationTeamBootstrap, detachAutomationTeams,
-  preparedAutomationChannel,
+  automationSetupPending, automationTaskRequestId, bootstrapTaskHold, createAutomationTeamBootstrap,
+  detachAutomationTeams, preparedAutomationChannel,
 } from '../daemon/team-automation.mjs'
 import {
   TEAM_MAX_MEMBERS, TeamError, addTeamWorker, assertCoordinatorDispatch, beginCollaboratorTeamTurn,
@@ -91,7 +91,10 @@ function automationFixture(t, { authorizeCaller = null } = {}) {
     joined: async record => calls.joined.push(record.externalKey),
     now: () => clock,
   })
-  let prepare = async record => ({ channelId: `C-${record.channelName || 'generated'}`.toUpperCase(), channelName: record.channelName || 'generated' })
+  let prepare = async (record, options) => {
+    options?.journalName?.(record.channelName || 'generated')
+    return { channelId: `C-${record.channelName || 'generated'}`.toUpperCase(), channelName: record.channelName || 'generated' }
+  }
   const lifecycle = createAutomationLifecycle({
     state,
     home: root,
@@ -104,7 +107,7 @@ function automationFixture(t, { authorizeCaller = null } = {}) {
     terminate: async () => {},
     archive: async () => {},
     notifyFailure: async (record, failure) => calls.notify.push([record.externalKey, failure.code]),
-    prepareChannel: async record => { calls.prepare.push(record.externalKey); return prepare(record) },
+    prepareChannel: async (record, options) => { calls.prepare.push(record.externalKey); return prepare(record, options) },
     teamBootstrap: bootstrap,
     now: () => ++clock,
   })
@@ -240,19 +243,57 @@ test('a taken channel name fails before launch and leaves the external key reusa
   assert.equal(retry.automation.channelId, 'C-FREE')
 })
 
-test('an unconfirmed channel creation fails closed without launching', async t => {
+test('an unconfirmed channel creation fails closed without launching and stays traceable', async t => {
   const f = automationFixture(t)
-  f.setPrepare(async () => { throw new Error('socket hang up') })
+  f.setPrepare(async (record, { journalName }) => {
+    journalName('cc-barrique-2995-vivian-holding-lines')
+    assert.equal(record.channelSetup.name, 'cc-barrique-2995-vivian-holding-lines', 'the name is journaled before Slack is called')
+    throw new Error('socket hang up')
+  })
   await assert.rejects(f.lifecycle.submit(f.request(), { caller: f.caller }), error => error.code === 'channel_creation_uncertain')
   const record = f.state.automations['github:barrique#2995']
   assert.equal(record.status, 'failed')
   assert.equal(record.failure.code, 'channel_creation_uncertain')
+  assert.match(record.failure.message, /#cc-barrique-2995-vivian-holding-lines/)
   assert.equal(f.team.pendingMembers, undefined)
   await f.drain()
   assert.deepEqual(f.calls.launch, [])
   const replay = await f.lifecycle.submit(f.request(), { caller: f.caller })
   assert.equal(replay.created, false)
   assert.equal(f.calls.prepare.length, 1, 'an uncertain create is never retried')
+  // Stop cannot archive a channel whose ID SAB never learned; it keeps the
+  // name and the failure so the owner can find and archive it.
+  const stopped = await f.lifecycle.stop(record.externalKey, { archive: true })
+  assert.equal(stopped.status, 'stopped')
+  assert.equal(stopped.stop.unresolvedChannel, 'cc-barrique-2995-vivian-holding-lines')
+  assert.equal(stopped.failure.code, 'channel_creation_uncertain')
+})
+
+test('a named or team request cannot silently reuse a plain automation key', async t => {
+  const f = automationFixture(t)
+  const plain = f.lifecycle.create({ ...f.request({ channelName: undefined, team: undefined }), initialPrompt: 'Plain.' })
+  assert.equal(plain.created, true)
+  await assert.rejects(f.lifecycle.submit(f.request(), { caller: f.caller }), error => error.code === 'external_key_conflict')
+  await assert.rejects(f.lifecycle.submit(f.request({ team: undefined, initialPrompt: 'Plain.' }), { caller: null }),
+    error => error.code === 'external_key_conflict')
+  // The identical plain request still replays as before.
+  assert.equal((await f.lifecycle.submit({ ...f.request({ channelName: undefined, team: undefined }), initialPrompt: 'Plain.' })).created, false)
+  assert.deepEqual(f.calls.prepare, [])
+})
+
+test('an automation channel is busy for team tasks until its setup completes', () => {
+  const state = { automations: {
+    a: { externalKey: 'a', channelId: 'C-A', status: 'configuring_collaborators', stop: {} },
+    b: { externalKey: 'b', channelId: 'C-B', status: 'active', stop: {} },
+    c: { externalKey: 'c', channelId: 'C-C', status: 'launching', stop: { requestedAt: 5 } },
+    d: { externalKey: 'd', channelId: 'C-D', status: 'preparing_channel', stop: {} },
+  } }
+  assert.equal(automationSetupPending(state, 'C-A'), true)
+  assert.equal(automationSetupPending(state, 'C-D'), true, 'before SessionStart there is no session to dispatch to')
+  assert.equal(automationSetupPending(state, 'C-B'), false)
+  assert.equal(automationSetupPending(state, 'C-C'), false, 'a stopping automation is not setup')
+  assert.equal(automationSetupPending(state, 'C-OTHER'), false)
+  assert.equal(automationSetupPending({}, 'C-A'), false)
 })
 
 test('a channel creation interrupted by a bridge restart fails closed and frees its slot', async t => {

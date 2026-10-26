@@ -488,12 +488,15 @@ export function createAutomationLifecycle({
   }
 
   function replay(record, input) {
-    if (record.requestHash) {
-      let request = null
-      try { request = validateAutomationRequest(input, { home }) } catch {}
-      if (!request || requestFingerprint(request) !== record.requestHash) {
-        throw new AutomationRequestError('external_key_conflict', 'That externalKey was already used for a different automation request.', 409)
-      }
+    let request = null
+    try { request = validateAutomationRequest(input, { home }) } catch {}
+    const conflict = record.requestHash
+      ? !request || requestFingerprint(request) !== record.requestHash
+      // A plain automation already owns this key: a named or team-bound
+      // request must not silently return it without its channel or team.
+      : Boolean(request && (request.channelName || request.team))
+    if (conflict) {
+      throw new AutomationRequestError('external_key_conflict', 'That externalKey was already used for a different automation request.', 409)
     }
     return { automation: record, created: false }
   }
@@ -539,7 +542,14 @@ export function createAutomationLifecycle({
     persist() // the journal precedes the Slack side effect
 
     let channel
-    try { channel = await prepareChannel(record) }
+    try {
+      channel = await prepareChannel(record, {
+        journalName: name => {
+          record.channelSetup = { ...record.channelSetup, name }
+          persist()
+        },
+      })
+    }
     catch (error) {
       if (record.team) teamBootstrap.release(record)
       if (error?.definitive) {
@@ -550,8 +560,9 @@ export function createAutomationLifecycle({
         throw new AutomationRequestError(error.code || 'channel_create_failed', errorMessage(error), error.status || 409)
       }
       record.channelSetup = { ...record.channelSetup, status: 'uncertain', error: errorMessage(error) }
+      const attempted = record.channelSetup.name || record.channelName
       setFailure(record, 'channel_creation_uncertain',
-        `Slack did not confirm whether it created the channel${record.channelName ? ` #${record.channelName}` : ''}: ${errorMessage(error)}`,
+        `Slack did not confirm whether it created the channel${attempted ? ` #${attempted}` : ''}: ${errorMessage(error)}`,
         'If that channel exists, archive it; then retry with a new externalKey.')
       throw new AutomationRequestError('channel_creation_uncertain', record.failure.message, 502)
     }
@@ -628,8 +639,9 @@ export function createAutomationLifecycle({
         // is unknown and Slack offers no idempotent create, so fail closed.
         if (record.team) teamBootstrap?.release?.(record)
         record.channelSetup = { ...(record.channelSetup || {}), status: 'interrupted' }
+        const attempted = record.channelSetup.name || record.channelName
         setFailure(record, 'channel_creation_interrupted',
-          `The bridge restarted while creating the Slack channel${record.channelName ? ` #${record.channelName}` : ''}; its outcome is unknown.`,
+          `The bridge restarted while creating the Slack channel${attempted ? ` #${attempted}` : ''}; its outcome is unknown.`,
           'If that channel exists, archive it; then create the automation with a new externalKey.')
         continue
       }
@@ -717,9 +729,13 @@ export function createAutomationLifecycle({
         touch(record)
       }
       if (record.stop.archiveRequested && !record.channelId) record.stop.channelArchived = true
+      // A channel whose creation is unconfirmed may exist without SAB knowing
+      // its ID. Stop cannot archive it, so it keeps the name and the failure.
+      const unresolved = ['uncertain', 'interrupted'].includes(record.channelSetup?.status) && !record.channelId
+      if (unresolved) record.stop.unresolvedChannel = record.channelSetup.name || record.channelName || null
       record.status = 'stopped'
       record.stoppedAt = now()
-      record.failure = null
+      if (!unresolved) record.failure = null
       touch(record)
     } catch (error) {
       setFailure(record, 'stop_failed', errorMessage(error), 'Resolve the reported process or Slack archive error, then repeat the same stop request.')

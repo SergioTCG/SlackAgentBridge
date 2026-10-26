@@ -893,10 +893,14 @@ and App Server events deduplicate there. Unrelated sessions, stopped records,
 cwd mismatches, replacement identities, and child threads cannot adopt it.
 
 A request with `channelName` or `team` creates its private Slack channel before
-launch, in the `preparing_channel` state. The record is journaled first. A
-definitive Slack rejection (for example `name_taken` for a requested name)
-removes the record, so nothing exists and the key can be reused. An unconfirmed
-create fails the record closed. A preparation found by boot recovery, but not
+launch, in the `preparing_channel` state. The record is journaled first, and the
+exact attempted name is journaled before each Slack call. Creation uses a
+single-attempt Slack client that never retries or waits out a rate limit, so a
+lost response cannot turn into a later attempt's `name_taken`. A definitive
+Slack rejection (for example `name_taken` for a requested name) or a rate limit
+removes the record, so nothing exists and the key can be reused. An
+unconfirmed create fails the record closed, and stopping it keeps the
+attempted name as `stop.unresolvedChannel`. A preparation found by boot recovery, but not
 owned by the current process, fails as `channel_creation_interrupted`. A
 requested name is never suffixed. The prepared channel is recorded in
 `channelTmux`, and the first SessionStart from the automation's exact tmux binds
@@ -911,8 +915,10 @@ The reservation counts toward the member limit and owns its alias, all in the
 same journal write as the record. Once Slack returns the channel ID, the
 reservation becomes membership with `addedBy` provenance. If `team.task` is
 present, a queued task carrying `bootstrap.externalKey` is created in the same
-mutation. The team dispatcher holds that task until the automation is `active`,
-which means channel bound, collaborators invited and input ready. It then
+mutation. Until an automation is `active` (channel bound, collaborators invited
+and input ready), its channel reports the busy reason `automation setup`. No
+team task reaches it; before SessionStart, such tasks wait rather than fail. The
+team dispatcher also holds the bootstrap task itself until then. It then
 claims and injects it with the normal task header and exactly-once claim. A
 failed or stopped automation fails its held task. Stop removes the channel's
 worker membership, cancelling only that membership's active tasks, and closes a

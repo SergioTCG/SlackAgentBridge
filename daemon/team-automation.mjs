@@ -159,6 +159,19 @@ export function bootstrapTaskHold(state, task) {
   return 'wait'
 }
 
+// An automation is still setting up its channel's session until it is active.
+// No team task, bootstrap or not, may reach that session before collaborator
+// setup and its own initial prompt; before SessionStart there is no session.
+const AUTOMATION_SETUP_STATUSES = new Set([
+  'preparing_channel', 'pending', 'launching', 'awaiting_session', 'configuring_collaborators',
+  'ready_to_prompt', 'injecting_prompt',
+])
+export function automationSetupPending(state, channel) {
+  if (!channel) return false
+  return Object.values(state.automations || {}).some(record => record.channelId === channel &&
+    AUTOMATION_SETUP_STATUSES.has(record.status) && !record.stop?.requestedAt)
+}
+
 // A named or team-bound automation creates its channel before launch. Its
 // first SessionStart binds exactly that channel; it never falls back to a new
 // one, which would detach the channel's team membership and bootstrap task.

@@ -11,6 +11,10 @@ export function createDirectSlackRuntime({
   SocketModeClientImpl = SocketModeClient,
 }) {
   const web = new WebClientImpl(botToken)
+  // A call whose side effect cannot be repeated safely, such as creating a
+  // channel, must not be retried by the client: a lost response has to
+  // surface as an uncertain outcome, not as a later attempt's `name_taken`.
+  const webOnce = new WebClientImpl(botToken, { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true })
   const socket = new SocketModeClientImpl({ appToken })
-  return Object.freeze({ mode: 'all-in-one', web, socket })
+  return Object.freeze({ mode: 'all-in-one', web, webOnce, socket })
 }

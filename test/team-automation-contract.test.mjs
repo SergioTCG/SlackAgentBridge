@@ -23,6 +23,27 @@ test('a requested channel name is used verbatim and only generated names get a s
   assert.match(body('automationChannelError'), /definitive: true/)
 })
 
+test('channel creation is a single journaled attempt, never a client retry', () => {
+  const prepare = body('prepareAutomationChannel')
+  assert.doesNotMatch(prepare, /\bweb\.conversations\.create/, 'the retrying client must not create channels')
+  const creates = prepare.match(/slackRuntime\.webOnce\.conversations\.create/g) || []
+  assert.equal(creates.length, 2)
+  assert.ok(prepare.indexOf('journalName(name)') < prepare.indexOf('slackRuntime.webOnce.conversations.create'))
+  assert.ok(prepare.indexOf('journalName(suffixed)') < prepare.lastIndexOf('slackRuntime.webOnce.conversations.create'))
+  const classify = body('automationChannelError')
+  assert.match(classify, /error\?\.data\?\.ok === false && code/)
+  assert.match(classify, /slack_webapi_rate_limited_error[\s\S]*definitive: true/)
+  assert.doesNotMatch(classify, /slack_webapi_request_error|slack_webapi_http_error/, 'transport failures stay uncertain')
+})
+
+test('no team task reaches an automation session before its setup completes', () => {
+  assert.match(body('teamTargetBusyReasons'), /automationSetupPending\(state, session\.channel\)\) reasons\.push\('automation setup'\)/)
+  const dispatch = body('dispatchTeamTask')
+  const wait = dispatch.indexOf('if (automationSetupPending(state, task.targetChannel)) return false')
+  const fail = dispatch.indexOf("'The target channel no longer has an authoritative SAB session.'")
+  assert.ok(wait > 0 && fail > wait, 'a launching worker waits instead of failing the task')
+})
+
 test('a bootstrap task is held until its automation finished setup and is claimed exactly once', () => {
   const dispatch = body('dispatchTeamTask')
   const hold = dispatch.indexOf('bootstrapTaskHold(state, task)')

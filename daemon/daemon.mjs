@@ -85,7 +85,8 @@ import {
 import { createAutomationLifecycle, proveAutomationReleaseProcess, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
 import { handleAutomationHttp } from './automation-http.mjs'
 import {
-  bootstrapTaskHold, createAutomationTeamBootstrap, detachAutomationTeams, preparedAutomationChannel,
+  automationSetupPending, bootstrapTaskHold, createAutomationTeamBootstrap, detachAutomationTeams,
+  preparedAutomationChannel,
 } from './team-automation.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { createTerminalControl } from './terminal-control.mjs'
@@ -4736,6 +4737,7 @@ function teamTargetBusyReasons(session) {
   if (internalTurns.has(session.id)) reasons.push('private turn')
   if (['active', 'paused'].includes(session.managed?.status)) reasons.push('managed Pi run')
   if (session.piRouting?.status === 'routing') reasons.push('Pi routing')
+  if (automationSetupPending(state, session.channel)) reasons.push('automation setup')
   return reasons
 }
 
@@ -5264,6 +5266,8 @@ async function dispatchTeamTask(task) {
   }
   const target = sessionByChannel(task.targetChannel)
   if (!target || state.channels?.[task.targetChannel] !== target.id) {
+    // A worker whose automation is still launching has no session yet.
+    if (automationSetupPending(state, task.targetChannel)) return false
     failTeamTask(state, task.id, 'The target channel no longer has an authoritative SAB session.')
     persistTeamLifecycle(task)
     await updateTeamTaskAudit(task)
@@ -7811,6 +7815,9 @@ async function archiveAutomationChannel(channel, record) {
 // ---- named and team-bound automation channels ------------------------------
 // The channel is created before launch so a requested name either exists for
 // this automation alone or the request fails without launching anything.
+// Creation goes through the single-attempt client, so only Slack's own
+// rejection (or a rate limit, which Slack did not process) proves that no
+// channel exists. Anything else stays uncertain and fails closed.
 function automationChannelError(error, name) {
   const code = error?.data?.error
   if (error?.data?.ok === false && code) {
@@ -7821,10 +7828,15 @@ function automationChannelError(error, name) {
       definitive: true, code: taken ? 'channel_name_taken' : 'channel_create_rejected', status: taken ? 409 : 400,
     })
   }
+  if (error?.code === 'slack_webapi_rate_limited_error') {
+    return Object.assign(new Error(`Slack rate-limited creating #${name}; nothing was created or launched. Retry shortly with the same external key.`), {
+      definitive: true, code: 'slack_rate_limited', status: 429,
+    })
+  }
   return error
 }
 
-async function prepareAutomationChannel(record) {
+async function prepareAutomationChannel(record, { journalName = () => {} } = {}) {
   const requested = record.channelName || null
   let name = requested
   if (!name) {
@@ -7833,14 +7845,18 @@ async function prepareAutomationChannel(record) {
   }
   let created
   try {
-    created = await web.conversations.create({ name, is_private: true })
+    // Journal the exact name first, so an uncertain create stays traceable.
+    journalName(name)
+    created = await slackRuntime.webOnce.conversations.create({ name, is_private: true })
   } catch (error) {
     // Only a generated name keeps the historical collision suffix; a requested
     // name is part of the caller's contract and fails closed.
     if (requested || error?.data?.error !== 'name_taken') throw automationChannelError(error, name)
     const suffixed = `${name}-${Math.floor(Math.random() * 99)}`
-    try { created = await web.conversations.create({ name: suffixed, is_private: true }) }
-    catch (retryError) { throw automationChannelError(retryError, suffixed) }
+    try {
+      journalName(suffixed)
+      created = await slackRuntime.webOnce.conversations.create({ name: suffixed, is_private: true })
+    } catch (retryError) { throw automationChannelError(retryError, suffixed) }
   }
   const channelId = created?.channel?.id
   if (!channelId) throw new Error('Slack did not return the created channel ID.')
