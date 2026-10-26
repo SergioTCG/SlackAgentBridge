@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { channelNodeId, nodeIdForSession, LOCAL_NODE_ID } from './nodes.mjs'
+import { TEAM_MESSAGE_MAX_BYTES } from './teams.mjs'
 
 import {
   isPathWithin,
@@ -13,6 +14,12 @@ import {
 const MAX_EXTERNAL_KEY = 512
 const MAX_INITIAL_PROMPT_BYTES = 256 * 1024
 const SLACK_USER_ID = /^[UW][A-Z0-9]{8,}$/
+// Slack channel names: lowercase letters, digits, hyphens and underscores, at
+// most 80 characters. A requested name is used verbatim, never suffixed.
+export const SLACK_CHANNEL_NAME = /^[a-z0-9_-]{1,80}$/
+const TEAM_SELECTOR = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const TEAM_ALIAS = /^[a-z0-9][a-z0-9_-]{0,47}$/
+const TEAM_REQUEST_KEYS = new Set(['name', 'alias', 'task'])
 const TERMINAL_STATUSES = new Set(['stopped', 'released'])
 
 export const automationOwnsSession = (record, session) => Boolean(record && !TERMINAL_STATUSES.has(record.status) &&
@@ -98,7 +105,66 @@ export function validateAutomationRequest(input, { home = process.env.HOME } = {
   if (Buffer.byteLength(input.initialPrompt) > MAX_INITIAL_PROMPT_BYTES) {
     requestError('invalid_initial_prompt', `initialPrompt may be at most ${MAX_INITIAL_PROMPT_BYTES} bytes`)
   }
-  return { externalKey, cwd, provider, flags, collaborators, initialPrompt: input.initialPrompt }
+
+  let channelName = null
+  if (input.channelName !== undefined && input.channelName !== null) {
+    if (typeof input.channelName !== 'string' || !SLACK_CHANNEL_NAME.test(input.channelName)) {
+      requestError('invalid_channel_name', 'channelName must be 1-80 lowercase letters, digits, hyphens or underscores')
+    }
+    channelName = input.channelName
+  }
+
+  let team = null
+  if (input.team !== undefined && input.team !== null) {
+    if (typeof input.team !== 'object' || Array.isArray(input.team) ||
+        Object.keys(input.team).some(key => !TEAM_REQUEST_KEYS.has(key))) {
+      requestError('invalid_team', 'team must be an object with name and optional alias and task')
+    }
+    if (typeof input.team.name !== 'string' || !TEAM_SELECTOR.test(input.team.name)) {
+      requestError('invalid_team', 'team.name must name the active team the caller coordinates')
+    }
+    let alias = null
+    if (input.team.alias !== undefined && input.team.alias !== null) {
+      if (typeof input.team.alias !== 'string' || !TEAM_ALIAS.test(input.team.alias)) {
+        requestError('invalid_team_alias', 'team.alias must be 1-48 lowercase letters, digits, hyphens or underscores')
+      }
+      alias = input.team.alias
+    }
+    let task = null
+    if (input.team.task !== undefined && input.team.task !== null) {
+      if (typeof input.team.task !== 'string' || !input.team.task.trim()) {
+        requestError('invalid_team_task', 'team.task must be non-empty text')
+      }
+      task = input.team.task.trim()
+      if (Buffer.byteLength(task) > TEAM_MESSAGE_MAX_BYTES) {
+        requestError('invalid_team_task', `team.task may be at most ${TEAM_MESSAGE_MAX_BYTES} bytes`)
+      }
+      // The task header is the first prompt, so the worker starts inside the
+      // task lifecycle. A second raw prompt would compete with that turn.
+      if (input.initialPrompt.trim()) {
+        requestError('invalid_initial_prompt', 'a team bootstrap task replaces initialPrompt; send an empty initialPrompt')
+      }
+    }
+    team = { name: input.team.name, alias, task }
+  }
+  return { externalKey, cwd, provider, flags, collaborators, initialPrompt: input.initialPrompt, channelName, team }
+}
+
+// Requests that create a named or team-bound channel are compared on replay:
+// one external key must never name two different channels, teams or tasks.
+function requestFingerprint(request) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    externalKey: request.externalKey,
+    cwd: request.cwd,
+    provider: request.provider,
+    flags: request.flags,
+    collaborators: request.collaborators,
+    initialPrompt: promptDigest(request.initialPrompt),
+    channelName: request.channelName,
+    team: request.team ? {
+      name: request.team.name, alias: request.team.alias, task: promptDigest(request.team.task),
+    } : null,
+  })).digest('hex')
 }
 
 function automationTmux(externalKey) {
@@ -148,6 +214,16 @@ function publicStatus(record) {
     sessionId: record.sessionId || null,
     tmux: record.tmux,
     channelId: record.channelId || null,
+    ...(record.channelName ? { channelName: record.channelName } : {}),
+    ...(record.team ? {
+      team: {
+        teamId: record.team.teamId,
+        teamName: record.team.teamName,
+        alias: record.team.alias,
+        role: 'worker',
+        taskId: record.team.taskId || null,
+      },
+    } : {}),
     cwd: record.cwd,
     provider: record.provider,
     flags: [...record.flags],
@@ -188,6 +264,12 @@ export function createAutomationLifecycle({
   notifyReleased = async () => {},
   launchTimeoutMs = 5 * 60 * 1000,
   notifyFailure = async () => {},
+  // Creates the Slack channel of a named or team-bound automation before its
+  // launch. Rejections carrying `definitive: true` prove nothing was created.
+  prepareChannel = null,
+  // Team adapter: authorize(request, caller) is the only asynchronous step;
+  // reserve/bind/release are synchronous journal mutations.
+  teamBootstrap = null,
   now = () => Date.now(),
   log = () => {},
 }) {
@@ -198,6 +280,10 @@ export function createAutomationLifecycle({
   const running = new Map()
   const bootstrapRunning = new Map()
   const sessionRefs = new Map()
+  // Channel preparations owned by this process. The loopback API accepts
+  // requests before boot recovery runs, so recovery must not mistake one of
+  // these for a preparation interrupted by an earlier process.
+  const preparing = new Map()
 
   const records = () => state.automations || {}
   const recordFor = externalKey => Object.hasOwn(records(), externalKey) ? records()[externalKey] : null
@@ -295,6 +381,23 @@ export function createAutomationLifecycle({
     if (stopRequested(record) || record.status !== 'configuring_collaborators') return
     record.status = 'ready_to_prompt'
     touch(record)
+    if (record.prompt.status === 'team_task') {
+      // The team dispatcher delivers the bootstrap task with its normal header
+      // and exactly-once claim. It may start only after collaborator setup.
+      try { await waitForInputReady(session) }
+      catch (error) {
+        if (stopRequested(record)) return
+        setFailure(record, 'input_not_ready', errorMessage(error), 'Fix the provider input transport, then stop this automation and retry with a new externalKey.')
+        await notifyFailure(record, record.failure).catch(() => {})
+        return
+      }
+      if (stopRequested(record) || record.status !== 'ready_to_prompt') return
+      record.status = 'active'
+      touch(record)
+      try { teamBootstrap?.ready?.(record) }
+      catch (error) { log('automation team task wake failed', record.externalKey, errorMessage(error)) }
+      return
+    }
     if (record.prompt.status === 'delivered') {
       record.status = 'active'
       touch(record)
@@ -346,13 +449,9 @@ export function createAutomationLifecycle({
     touch(record)
   }
 
-  function create(input) {
-    const externalKey = validateExternalKey(input?.externalKey)
-    const existing = recordFor(externalKey)
-    if (existing) return { automation: existing, created: false }
-    const request = validateAutomationRequest(input, { home })
+  function newRecord(request, status) {
     const createdAt = now()
-    const record = {
+    return {
       version: 1,
       externalKey: request.externalKey,
       cwd: request.cwd,
@@ -364,16 +463,131 @@ export function createAutomationLifecycle({
       tmux: automationTmux(request.externalKey),
       sessionId: null,
       channelId: null,
-      status: 'pending',
+      status,
       failure: null,
       stop: { requestedAt: null, archiveRequested: false, terminated: false, channelArchived: false },
       createdAt,
       updatedAt: createdAt,
     }
+  }
+
+  function create(input) {
+    const externalKey = validateExternalKey(input?.externalKey)
+    const existing = recordFor(externalKey)
+    if (existing) return { automation: existing, created: false }
+    const request = validateAutomationRequest(input, { home })
+    if (request.channelName || request.team) {
+      throw new AutomationRequestError('channel_preparation_required', 'named and team-bound automations are created through submit()', 500)
+    }
+    const record = newRecord(request, 'pending')
     if (!state.automations) state.automations = {}
     state.automations[externalKey] = record
     persist() // uniqueness and tmux correlation exist before launch is queued
     runOnce(externalKey, 'launch', () => launchPending(externalKey))
+    return { automation: record, created: true }
+  }
+
+  function replay(record, input) {
+    let request = null
+    try { request = validateAutomationRequest(input, { home }) } catch {}
+    const conflict = record.requestHash
+      ? !request || requestFingerprint(request) !== record.requestHash
+      // A plain automation already owns this key: a named or team-bound
+      // request must not silently return it without its channel or team.
+      : Boolean(request && (request.channelName || request.team))
+    if (conflict) {
+      throw new AutomationRequestError('external_key_conflict', 'That externalKey was already used for a different automation request.', 409)
+    }
+    return { automation: record, created: false }
+  }
+
+  // The HTTP entry point. Plain requests keep the historical synchronous
+  // journal-then-launch path. A named or team-bound request first creates its
+  // Slack channel, so a name collision fails before anything is launched, and
+  // a team worker joins its team in the same journal write that binds the
+  // channel to this automation.
+  async function submit(input, { caller = null } = {}) {
+    const externalKey = validateExternalKey(input?.externalKey)
+    const prior = recordFor(externalKey)
+    if (prior) return replay(prior, input)
+    const request = validateAutomationRequest(input, { home })
+    if (!request.channelName && !request.team) return create(input)
+    if (!prepareChannel || (request.team && !teamBootstrap)) {
+      throw new AutomationRequestError('channel_preparation_unavailable', 'named and team-bound automations are unavailable in this bridge', 503)
+    }
+    const authorization = request.team ? await teamBootstrap.authorize(request, caller) : null
+    // Authorization awaits process proofs; a concurrent request may have won.
+    const raced = recordFor(externalKey)
+    if (raced) return replay(raced, input)
+    const record = newRecord(request, 'preparing_channel')
+    record.requestHash = requestFingerprint(request)
+    record.channelName = request.channelName
+    record.channelSetup = { status: 'creating', requestedAt: now() }
+    if (request.team) {
+      // Re-asserts and consumes the coordinator's dispatch authority and
+      // reserves the worker slot, synchronously with this journal write.
+      record.team = teamBootstrap.reserve(record, request, authorization)
+      if (request.team.task) record.prompt.status = 'team_task'
+    }
+    if (!state.automations) state.automations = {}
+    state.automations[externalKey] = record
+    const preparation = prepareRecord(record, request)
+    preparing.set(externalKey, preparation)
+    try { return await preparation }
+    finally { if (preparing.get(externalKey) === preparation) preparing.delete(externalKey) }
+  }
+
+  async function prepareRecord(record, request) {
+    const externalKey = record.externalKey
+    persist() // the journal precedes the Slack side effect
+
+    let channel
+    try {
+      channel = await prepareChannel(record, {
+        journalName: name => {
+          record.channelSetup = { ...record.channelSetup, name }
+          persist()
+        },
+      })
+    }
+    catch (error) {
+      if (record.team) teamBootstrap.release(record)
+      if (error?.definitive) {
+        // Slack rejected the channel outright: nothing exists and nothing was
+        // launched, so the external key stays available for a corrected retry.
+        if (state.automations?.[externalKey] === record) delete state.automations[externalKey]
+        persist()
+        throw new AutomationRequestError(error.code || 'channel_create_failed', errorMessage(error), error.status || 409)
+      }
+      record.channelSetup = { ...record.channelSetup, status: 'uncertain', error: errorMessage(error) }
+      const attempted = record.channelSetup.name || record.channelName
+      setFailure(record, 'channel_creation_uncertain',
+        `Slack did not confirm whether it created the channel${attempted ? ` #${attempted}` : ''}: ${errorMessage(error)}`,
+        'If that channel exists, archive it; then retry with a new externalKey.')
+      throw new AutomationRequestError('channel_creation_uncertain', record.failure.message, 502)
+    }
+    record.channelId = channel.channelId
+    record.channelName = channel.channelName || record.channelName
+    record.channelSetup = { ...record.channelSetup, status: 'created', createdAt: now() }
+    if (record.team) {
+      try {
+        Object.assign(record.team, teamBootstrap.bind(record, request))
+      } catch (error) {
+        teamBootstrap.release(record)
+        setFailure(record, 'team_join_failed', errorMessage(error),
+          'Stop this automation with --archive to remove its channel, then retry with a new externalKey.')
+        await notifyFailure(record, record.failure).catch(() => {})
+        throw new AutomationRequestError(error?.code || 'team_join_failed', errorMessage(error), error?.status || 409)
+      }
+    }
+    record.status = 'pending'
+    touch(record) // channel, membership and bootstrap task become durable together
+    runOnce(externalKey, 'launch', () => launchPending(externalKey))
+    if (record.team) {
+      Promise.resolve()
+        .then(() => teamBootstrap.joined?.(record))
+        .catch(error => log('automation team join notice failed', externalKey, errorMessage(error)))
+    }
     return { automation: record, created: true }
   }
 
@@ -385,6 +599,12 @@ export function createAutomationLifecycle({
     if (!record) return false
     if (path.resolve(session.cwd || record.cwd) !== record.cwd) {
       setFailure(record, 'session_cwd_mismatch', 'The tmux session registered from a different working directory.', 'Stop the automation and investigate the launcher before retrying.')
+      return false
+    }
+    // A prepared channel is part of the automation's identity: its team
+    // membership and bootstrap task already name it.
+    if (record.channelId && session.channel !== record.channelId) {
+      setFailure(record, 'session_channel_mismatch', 'The automation session bound a different Slack channel than the one created for it.', 'Stop the automation and investigate before retrying.')
       return false
     }
     record.sessionId = session.id
@@ -414,6 +634,17 @@ export function createAutomationLifecycle({
   function recover() {
     for (const record of Object.values(records())) {
       if (record.status === 'released') continue
+      if (record.status === 'preparing_channel' && !preparing.has(record.externalKey)) {
+        // The bridge stopped while Slack was creating the channel. Its outcome
+        // is unknown and Slack offers no idempotent create, so fail closed.
+        if (record.team) teamBootstrap?.release?.(record)
+        record.channelSetup = { ...(record.channelSetup || {}), status: 'interrupted' }
+        const attempted = record.channelSetup.name || record.channelName
+        setFailure(record, 'channel_creation_interrupted',
+          `The bridge restarted while creating the Slack channel${attempted ? ` #${attempted}` : ''}; its outcome is unknown.`,
+          'If that channel exists, archive it; then create the automation with a new externalKey.')
+        continue
+      }
       if (record.prompt?.status === 'claimed' && record.status === 'injecting_prompt') {
         runOnce(record.externalKey, 'recover-prompt', async () => {
           if (record.prompt.status !== 'claimed' || record.status !== 'injecting_prompt') return
@@ -468,6 +699,9 @@ export function createAutomationLifecycle({
 
   async function stop(externalKey, { archive: shouldArchive = false } = {}) {
     validateExternalKey(externalKey)
+    // Let an in-flight channel preparation settle first: it either binds the
+    // channel (which this stop then archives) or removes the request.
+    await preparing.get(externalKey)?.catch(() => {})
     const record = recordFor(externalKey)
     if (!record) return null
     if (record.status === 'released') throw new AutomationRequestError('automation_ownership_released', 'Automation ownership was released; stop cannot touch the retained session.', 409)
@@ -495,9 +729,13 @@ export function createAutomationLifecycle({
         touch(record)
       }
       if (record.stop.archiveRequested && !record.channelId) record.stop.channelArchived = true
+      // A channel whose creation is unconfirmed may exist without SAB knowing
+      // its ID. Stop cannot archive it, so it keeps the name and the failure.
+      const unresolved = ['uncertain', 'interrupted'].includes(record.channelSetup?.status) && !record.channelId
+      if (unresolved) record.stop.unresolvedChannel = record.channelSetup.name || record.channelName || null
       record.status = 'stopped'
       record.stoppedAt = now()
-      record.failure = null
+      if (!unresolved) record.failure = null
       touch(record)
     } catch (error) {
       setFailure(record, 'stop_failed', errorMessage(error), 'Resolve the reported process or Slack archive error, then repeat the same stop request.')
@@ -527,7 +765,7 @@ export function createAutomationLifecycle({
     if (prior) return prior
     const correlate = () => {
       const session = state.sessions?.[expected.sessionId]
-      if (record.status !== 'active' || record.stop?.requestedAt || record.prompt?.status !== 'delivered' || record.initialPrompt ||
+      if (record.status !== 'active' || record.stop?.requestedAt || !['delivered', 'team_task'].includes(record.prompt?.status) || record.initialPrompt ||
           !record.collaborators.every(item => item.status === 'ready') ||
           running.has(`${externalKey}:launch`) || running.has(`${externalKey}:configure`)) {
         throw new AutomationRequestError('automation_setup_incomplete', 'Release requires completed automation setup with no pending launch or stop.', 409)
@@ -611,7 +849,7 @@ export function createAutomationLifecycle({
   }
 
   return {
-    create, status, stop, release, recover, reconcile, correlateSessionStart,
+    create, submit, status, stop, release, recover, reconcile, correlateSessionStart,
     consumeInitialPromptEcho, findForHook, acceptCodexBootstrap,
   }
 }

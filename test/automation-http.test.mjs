@@ -165,3 +165,37 @@ test('an incomplete exact stop returns a failing HTTP result', async () => {
     })
   })
 })
+
+test('automation HTTP create forwards caller identity and reports the prepared channel and team', async () => {
+  const seen = []
+  const lifecycle = {
+    async submit(body, options) {
+      seen.push({ body, options })
+      return {
+        created: true,
+        automation: {
+          externalKey: body.externalKey, tmux: 'sab-auto-2', status: 'pending', channelId: 'CNEW',
+          channelName: 'cc-barrique-2995', team: { teamId: 'team_epic', teamName: 'epic', alias: 'issue-2995', taskId: 'task_one', authorizedBy: { secret: 'internal' } },
+        },
+      }
+    },
+    status: () => null,
+  }
+  await withServer(lifecycle, async base => {
+    const response = await fetch(`${base}/automation/sessions?ppid=4242&tmux=sab-coord`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-ccs-provider': 'pi' },
+      body: JSON.stringify({ externalKey: 'k', team: { name: 'epic' } }),
+    })
+    assert.equal(response.status, 202)
+    assert.deepEqual(await response.json(), {
+      ok: true, created: true, externalKey: 'k', tmux: 'sab-auto-2', status: 'pending', channelId: 'CNEW',
+      channelName: 'cc-barrique-2995',
+      team: { teamId: 'team_epic', teamName: 'epic', alias: 'issue-2995', role: 'worker', taskId: 'task_one' },
+    })
+    const plain = await fetch(`${base}/automation/sessions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ externalKey: 'k2' }),
+    })
+    assert.equal(plain.status, 202)
+  })
+  assert.deepEqual(seen.map(item => item.options.caller), [{ ppid: '4242', tmux: 'sab-coord', provider: 'pi' }, null])
+})

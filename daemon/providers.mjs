@@ -129,6 +129,10 @@ const CODEX_VALUE_FLAGS = [
   '--model=', '--sandbox=', '--ask-for-approval=',
 ]
 const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
+// Claude Code selects its 1M-context variant with an exact `[1m]` suffix on an
+// otherwise ordinary model id. Accept only that suffix; spawned argv never
+// passes through a shell, so the brackets cannot become a glob.
+const CLAUDE_MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/
 
 // Pi's built-in tools are unrestricted by default. `--approve` controls only
 // project-local resources; `--safe` is consumed by `sab new pi` and enables the SAB
@@ -206,7 +210,7 @@ export function normalizeRemoteLaunchFlags(provider, input) {
     }
     if (provider === 'claude' && normalized.startsWith('--model=')) {
       const value = normalized.slice('--model='.length)
-      if (!MODEL_VALUE.test(value)) throw new Error(`invalid Claude model: ${value}`)
+      if (!CLAUDE_MODEL_VALUE.test(value)) throw new Error(`invalid Claude model: ${value}`)
     }
     if (provider === 'codex' && normalized.startsWith('--model=')) {
       const value = normalized.slice('--model='.length)
@@ -221,7 +225,7 @@ export function normalizeRemoteLaunchFlags(provider, input) {
       if (normalized === '--effort' && !['low', 'medium', 'high', 'max'].includes(value)) {
         throw new Error(`invalid Claude effort: ${value}`)
       }
-      if (normalized === '--model' && !MODEL_VALUE.test(value)) {
+      if (normalized === '--model' && !CLAUDE_MODEL_VALUE.test(value)) {
         throw new Error(`invalid Claude model: ${value}`)
       }
       flags.push(value)

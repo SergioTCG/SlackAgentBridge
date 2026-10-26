@@ -867,7 +867,9 @@ mutations additionally require exact provider-process/tmux ancestry; no bearer
 capability or Slack destination is accepted from the caller.
 
 Automation creation atomically records its external key and deterministic tmux
-identity before launch. Duplicate keys return the existing record. Native
+identity before launch. Duplicate keys return the existing record; a key first
+used for a named or team-bound request must be retried with the identical
+request, or it fails with `external_key_conflict`. Native
 session/channel correlation precedes collaborator invitation; all invitations
 and name resolution precede whitelisting and initial-prompt injection. The
 prompt is claimed at most once and receives no artifact grant. Exact stop
@@ -889,6 +891,39 @@ tmux, and provider-root ancestry, then feeds it through the ordinary
 SessionStart/channel/invitation/prompt correlation path. Concurrent native-hook
 and App Server events deduplicate there. Unrelated sessions, stopped records,
 cwd mismatches, replacement identities, and child threads cannot adopt it.
+
+A request with `channelName` or `team` creates its private Slack channel before
+launch, in the `preparing_channel` state. The record is journaled first, and the
+exact attempted name is journaled before each Slack call. Creation uses a
+single-attempt Slack client that never retries or waits out a rate limit, so a
+lost response cannot turn into a later attempt's `name_taken`. A definitive
+Slack rejection (for example `name_taken` for a requested name) or a rate limit
+removes the record, so nothing exists and the key can be reused. An
+unconfirmed create fails the record closed, and stopping it keeps the
+attempted name as `stop.unresolvedChannel`. A preparation found by boot recovery, but not
+owned by the current process, fails as `channel_creation_interrupted`. A
+requested name is never suffixed. The prepared channel is recorded in
+`channelTmux`, and the first SessionStart from the automation's exact tmux binds
+it without a Slack lookup and never mints another channel. Correlation then
+requires that exact channel.
+
+`team` binds the new channel as a worker of the caller's team. The caller must
+prove its exact coordinator session, as for `/team/*`, and hold a current owner
+or matching continuation dispatch authority. Reserving the slot consumes one
+dispatch and takes a `pendingMembers` reservation keyed by the external key.
+The reservation counts toward the member limit and owns its alias, all in the
+same journal write as the record. Once Slack returns the channel ID, the
+reservation becomes membership with `addedBy` provenance. If `team.task` is
+present, a queued task carrying `bootstrap.externalKey` is created in the same
+mutation. Until an automation is `active` (channel bound, collaborators invited
+and input ready), its channel reports the busy reason `automation setup`. No
+team task reaches it; before SessionStart, such tasks wait rather than fail. The
+team dispatcher also holds the bootstrap task itself until then. It then
+claims and injects it with the normal task header and exactly-once claim. A
+failed or stopped automation fails its held task. Stop removes the channel's
+worker membership, cancelling only that membership's active tasks, and closes a
+team the channel coordinated, before detaching the session record. Terminal
+task history and audit cards remain.
 
 ## Installation and updates
 

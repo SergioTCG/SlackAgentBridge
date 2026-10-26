@@ -78,3 +78,63 @@ test('sab automation validates and normalizes provider flags without contacting 
   assert.equal(invalid.status, 2)
   assert.match(invalid.stderr, /invalid Codex effort/)
 })
+
+test('sab automation create binds a team worker from the calling coordinator session', async t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-automation-team-cli-'))
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }))
+  const taskFile = path.join(temp, 'task.md')
+  fs.writeFileSync(taskFile, 'Implement issue 2995.\n')
+  const requests = []
+  const server = http.createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    requests.push({ url: req.url, provider: req.headers['x-ccs-provider'], body: JSON.parse(body) })
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ ok: true, created: true, externalKey: 'k', tmux: 'sab-auto', status: 'pending' }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const base = { ...process.env, SAB_AUTOMATION_URL: `http://127.0.0.1:${server.address().port}` }
+  for (const key of Object.keys(base)) if (key.startsWith('CCS_')) delete base[key]
+  const session = { ...base, CCS_BRIDGE: '1', CCS_TMUX: 'sab-auto-coordinator', CCS_PROVIDER: 'codex' }
+  const args = [
+    'create', '--external-key', 'github:barrique#2995', '--cwd', temp, '--provider', 'claude',
+    '--task-file', taskFile, '--channel-name', 'cc-barrique-2995-vivian-holding-lines',
+    '--team', 'epic-2995', '--alias', 'issue-2995', '--', '--model', 'claude-opus-5-5[1m]',
+  ]
+  const created = await runCli(args, session)
+  assert.equal(created.status, 0, created.stderr)
+  const url = new URL(requests[0].url, 'http://127.0.0.1')
+  assert.equal(url.pathname, '/automation/sessions')
+  assert.equal(url.searchParams.get('tmux'), 'sab-auto-coordinator')
+  assert.match(url.searchParams.get('ppid'), /^\d+$/)
+  assert.equal(requests[0].provider, 'codex')
+  assert.deepEqual(requests[0].body, {
+    externalKey: 'github:barrique#2995', cwd: temp, provider: 'claude',
+    flags: ['--model', 'claude-opus-5-5[1m]'], collaborators: [], initialPrompt: '',
+    channelName: 'cc-barrique-2995-vivian-holding-lines',
+    team: { name: 'epic-2995', alias: 'issue-2995', task: 'Implement issue 2995.\n' },
+  })
+
+  // Outside a bridged session a team worker cannot be requested at all.
+  const outside = await runCli(args, base)
+  assert.equal(outside.status, 2)
+  assert.match(outside.stderr, /inside the live Slack Agent Bridge session/)
+  for (const [bad, message] of [
+    [['--prompt-file', taskFile, '--task-file', taskFile, '--team', 'epic'], /only one of --prompt-file or --task-file/],
+    [['--task-file', taskFile], /--task-file requires --team/],
+    [['--prompt-file', taskFile, '--alias', 'x'], /--alias requires --team/],
+    [['--prompt-file', taskFile, '--channel-name', 'Bad Name'], /--channel-name must be/],
+  ]) {
+    const result = await runCli(['create', '--external-key', 'k', '--cwd', temp, '--provider', 'claude', ...bad], session)
+    assert.equal(result.status, 2, result.stdout)
+    assert.match(result.stderr, message)
+  }
+  // A plain named channel needs no session identity.
+  const named = await runCli(['create', '--external-key', 'k2', '--cwd', temp, '--provider', 'claude',
+    '--prompt-file', taskFile, '--channel-name', 'cc-named'], base)
+  assert.equal(named.status, 0, named.stderr)
+  assert.equal(new URL(requests.at(-1).url, 'http://127.0.0.1').search, '')
+  assert.equal(requests.at(-1).body.channelName, 'cc-named')
+  assert.equal(requests.length, 2)
+})

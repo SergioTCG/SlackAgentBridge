@@ -67,6 +67,20 @@ accounts, and the Mac user running the daemon.
   proof and an absent superseded tmux; it retains the external-key receipt and
   changes no provider, channel, whitelist or prompt state. Released records are
   excluded from adoption/ownership and their stop/archive API is refused.
+- **Programmatic team members:** a team-bound `sab automation create --team`
+  is the only way an agent can add a team member, and it adds only the channel
+  that this request creates. The daemon proves the caller's exact coordinator
+  process, tmux, native session and channel, exactly as for `sab team`. It
+  requires a current owner or same-team automatic-continuation turn and
+  consumes a dispatch from that turn's bounded budget. A collaborator turn,
+  local terminal input, a worker, a nested same-provider utility or a plain
+  script cannot do it. As for every `sab team` call, a child process of a
+  different provider started from the coordinator's own shell inherits its
+  session environment and is not distinguished from the coordinator. Existing channels are never added, the member limit and alias
+  uniqueness are enforced through a journaled reservation, and the membership
+  records its provenance. Who can instruct the new session does not widen: its
+  coordinator already supplies its initial prompt, and collaborators still need
+  the explicit `--collaborator` invitation.
 - **Invite before trust:** both automated collaborator setup and the manual
   status-panel picker call `conversations.invite` before changing the prompt
   allowlist. Invitation failure is visible and leaves that user untrusted;
