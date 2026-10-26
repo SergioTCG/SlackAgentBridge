@@ -84,6 +84,9 @@ import {
 } from './instructions.mjs'
 import { createAutomationLifecycle, proveAutomationReleaseProcess, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
 import { handleAutomationHttp } from './automation-http.mjs'
+import {
+  bootstrapTaskHold, createAutomationTeamBootstrap, detachAutomationTeams, preparedAutomationChannel,
+} from './team-automation.mjs'
 import { inviteAndResolveCollaborator, inviteAndWhitelistCollaborator } from './collaborators.mjs'
 import { createTerminalControl } from './terminal-control.mjs'
 import { handleTerminalHttp } from './terminal-http.mjs'
@@ -621,11 +624,28 @@ function ownerPromptPrivateContext(session, request) {
 }
 
 const ensureSessionChannel = createSessionChannelGate()
+
+// A named or team-bound automation created its channel before launch; its
+// first SessionStart binds exactly that channel and never mints another.
+async function bindPreparedAutomationChannel(session, channel) {
+  const { branch, worktree } = await gitInfo(session.cwd)
+  session.channel = channel
+  session.worktree = worktree
+  state.channels[channel] = session.id
+  saveState(state)
+  log('bound prepared automation channel', channel, 'for', session.id.slice(0, 8), 'via terminal', session.tmux)
+  const provider = providerOf(session)
+  await post(channel, `🟢 *Session started*\n\`${session.cwd}\`\nBranch: \`${branch || '—'}\` · Session \`${session.id.slice(0, 8)}\`` +
+    (provider === 'codex' ? ` · Provider: *${providerLabel(provider)}*` : ''))
+  return channel
+}
+
 async function createSessionChannel(session) {
   // A binding can be lost (state edited out from under the daemon, a botched
   // migration, a manual repair). Before minting a duplicate channel for a
   // terminal that already has one, reclaim it — a terminal maps to one channel.
   const prior = session.tmux && Object.entries(state.channelTmux).find(([, t]) => t === session.tmux)?.[0]
+  if (preparedAutomationChannel(state, session, prior)) return bindPreparedAutomationChannel(session, prior)
   if (prior && !sessionByChannel(prior)) {
     try {
       const info = await web.conversations.info({ channel: prior })
@@ -5213,6 +5233,16 @@ async function dispatchTeamTask(task) {
       Math.max(1, Number(task.instructionVersion) || 1)) {
     if (!(await updateTeamTaskPayloadAudit(task))) return false
   }
+  // A worker created by an automation receives its first task only after the
+  // automation's channel binding, collaborator setup and input readiness.
+  const bootstrapHold = bootstrapTaskHold(state, task)
+  if (bootstrapHold === 'wait') return false
+  if (bootstrapHold === 'ended') {
+    failTeamTask(state, task.id, 'The worker automation ended before its first task could be delivered.')
+    persistTeamLifecycle(task)
+    await updateTeamTaskAudit(task)
+    return false
+  }
   const expectedInstructionVersion = Math.max(1, Number(task.instructionVersion) || 1)
   const expectedAuditInstructionVersion = Math.max(1, Number(task.payloadAuditInstructionVersion) || 1)
   let team
@@ -5761,6 +5791,26 @@ async function failTeamTaskForSession(session, reason, { preserveReported = fals
   return true
 }
 
+// Assert a coordinator's current dispatch authority. An exhausted automatic
+// budget may renew only by claiming a pending authenticated event of this
+// exact team; the claim is persisted before the caller's side effect.
+function requireCoordinatorDispatch(session, team, authority = {
+  teamId: team.id, allowContinuation: team.continuation?.mode === 'auto-until-blocked',
+}) {
+  try {
+    assertCoordinatorDispatch(session, authority)
+  } catch (error) {
+    if (!['dispatch_budget_exhausted', 'owner_turn_required'].includes(error?.code)) throw error
+    const renewed = claimContinuationDispatchAuthority(team, session)
+    if (!renewed) throw error
+    saveStateNow(state)
+    log('renewed coordinator dispatch authority', team.id, renewed.event.id,
+      `${renewed.coalescedCount} event(s)`)
+    assertCoordinatorDispatch(session, authority)
+  }
+  return authority
+}
+
 function acceptedTeamMutation(session, task, requestId) {
   const mutation = teamMutationForRequest(state, session.channel, requestId, { taskId: task.id })
   // The original atomic write may have failed after mutating this process's
@@ -5850,17 +5900,7 @@ const teamService = {
         mutation: acceptedTeamMutation(session, prior, request.requestId),
       }
     }
-    try {
-      assertCoordinatorDispatch(session, authority)
-    } catch (error) {
-      if (!['dispatch_budget_exhausted', 'owner_turn_required'].includes(error?.code)) throw error
-      const renewed = claimContinuationDispatchAuthority(team, session)
-      if (!renewed) throw error
-      saveStateNow(state)
-      log('renewed coordinator dispatch authority', team.id, renewed.event.id,
-        `${renewed.coalescedCount} event(s)`)
-      assertCoordinatorDispatch(session, authority)
-    }
+    requireCoordinatorDispatch(session, team, authority)
     const taskId = `task_${crypto.randomBytes(12).toString('base64url')}`
     let files = []
     try { files = stageTeamFiles(session, request.paths || [], taskId) }
@@ -6939,6 +6979,9 @@ function teamStatusMarkdown(team) {
     const task = Object.values(state.teamTasks || {}).find(item => item.targetChannel === channel && isActiveTeamTask(item))
     return `| ${member.alias} | ${member.role} | <#${channel}> | ${live ? '🟢 live' : '💤 dormant'} | ${member.files ? 'enabled' : 'off'} | ${task ? `\`${task.id}\` · ${task.status}` : '—'} |`
   })
+  for (const reservation of Object.values(team.pendingMembers || {})) {
+    rows.push(`| ${reservation.alias} | worker | _automation creating its channel_ | ⏳ starting | off | — |`)
+  }
   return `*Session team \`${team.name}\`* · version ${team.version} · continuation: *${team.continuation?.mode || 'manual'}* · dispatch: *${teamDispatchMode(team)}*\n` +
     `| Alias | Role | Channel | Session | Files | Active task |\n|---|---|---|---|---|---|\n${rows.join('\n')}`
 }
@@ -7641,8 +7684,11 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
 // synchronous; Slack/tmux effects happen only after the preceding state is on
 // disk, so a daemon restart can reconcile without launching or prompting twice.
 async function launchAutomation(record) {
-  if (record.provider === 'pi' && state.control) {
-    pendingSpawnChannels.set(record.tmux, state.control)
+  // A prepared automation channel already exists; Pi's pre-SessionStart trust
+  // question belongs there rather than in the control channel.
+  const startupChannel = record.channelId || state.control
+  if (record.provider === 'pi' && startupChannel) {
+    pendingSpawnChannels.set(record.tmux, startupChannel)
     const timer = setTimeout(() => pendingSpawnChannels.delete(record.tmux), 10 * 60000)
     timer.unref?.()
   }
@@ -7687,6 +7733,22 @@ async function injectAutomationPrompt(session, prompt) {
   await tmuxPaste(session.tmux, prompt)
 }
 
+async function announceAutomationTeamDepartures(record, notices) {
+  for (const notice of notices) {
+    await announceCancelledTeamTasks(notice.cancelled)
+    if (notice.kind === 'removed') {
+      await post(notice.team.coordinatorChannel,
+        `🚫 \`${notice.alias}\` (<#${record.channelId}>) left session team \`${notice.team.name}\`: its automation was stopped.`).catch(() => {})
+    } else {
+      for (const memberChannel of notice.memberChannels) {
+        if (memberChannel === record.channelId) continue
+        await post(memberChannel,
+          `🕸️ Session team \`${notice.team.name}\` was closed because its coordinator automation was stopped. Existing provider sessions are unaffected.`).catch(() => {})
+      }
+    }
+  }
+}
+
 async function terminateAutomation(record) {
   const session = validateAutomationStopTarget(state, record)
 
@@ -7720,12 +7782,22 @@ async function terminateAutomation(record) {
   }
 
   const channel = record.channelId
+  // Its team roles end with the session: worker membership is removed and a
+  // team it coordinated is closed, before the session record is detached.
+  const teamDepartures = detachAutomationTeams(state, record)
+  for (const departure of teamDepartures) {
+    revokeCancelledTeamTasks(departure.cancelled)
+    if (departure.kind === 'closed') {
+      for (const memberChannel of departure.memberChannels) clearTeamTurn(sessionByChannel(memberChannel))
+    }
+  }
   detachAutomationState(state, record)
   if (channel) {
     deleteHandoffs(CONFIG_DIR, channel)
   }
   pendingSpawnChannels.delete(record.tmux)
   saveStateNow(state)
+  await announceAutomationTeamDepartures(record, teamDepartures)
 }
 
 async function archiveAutomationChannel(channel, record) {
@@ -7736,8 +7808,71 @@ async function archiveAutomationChannel(channel, record) {
   }
 }
 
+// ---- named and team-bound automation channels ------------------------------
+// The channel is created before launch so a requested name either exists for
+// this automation alone or the request fails without launching anything.
+function automationChannelError(error, name) {
+  const code = error?.data?.error
+  if (error?.data?.ok === false && code) {
+    const taken = code === 'name_taken'
+    return Object.assign(new Error(taken
+      ? `A Slack channel named #${name} already exists. Choose another channel name; nothing was launched.`
+      : `Slack rejected the channel #${name} (${code}); nothing was launched.`), {
+      definitive: true, code: taken ? 'channel_name_taken' : 'channel_create_rejected', status: taken ? 409 : 400,
+    })
+  }
+  return error
+}
+
+async function prepareAutomationChannel(record) {
+  const requested = record.channelName || null
+  let name = requested
+  if (!name) {
+    const { repo, branch, worktree } = await gitInfo(record.cwd)
+    name = channelName(repo, branch, worktree)
+  }
+  let created
+  try {
+    created = await web.conversations.create({ name, is_private: true })
+  } catch (error) {
+    // Only a generated name keeps the historical collision suffix; a requested
+    // name is part of the caller's contract and fails closed.
+    if (requested || error?.data?.error !== 'name_taken') throw automationChannelError(error, name)
+    const suffixed = `${name}-${Math.floor(Math.random() * 99)}`
+    try { created = await web.conversations.create({ name: suffixed, is_private: true }) }
+    catch (retryError) { throw automationChannelError(retryError, suffixed) }
+  }
+  const channelId = created?.channel?.id
+  if (!channelId) throw new Error('Slack did not return the created channel ID.')
+  state.channelTmux[channelId] = record.tmux
+  try { await web.conversations.invite({ channel: channelId, users: USER }) } catch {}
+  log('prepared automation channel', channelId, record.externalKey)
+  return { channelId, channelName: created.channel.name || name }
+}
+
+const automationTeamBootstrap = createAutomationTeamBootstrap({
+  state,
+  resolveCaller: caller => resolveTeamCaller(caller),
+  requireDispatch: (session, team) => requireCoordinatorDispatch(session, team),
+  switching: session => Boolean(activeTransition(session.channel) || switchingSids.has(session.id)),
+  removeTaskFiles: task => removeTeamTaskFiles(task),
+  ready: () => setImmediate(() => reconcileTeamTasks().catch(error => log('team bootstrap dispatch failed', String(error)))),
+  joined: async record => {
+    const team = state.teams?.[record.team.teamId]
+    if (!team || team.closedAt) return
+    await post(record.channelId,
+      `🕸️ Joined session team \`${team.name}\` as worker \`${record.team.alias}\`. <#${team.coordinatorChannel}> is the coordinator.` +
+      (record.team.taskId ? ` First task \`${record.team.taskId}\` is delivered once this session is ready.` : ''))
+    await post(team.coordinatorChannel,
+      `✅ Automation \`${record.externalKey}\` created <#${record.channelId}> as worker \`${record.team.alias}\` in \`${team.name}\`.` +
+      (record.team.taskId ? ` Its first task is \`${record.team.taskId}\`.` : '') + ' File relay remains off.')
+  },
+})
+
 const automationLifecycle = createAutomationLifecycle({
   state,
+  prepareChannel: prepareAutomationChannel,
+  teamBootstrap: automationTeamBootstrap,
   validateReleaseSession: async session => !activeTransition(session.channel) &&
     !updatingSessions.has(session.id) && !restarting.has(session.id) && !resurrectInFlight.has(session.id) &&
     await proveAutomationReleaseProcess(session, { pidAlive, isTmuxAlive: tmuxAlive, validProviderRootClaim }),

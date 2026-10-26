@@ -30,7 +30,9 @@ These public interfaces are compatibility-sensitive:
   `/automation/sessions` create/status/stop lifecycle. External keys are durable
   idempotency identities and must never be reused to launch or prompt twice.
 - `sab team` is the only agent-facing cross-session interface. Team membership
-  is administered through owner-only `/sab-team`; agents must never receive
+  is administered through owner-only `/sab-team`. The one exception is a
+  coordinator's own `sab automation create --team`, in an authorized turn,
+  which adds only the channel that call creates. Agents must never receive
   Slack credentials, raw destination selection, or arbitrary channel history.
 - Historical `CCS_*` environment keys and `ccs-*` tmux names in persisted state
   remain readable. New tmux names use `sab-*`.
@@ -162,7 +164,12 @@ generated MCP configuration. Do not print secrets during diagnostics.
   API error must not crash the long-running daemon.
 - State writes remain atomic. Replacement processes must not be overwritten or
   marked dormant by stale hooks from the process they superseded.
-- Automation creation journals its tmux identity before launch. Collaborators
+- Automation creation journals its tmux identity before launch. A named or
+  team-bound automation creates its channel before launch, never suffixes a
+  requested name, fails closed on an unconfirmed create, and binds only that
+  channel at SessionStart. Its bootstrap team task is held until collaborator
+  setup and input readiness, then claimed through the normal dispatcher.
+  Collaborators
   are invited before whitelisting, and the synthetic initial prompt is claimed
   only after native session/channel correlation and complete collaborator
   setup. It never receives an artifact grant. Exact automation stop must not

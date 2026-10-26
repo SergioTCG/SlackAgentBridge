@@ -78,6 +78,26 @@ test('Claude flag normalization preserves the existing alias', () => {
   assert.equal(normalizeLaunchFlag('claude', '--search'), null)
 })
 
+test('Claude remote launch flags accept the exact 1M-context model suffix only', () => {
+  assert.deepEqual(normalizeRemoteLaunchFlags('claude', [
+    '--dsp', '--chrome', '--model', 'claude-opus-5-5[1m]', '--effort', 'max',
+  ]), ['--dangerously-skip-permissions', '--chrome', '--model', 'claude-opus-5-5[1m]', '--effort', 'max'])
+  assert.deepEqual(normalizeRemoteLaunchFlags('claude', ['--model=claude-opus-5-5[1m]']),
+    ['--model=claude-opus-5-5[1m]'])
+  assert.deepEqual(normalizeRemoteLaunchFlags('claude', ['--model', 'claude-opus-5-5']),
+    ['--model', 'claude-opus-5-5'])
+  for (const model of [
+    'claude-opus-5-5[2m]', 'claude-opus-5-5[1m][1m]', 'claude-opus-5-5[1M]', '[1m]',
+    'claude-opus-5-5[1m]x', 'claude opus[1m]', 'claude-opus-5-5[*]', 'claude-opus-5-5[1m',
+  ]) {
+    assert.throws(() => normalizeRemoteLaunchFlags('claude', ['--model', model]), /invalid Claude model/)
+    assert.throws(() => normalizeRemoteLaunchFlags('claude', [`--model=${model}`]), /invalid Claude model/)
+  }
+  // The suffix is Claude-specific; Codex model ids keep their narrower grammar.
+  assert.throws(() => normalizeRemoteLaunchFlags('codex', ['--model', 'gpt-5.6-sol[1m]']), /invalid Codex model/)
+  assert.throws(() => normalizeRemoteLaunchFlags('codex', ['--model=gpt-5.6-sol[1m]']), /invalid Codex model/)
+})
+
 test('Codex flags require an allowlisted switch or inline value', () => {
   assert.equal(normalizeLaunchFlag('codex', '--search'), '--search')
   assert.equal(normalizeLaunchFlag('codex', '--yolo'), CODEX_DANGEROUS_FLAG)

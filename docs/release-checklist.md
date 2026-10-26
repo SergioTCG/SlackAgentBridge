@@ -160,6 +160,19 @@
 - [ ] Automation duplicate create launches/prompts exactly once, survives daemon
       restart, invites before whitelisting, and exact repeated stop/archive does
       not mutate any other session or channel.
+- [ ] Create an automation with `--channel-name` for a name that already exists
+      and confirm it fails with `channel_name_taken`, launches nothing and
+      leaves the key reusable. A free name creates exactly that channel, and
+      the first SessionStart binds it without creating another.
+- [ ] From a coordinator's owner turn, create a worker with `--team`, `--alias`
+      and `--task-file`. Confirm the membership notice in both channels, the
+      `addedBy` provenance, one consumed dispatch, collaborator invitation
+      before the task, and exactly one task header delivered as the initial
+      prompt. A retry with the same key creates nothing more. The same request
+      from a collaborator turn, from the worker or outside a session is refused.
+- [ ] `sab automation stop KEY --archive` on that worker removes its
+      membership and archives only its channel, while task history remains;
+      stopping a coordinator automation closes its team.
 - [ ] Launch a fresh Codex automation with its native SessionStart hook
       suppressed. Confirm the exact root App Server thread identity binds the
       pending tmux once, while a child thread, unrelated session, cwd mismatch,

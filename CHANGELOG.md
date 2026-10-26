@@ -6,6 +6,31 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- `sab automation create --channel-name NAME` creates the private channel under
+  exactly that Slack name before launch. An existing name fails closed with
+  `channel_name_taken`, with nothing launched or journaled.
+- Automations that start inside a session team. From its own authorized turn,
+  a coordinator's `sab automation create --team TEAM [--alias ALIAS]
+  [--task-file FILE]` creates a channel, which joins TEAM as a worker in the
+  same journal write that binds the channel to the automation, with recorded
+  provenance. The optional first team task is delivered as the initial prompt
+  with the normal task header once collaborator setup completes. The call
+  consumes one dispatch, honours the member limit through a journaled
+  reservation, and can never add an existing channel.
+- Claude launch flags accept the exact 1M-context model ids, such as
+  `--model claude-opus-5-5[1m]`, with the same validation as the standard id.
+
+### Changed
+
+- `sab automation stop` removes the stopped channel's team membership,
+  cancelling only that membership's active tasks, and closes a team it
+  coordinated. Task journals and audit cards remain.
+- A named or team-bound automation retried under the same external key must
+  repeat the identical request; otherwise it fails with
+  `external_key_conflict`. Plain automations keep their historical replay.
+
 ## [2.2.0] — 2026-10-25
 
 ### Added

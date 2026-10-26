@@ -62,6 +62,42 @@ Applying this feature requires updating and reinstalling the existing canonical
 Slack manifest so `/sab-team` is registered. It needs no new OAuth scope, no new
 Slack app, and no second Socket Mode daemon.
 
+## Workers created by automation
+
+A coordinator can create a worker for its own team without an owner click. Its
+`sab automation create` call names the team, an optional alias and an optional
+first task:
+
+```bash
+sab automation create --external-key 'github:org/repo#2995' \
+  --cwd ~/Code/repo-2995 --provider claude \
+  --channel-name cc-repo-2995-holding-lines \
+  --team epic-2990 --alias issue-2995 --task-file task.md -- --dsp
+```
+
+The call must run inside the coordinator's live SAB session, during an owner
+or automatic-continuation turn for that team, and it consumes one dispatch of
+that turn's budget. Collaborator turns, local terminal input, workers and
+nested provider utilities cannot create team members. SAB proves the caller as
+for `sab team`, then:
+
+1. journals the automation and reserves the worker slot and alias, which count
+   toward the 20-member bound;
+2. creates the private channel, under exactly `--channel-name` if given (an
+   existing name fails closed and nothing is launched);
+3. in one journal write, turns the reservation into membership with recorded
+   provenance and, with `--task-file`, queues the worker's first task;
+4. launches the session; after collaborator invitation and input readiness,
+   the team dispatcher claims that task once and delivers it as the initial
+   prompt with the normal task header.
+
+Only the channel that this call creates can join; an existing channel is never
+added programmatically. Retrying the same external key returns the original
+automation, and a different request under that key fails. Draining or closed
+teams refuse new workers. `sab automation stop KEY --archive` removes the
+worker's membership (cancelling only its active tasks) and closes any team the
+stopped session coordinated. Task journals and the Slack audit trail remain.
+
 ## How agents discover their role
 
 Roles are bridge state, not a sentence remembered by a model:

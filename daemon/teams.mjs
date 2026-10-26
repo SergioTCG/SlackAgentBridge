@@ -237,10 +237,20 @@ export function setTeamDispatchMode(team, mode, { now = Date.now() } = {}) {
   return { mode: next, changedAt: team.dispatchModeChangedAt || null }
 }
 
+// A slot reserved for a channel that an automation is still creating counts
+// toward the member bound and owns its alias, so concurrent creations cannot
+// overshoot either while Slack creates the channel.
+const teamMemberCount = team =>
+  Object.keys(team.members || {}).length + Object.keys(team.pendingMembers || {}).length
+const teamAliasTaken = (team, alias) =>
+  Object.values(team.members || {}).some(member => member.alias === alias) ||
+  Object.values(team.pendingMembers || {}).some(reservation => reservation.alias === alias)
+
 export function addTeamWorker(state, teamId, {
   channel,
   alias,
   files = false,
+  provenance = null,
   now = Date.now(),
 } = {}) {
   const team = teamById(state, teamId)
@@ -248,13 +258,70 @@ export function addTeamWorker(state, teamId, {
   const normalizedAlias = normalizeTeamAlias(alias)
   if (!target || target === team.coordinatorChannel) throw new TeamError('invalid_worker', 'Choose another SAB session channel.')
   if (activeTeamForChannel(state, target)) throw new TeamError('channel_already_teamed', 'That channel already belongs to an active session team.', 409)
-  if (Object.keys(team.members).length >= TEAM_MAX_MEMBERS) throw new TeamError('team_full', `A team may contain at most ${TEAM_MAX_MEMBERS} channels.`, 409)
-  if (Object.values(team.members).some(member => member.alias === normalizedAlias)) {
+  if (teamMemberCount(team) >= TEAM_MAX_MEMBERS) throw new TeamError('team_full', `A team may contain at most ${TEAM_MAX_MEMBERS} channels.`, 409)
+  if (teamAliasTaken(team, normalizedAlias)) {
     throw new TeamError('alias_in_use', `The alias ${normalizedAlias} is already used in this team.`, 409)
   }
-  team.members[target] = { role: 'worker', alias: normalizedAlias, files: Boolean(files), joinedAt: nowIso(now) }
+  team.members[target] = {
+    role: 'worker', alias: normalizedAlias, files: Boolean(files), joinedAt: nowIso(now),
+    ...(provenance ? { addedBy: provenance } : {}),
+  }
   team.version++
   return team.members[target]
+}
+
+// Reserve a worker slot for a channel an automation is about to create. Only
+// the coordinator's own automation call reserves a slot, and only its newly
+// created channel can commit it; an existing channel is never added this way.
+export function reserveTeamWorker(state, teamId, {
+  key,
+  alias,
+  provenance = null,
+  now = Date.now(),
+} = {}) {
+  const team = teamById(state, teamId)
+  const reservation = String(key || '')
+  if (!reservation) throw new TeamError('invalid_reservation', 'A worker reservation needs its automation identity.', 500)
+  const normalizedAlias = normalizeTeamAlias(alias)
+  const existing = team.pendingMembers?.[reservation]
+  if (existing) {
+    if (existing.alias !== normalizedAlias) {
+      throw new TeamError('reservation_conflict', 'That automation already reserved a different worker alias.', 409)
+    }
+    return existing
+  }
+  if (teamMemberCount(team) >= TEAM_MAX_MEMBERS) throw new TeamError('team_full', `A team may contain at most ${TEAM_MAX_MEMBERS} channels.`, 409)
+  if (teamAliasTaken(team, normalizedAlias)) {
+    throw new TeamError('alias_in_use', `The alias ${normalizedAlias} is already used in this team.`, 409)
+  }
+  team.pendingMembers ||= {}
+  team.pendingMembers[reservation] = {
+    alias: normalizedAlias, reservedAt: nowIso(now), ...(provenance ? { addedBy: provenance } : {}),
+  }
+  return team.pendingMembers[reservation]
+}
+
+export function releaseTeamWorkerReservation(state, teamId, key) {
+  const team = stores(state).teams[String(teamId || '')]
+  const reservation = String(key || '')
+  if (!team?.pendingMembers || !Object.hasOwn(team.pendingMembers, reservation)) return false
+  delete team.pendingMembers[reservation]
+  if (!Object.keys(team.pendingMembers).length) delete team.pendingMembers
+  return true
+}
+
+// Turn a reservation into membership for the exact channel its automation
+// created. The reservation's alias and provenance carry over unchanged.
+export function commitTeamWorkerReservation(state, teamId, key, { channel, now = Date.now() } = {}) {
+  const team = teamById(state, teamId)
+  const reservation = team.pendingMembers?.[String(key || '')]
+  if (!reservation) {
+    throw new TeamError('reservation_not_found', 'The reserved worker slot is no longer available.', 409)
+  }
+  releaseTeamWorkerReservation(state, team.id, key)
+  return addTeamWorker(state, team.id, {
+    channel, alias: reservation.alias, provenance: reservation.addedBy || null, now,
+  })
 }
 
 export function setTeamWorkerFiles(state, teamId, selector, enabled) {
@@ -274,19 +341,22 @@ export function resolveTeamPeer(state, teamId, selector) {
   return { team, channel: matches[0][0], member: matches[0][1] }
 }
 
-export function removeTeamWorker(state, teamId, selector, { now = Date.now() } = {}) {
+export function removeTeamWorker(state, teamId, selector, {
+  now = Date.now(), reason = 'Team membership was removed.',
+} = {}) {
   const { team, channel, member } = resolveTeamPeer(state, teamId, selector)
   delete team.members[channel]
   team.version++
   const cancelled = cancelTasks(state, task => task.teamId === team.id &&
     ACTIVE_TASK_STATES.has(task.status) && (task.sourceChannel === channel || task.targetChannel === channel),
-  'Team membership was removed.', now)
+  reason, now)
   return { channel, member, cancelled }
 }
 
 export function closeTeam(state, teamId, { now = Date.now() } = {}) {
   const team = teamById(state, teamId)
   team.closedAt = nowIso(now)
+  delete team.pendingMembers
   team.version++
   const cancelled = cancelTasks(state, task => task.teamId === team.id && ACTIVE_TASK_STATES.has(task.status),
     'The session team was closed.', now)
@@ -365,6 +435,7 @@ export function createTeamTask(state, {
   text,
   files = [],
   parentTaskId = null,
+  bootstrap = null,
   requestId,
   id = randomId('task'),
   now = Date.now(),
@@ -411,6 +482,9 @@ export function createTeamTask(state, {
     targetChannel,
     targetAlias: member.alias,
     ...(parentTaskId ? { parentTaskId: String(parentTaskId) } : {}),
+    // The first task of a worker created by an automation. It is delivered as
+    // that automation's initial prompt once its collaborator setup completes.
+    ...(bootstrap?.externalKey ? { bootstrap: { externalKey: String(bootstrap.externalKey) } } : {}),
     targetSessionId: null,
     targetProvider: null,
     targetNodeId: null,

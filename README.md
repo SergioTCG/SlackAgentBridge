@@ -507,7 +507,39 @@ touching the retained session. It is not stop/archive or a new launch.
 validate and canonicalize the same provider argv before allocating its own
 worktrees, databases, or ports. Codex accepts both split and inline model/effort
 forms; arbitrary `--config` remains forbidden, while safe effort input is
-translated to Codex's native `model_reasoning_effort` override.
+translated to Codex's native `model_reasoning_effort` override. Claude accepts
+the exact 1M-context model ids, such as `--model claude-opus-5-5[1m]`.
+
+`--channel-name NAME` creates the private channel under exactly that Slack name
+(lowercase letters, digits, `-` and `_`, at most 80 characters) before anything
+is launched. An existing name fails closed with `channel_name_taken`; nothing is
+journaled, so the same external key may be retried with another name.
+
+A team's coordinator can create its own workers without an owner click:
+
+```bash
+sab automation create \
+  --external-key 'github:org/repo#2995' \
+  --cwd /Users/example/Code/repo-2995 \
+  --provider claude \
+  --channel-name cc-repo-2995-holding-lines \
+  --team epic-2990 --alias issue-2995 \
+  --task-file /path/to/task.md \
+  -- --model 'claude-opus-5-5[1m]' --effort max --dsp
+```
+
+The command must run inside the live SAB session that coordinates `epic-2990`,
+during an owner or automatic-continuation turn; it consumes one dispatch from
+that turn's budget, like `sab team send`. The new channel joins the team as
+worker `issue-2995` (default: the channel name) in the same journal write that
+binds the channel to the automation, and its provenance is recorded. With
+`--task-file`, the worker's first team task is created at the same time and
+delivered as its initial prompt, with the normal task header, after
+collaborator setup. Only the channel that this automation call creates can
+join; an existing channel is never added programmatically, and the team's
+member limit still applies. `sab automation stop KEY --archive` removes that
+membership again and closes any team the stopped session coordinated; task
+journals and Slack audit cards remain.
 
 ### Return generated files
 

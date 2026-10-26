@@ -41,6 +41,15 @@ export async function readAutomationJson(req) {
   catch { throw new AutomationRequestError('invalid_json', 'request body is not valid JSON') }
 }
 
+// A team-bound create must prove the exact coordinator session, exactly as a
+// `sab team` call does. Plain automations remain script-facing and need none.
+function callerRequest(req, url) {
+  const ppid = url.searchParams.get('ppid')
+  const tmux = url.searchParams.get('tmux')
+  if (!ppid && !tmux) return null
+  return { ppid, tmux, provider: req.headers['x-ccs-provider'] || 'claude' }
+}
+
 function decodedKey(segment) {
   try { return decodeURIComponent(segment) }
   catch { throw new AutomationRequestError('invalid_external_key', 'externalKey path encoding is invalid') }
@@ -50,13 +59,27 @@ export async function handleAutomationHttp(req, res, url, lifecycle) {
   if (url.pathname === '/automation/sessions' && req.method === 'POST') {
     try {
       requireScriptClient(req, { json: true })
-      const { automation, created } = lifecycle.create(await readAutomationJson(req))
+      const body = await readAutomationJson(req)
+      const { automation, created } = typeof lifecycle.submit === 'function'
+        ? await lifecycle.submit(body, { caller: callerRequest(req, url) })
+        : lifecycle.create(body)
       sendJson(res, 202, {
         ok: true,
         created,
         externalKey: automation.externalKey,
         tmux: automation.tmux,
         status: automation.status,
+        ...(automation.channelId ? { channelId: automation.channelId } : {}),
+        ...(automation.channelName ? { channelName: automation.channelName } : {}),
+        ...(automation.team ? {
+          team: {
+            teamId: automation.team.teamId,
+            teamName: automation.team.teamName,
+            alias: automation.team.alias,
+            role: 'worker',
+            taskId: automation.team.taskId || null,
+          },
+        } : {}),
       })
     } catch (error) {
       const status = error instanceof AutomationRequestError ? error.status : 500
