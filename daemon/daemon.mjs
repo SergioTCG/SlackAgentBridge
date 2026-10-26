@@ -2946,6 +2946,10 @@ function claudeConversationGone(session) {
   return !(session.transcript && fs.existsSync(session.transcript))
 }
 
+// A new Claude session has no conversation until its first prompt, so a
+// restart's `--resume` would exit at once and strand the channel.
+const NO_CONVERSATION_NOTICE = 'ℹ️ This Claude session has no conversation to resume yet, so restarting it now would strand the channel. Send it a first message, then try again. Nothing was changed.'
+
 // sid → ts of a resurrect currently materializing. Guards against stacked spawns:
 // messages that arrive while claude is still starting used to trigger fresh spawns
 // (and fresh "Waking…" posts) every time. Cleared by SessionStart, or after 90s.
@@ -3787,6 +3791,7 @@ async function updateAndRestart(session, { expectedSessionId = null } = {}) {
   let reservation = null
   if (bulkUpdateRunning) return post(session.channel, '⏳ A bridge-wide session update is already running. This session will be included if it is idle.')
   if (updatingSessions.has(updateSessionId)) return post(session.channel, '⏳ This session is already updating.')
+  if (claudeConversationGone(session)) return post(session.channel, NO_CONVERSATION_NOTICE)
   const provider = providerOf(session)
   const label = providerLabel(provider)
   try {
@@ -3813,6 +3818,7 @@ function bulkUpdateContext() {
     internalSessionIds: new Set(internalTurns.keys()),
     restartingSessionIds: new Set([...restarting, ...updatingSessions]),
     wakingSessionIds: new Set(resurrectInFlight.keys()),
+    conversationMissing: claudeConversationGone,
   }
 }
 
@@ -6968,6 +6974,7 @@ async function restartSessionWithMutation(session, {
   mutate,
   beforeMutation,
 } = {}) {
+  if (claudeConversationGone(session)) throw new Error('no conversation to resume yet: send this Claude session a first message, then try again. Nothing was changed.')
   const reservation = reserveSessionMaintenance(session, { expectedSessionId })
   try {
     if (notice) await post(reservation.channel, notice).catch(error =>
@@ -6995,6 +7002,7 @@ async function restartSessionWithMutation(session, {
 
 async function switchAccount(session, name, { expectedSessionId = null } = {}) {
   const label = name ? `\`${name}\`` : "this machine's own login"
+  if (claudeConversationGone(session)) return post(session.channel, NO_CONVERSATION_NOTICE)
   return restartSessionWithMutation(session, {
     expectedSessionId,
     notice: `🔐 *Switching subscription* → ${label}. Restarting and resuming this conversation…`,
@@ -7054,6 +7062,7 @@ function displayFlags(session) {
 // this restarts the session and resumes the same conversation — the same dance
 // as /sab-account and /sab-update.
 async function setFlags(session, flags, { expectedSessionId = null } = {}) {
+  if (claudeConversationGone(session)) return post(session.channel, NO_CONVERSATION_NOTICE)
   return restartSessionWithMutation(session, {
     expectedSessionId,
     notice: `🔧 *Setting launch flags* → \`${flags.join(' ') || '(none)'}\`. Restarting and resuming this conversation…`,
@@ -8139,6 +8148,7 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       if (rest.length !== 1) return post(channel, 'Usage: `/sab-account <email|account-key|alias>`')
       const info = accountPools.status(channel)
       const selector = ['default', 'none'].includes(rest[0].toLowerCase()) ? info.group.preferred[providerOf(session)] : rest[0]
+      if (claudeConversationGone(session)) return post(channel, NO_CONVERSATION_NOTICE)
       const result = await accountPools.switchAccount(session, selector, { expectedSessionId: expectedSessionId || session.id, requestId: `slack-${crypto.randomUUID()}` })
       if (result.status === 'unchanged') return post(channel, 'Already using that account.')
       return
@@ -9134,6 +9144,7 @@ async function handleManagementAction(body, action, parsed) {
       return postAccountPoolStatus(channel)
     }
     if (parsed.action === 'select' && action.selected_option?.value) {
+      if (claudeConversationGone(session)) return post(channel, NO_CONVERSATION_NOTICE)
       const result = await accountPools.switchAccount(session, action.selected_option.value, { expectedSessionId, requestId: `slack-${crypto.randomUUID()}` })
       if (result.status === 'unchanged') return post(channel, 'Already using that account.')
       return

@@ -15,12 +15,29 @@ test('account restart rechecks the idle/authority gate after a delayed Slack not
   const deps = { reserveSessionMaintenance: () => ({ sessionId: 's', channel: 'CWORK' }), post: async () => {}, log: () => {},
     maintenanceSessionIsAuthoritative: () => true, saveStateNow: () => {}, state: {},
     stopReservedSession: async () => { stopped = true }, resurrect: async () => {}, tmuxAlive: async () => true,
-    scheduleUpdateGuardCleanup: () => {}, releaseSessionMaintenance: () => { released = true } }
+    scheduleUpdateGuardCleanup: () => {}, releaseSessionMaintenance: () => { released = true },
+    claudeConversationGone: () => false }
   const restart = new Function('deps', `const { ${Object.keys(deps).join(', ')} } = deps; return (${source});`)(deps)
   await assert.rejects(restart({ id: 's' }, { mutate: () => { mutated = true }, beforeMutation: async () => { await Promise.resolve(); throw new Error('became busy during notice') } }), /became busy/)
   assert.equal(mutated, false)
   assert.equal(stopped, false)
   assert.equal(released, true)
+})
+
+test('a restart refuses a Claude session with no conversation before reserving, posting or stopping it', async () => {
+  const start = daemon.indexOf('async function restartSessionWithMutation(')
+  const end = daemon.indexOf('\nasync function switchAccount(', start)
+  const source = daemon.slice(start, end)
+  const touched = []
+  const deps = { reserveSessionMaintenance: () => { touched.push('reserve'); return { sessionId: 's', channel: 'CWORK' } },
+    post: async () => { touched.push('post') }, log: () => {},
+    maintenanceSessionIsAuthoritative: () => true, saveStateNow: () => { touched.push('save') }, state: {},
+    stopReservedSession: async () => { touched.push('stop') }, resurrect: async () => { touched.push('resurrect') }, tmuxAlive: async () => true,
+    scheduleUpdateGuardCleanup: () => {}, releaseSessionMaintenance: () => { touched.push('release') },
+    claudeConversationGone: session => session.id === 's' }
+  const restart = new Function('deps', `const { ${Object.keys(deps).join(', ')} } = deps; return (${source});`)(deps)
+  await assert.rejects(restart({ id: 's' }, { notice: 'restarting', mutate: () => { touched.push('mutate') } }), /no conversation to resume yet/)
+  assert.deepEqual(touched, [])
 })
 
 test('pool daemon integration is opt-in and uses the existing exact restart/input-fence path', () => {

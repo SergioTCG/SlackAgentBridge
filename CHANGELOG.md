@@ -58,6 +58,17 @@ Notable changes to this project. Format based on
   `continuation`, `autoRelease` and `coordinatesTeam` in context. Existing
   fields are unchanged.
 
+### Fixed
+
+- A restart no longer strands a Claude session that has not yet received a
+  message.
+  - Claude writes no conversation until the first prompt, so the restart's
+    `--resume` exited at once. The channel was left stopped, and after an
+    account handover its input stayed fenced.
+  - Automatic account handover now skips such a session.
+  - `/sab-account`, `/sab-update`, bulk and scheduled updates and launch-flag
+    changes refuse it before stopping anything, and ask for a first message.
+
 ## [2.3.0] — 2026-10-26
 
 ### Added

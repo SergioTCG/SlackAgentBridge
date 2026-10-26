@@ -29,6 +29,21 @@ function stateFixture() {
   }
 }
 
+test('bulk update skips a session with no conversation to resume', () => {
+  const state = stateFixture()
+  const plan = planBulkSessionUpdate(state, {
+    pidAlive: () => true,
+    conversationMissing: session => session.id === 'claude-id',
+  })
+  assert.deepEqual(plan.eligible.map(session => session.id), ['codex-id', 'pi-id'])
+  assert.deepEqual(plan.skipped.map(item => [item.session.id, item.reason]), [
+    ['claude-id', 'no conversation to resume yet'],
+    ['automation-id', 'automation-owned session'],
+  ])
+  // Without the check, nothing changes for existing callers.
+  assert.equal(bulkUpdateBlockReason(state.sessions['claude-id']), null)
+})
+
 test('boot startup claims are exact, one-shot, and revocable on current-process startup', () => {
   const session = {
     id: 'codex-id', provider: 'codex', channel: 'CCODEX', pid: 22, tmux: 'sab-codex',

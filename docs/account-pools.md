@@ -409,7 +409,9 @@ clear the legacy launch environment.
 
 Active turns, delegated team work, questions, permissions, automation-owned
 sessions, private maintenance, provider switches, dormant sessions, and another
-restart are not eligible. An input-fenced restart is journaled before teardown
+restart are not eligible. Neither is a Claude session that has not received its
+first prompt: Claude writes no conversation until then, so `--resume` would
+exit at once. An input-fenced restart is journaled before teardown
 and rechecks authority/idleness after its Slack notice. The exact provider-root
 PID/tmux and two unchanged native idle-surface snapshots must be verified before
 teardown; absent hooks/pollers alone never prove idle. Startup must re-adopt

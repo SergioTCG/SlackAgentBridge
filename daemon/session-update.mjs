@@ -15,6 +15,7 @@ export function bulkUpdateBlockReason(session, {
   restartingSessionIds = new Set(),
   wakingSessionIds = new Set(),
   automations = {},
+  conversationMissing = () => false,
 } = {}) {
   if (transitionChannels.has(session.channel)) return 'provider switch in progress'
   if (session.teamActiveTaskId) return 'delegated team task in progress'
@@ -25,6 +26,9 @@ export function bulkUpdateBlockReason(session, {
   if (internalSessionIds.has(session.id)) return 'private maintenance turn in progress'
   if (restartingSessionIds.has(session.id) || wakingSessionIds.has(session.id)) return 'session already restarting'
   if (busySessionIds.has(session.id) || session.codexTurnStartedAt || session.piTurnStartedAt) return 'turn in progress'
+  // Claude writes a conversation only with its first prompt; until then a
+  // restart's `--resume` exits at once and strands the channel.
+  if (conversationMissing(session)) return 'no conversation to resume yet'
   return null
 }
 
