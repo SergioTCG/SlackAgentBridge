@@ -167,6 +167,12 @@ run from the checkout already named by the live LaunchAgent; invoking it from
 an isolated development worktree fails before changing hooks, configuration,
 Git state, or the public `sab` link.
 
+Existing 2.2 installations should read [Migrating to
+2.3](docs/migrating-to-2.3.md). Version 2.3 lets a team coordinator create
+named worker automations that join its team with a first task, accepts
+1M-context Claude model ids, and fixes automatic account handover for idle
+Claude sessions. Nothing new is activated and no session state is migrated.
+
 Existing 2.1 installations should read [Migrating to
 2.2](docs/migrating-to-2.2.md). Version 2.2 adds opt-in account pools for
 switching between Claude or Codex subscriptions, two-phase team task release,
