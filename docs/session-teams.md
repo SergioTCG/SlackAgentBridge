@@ -224,15 +224,27 @@ sab team unschedule --id SCHEDULE_ID
 A due wake becomes one durable continuation event for that exact team, so the
 woken turn gets the usual bounded continuation budget and audit trail. Its
 authority comes only from the registration; provider background notifications
-and collaborator text cannot create one. The limits:
+and collaborator text cannot create one. The rules:
 
+- only an owner turn, or the delegated turn that handles a sub-coordinator's
+  standing task, may register a wake; an automatic continuation, including one
+  a wake started, cannot register more;
+- a wake registered by a delegated turn is removed when that standing task
+  ends;
+- a wake never renews a running turn's dispatch budget: only an authenticated
+  worker event can;
 - wakes need automatic continuation (`/sab-team auto`);
 - a team holds at most eight;
 - recurring intervals run from 5 minutes to 24 hours and expire after 30 days;
 - a one-time wake fires up to an hour late after downtime, then is dropped;
 - missed occurrences coalesce into one;
-- a draining or manual team skips them;
-- the note is echoed into the wake prompt with angle brackets removed.
+- a draining team skips them, and `/sab-team manual` removes them;
+- request receipts outlive their wake, so a retry never re-creates one;
+- the note is quoted in the wake prompt and labelled as written by the
+  coordinator, not the owner; brackets, quotes and the bridge's notification
+  phrase are removed;
+- the owner sees wakes in `/sab-team status` and `/sab-team tree`, and removes
+  one with `/sab-team unschedule ID`.
 
 ### Waking dormant workers
 
@@ -244,14 +256,22 @@ exact native session. SAB never resurrects a session without one. Wakes are
 rate-limited to one per worker every two minutes, and are announced in both
 channels.
 
-For a standing task, SAB itself wakes the dormant worker once a coordinator
-follow-up is pending, at most every ten minutes, so a sub-team coordinator
-stays reachable. Exclusive tasks keep their historical behaviour: only the
-owner or an explicit `sab team wake` resumes them.
+For a standing task, SAB itself wakes the dormant worker once per pending
+coordinator follow-up, so a sub-team coordinator stays reachable. Exclusive
+tasks keep their historical behaviour: only the owner or an explicit `sab team
+wake` resumes them. Wakes are also refused during drain unless the task is
+already bound.
+
+A session the owner ended with `/sab-kill` is never resurrected by any of
+these: not by an agent wake, an automatic standing wake, a scheduled wake or a
+worker event. Its team events wait until the owner's next message in that
+channel resumes it.
 
 ### Monitoring
 
-`sab team tree --json` returns the caller's team and the sub-teams below it:
+`sab team tree --json`, for a coordinator outside collaborator-started turns,
+returns its team and the sub-teams below it. Plain workers keep the narrower
+`sab team peers` view. The tree includes:
 
 - members, with roles, providers and availability;
 - active tasks, with status, reservation, pending gates and release readiness;

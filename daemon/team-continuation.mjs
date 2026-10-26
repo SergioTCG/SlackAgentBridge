@@ -116,8 +116,16 @@ export function claimContinuationDispatchAuthority(team, session, {
   const current = Date.parse(prior.expiresAt || 0) > now && prior.remaining > 0
   if (current) return null
 
+  // Only authenticated worker events renew authority. A scheduled wake is the
+  // coordinator's own timer: it must wake a turn with its note, never refill a
+  // running turn's budget, so it stays queued.
+  const scheduled = continuation.pending.filter(event => event.kind === 'schedule')
+  const workerEvents = continuation.pending.filter(event => event.kind !== 'schedule')
+  if (!workerEvents.length) return null
+  continuation.pending = workerEvents
   const coalesced = coalesceContinuations(team, { now })
   const event = claimContinuation(team, { now })
+  continuation.pending = [...scheduled, ...continuation.pending]
   if (!event) return null
   beginContinuationTeamTurn(session, { teamId: team.id, eventId: event.id }, { now, budget })
   settleContinuation(team, event.id, { status: 'succeeded', now })

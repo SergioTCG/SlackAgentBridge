@@ -236,6 +236,9 @@ sab team cancel --task TASK_ID
 sab team mutation --request-id REQUEST_ID --task TASK_ID
 sab team mode draining
 sab team wait --task TASK_ID --json
+sab team schedule --every 15m --note 'Check CI'
+sab team wake --to WORKER_ALIAS
+sab team tree --json
 sab automation create ...
 sab automation status EXTERNAL_KEY
 sab automation stop EXTERNAL_KEY --archive

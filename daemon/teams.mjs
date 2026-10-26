@@ -363,27 +363,35 @@ export function parseScheduleInterval(value) {
   return ms
 }
 
-// The note is coordinator-written text echoed into its own wake prompt. Strip
-// angle brackets so it can never imitate a bridge envelope.
-const scheduleNote = value => String(value || '').replace(/[\u0000-\u001f\u007f<>]+/g, ' ')
+const TEAM_SCHEDULE_RECEIPTS_MAX = 64
+
+// The note is agent-written text shown back to the coordinator, quoted and
+// labelled. Strip anything that could imitate a bridge envelope or the
+// bridge's own notification sentence.
+const scheduleNote = value => String(value || '').replace(/[\u0000-\u001f\u007f<>"]+/g, ' ')
+  .replace(/system\s*notification/gi, 'system-notification')
   .replace(/\s+/g, ' ').trim().slice(0, TEAM_SCHEDULE_NOTE_MAX)
 
 export function addTeamSchedule(team, {
-  every = null, at = null, note = '', requestId, createdBy = null, now = Date.now(), id = randomId('sched'),
+  every = null, at = null, note = '', requestId, createdBy = null, sourceTaskId = null,
+  now = Date.now(), id = randomId('sched'),
 } = {}) {
   const key = String(requestId || '')
   if (!REQUEST_ID_RE.test(key)) throw new TeamError('invalid_request_id', 'A bounded idempotency request ID is required.')
   if (Boolean(every) === Boolean(at)) throw new TeamError('invalid_schedule', 'Choose exactly one of --every or --at.')
   const text = scheduleNote(note)
   const payloadHash = hash(JSON.stringify({ every: every || null, at: at || null, note: text }))
-  team.schedules ||= []
-  const existing = team.schedules.find(item => item.requestId === key)
-  if (existing) {
-    if (existing.payloadHash !== payloadHash) {
+  // A receipt outlives its wake, so a retried registration never re-creates a
+  // wake that already fired, expired or was removed.
+  const receipt = team.scheduleReceipts?.[key]
+  if (receipt) {
+    if (receipt.payloadHash !== payloadHash) {
       throw new TeamError('request_conflict', 'That request ID was already used for a different schedule.', 409)
     }
-    return { schedule: existing, created: false }
+    const live = (team.schedules || []).find(item => item.id === receipt.scheduleId)
+    return { schedule: live || { ...receipt.view }, created: false }
   }
+  team.schedules ||= []
   if (team.schedules.length >= TEAM_MAX_SCHEDULES) {
     throw new TeamError('schedule_limit', `A team holds at most ${TEAM_MAX_SCHEDULES} scheduled wakes.`, 409)
   }
@@ -401,9 +409,36 @@ export function addTeamSchedule(team, {
   Object.assign(schedule, {
     id: String(id), requestId: key, payloadHash, note: text, occurrences: 0,
     createdAt: nowIso(now), ...(createdBy ? { createdBy } : {}),
+    // A wake registered by a delegated turn lives no longer than the standing
+    // task that carried the authority.
+    ...(sourceTaskId ? { sourceTaskId: String(sourceTaskId) } : {}),
   })
   team.schedules.push(schedule)
+  team.scheduleReceipts ||= {}
+  team.scheduleReceipts[key] = { payloadHash, scheduleId: schedule.id, createdAt: schedule.createdAt, view: publicTeamSchedule(schedule) }
+  const keys = Object.keys(team.scheduleReceipts)
+  for (const old of keys.slice(0, Math.max(0, keys.length - TEAM_SCHEDULE_RECEIPTS_MAX))) delete team.scheduleReceipts[old]
   return { schedule, created: true }
+}
+
+// Drop wakes whose delegated source task ended or no longer belongs to this
+// team's coordinator. Returns the removed wakes.
+export function pruneOrphanedTeamSchedules(state, team) {
+  const removed = []
+  for (const schedule of [...(team?.schedules || [])]) {
+    if (!schedule.sourceTaskId) continue
+    const task = state?.teamTasks?.[schedule.sourceTaskId]
+    if (task && isStandingTeamTask(task) && ACTIVE_TASK_STATES.has(task.status) &&
+        task.targetChannel === team.coordinatorChannel) continue
+    removed.push(removeTeamSchedule(team, schedule.id))
+  }
+  return removed
+}
+
+export function clearTeamSchedules(team) {
+  const removed = [...(team?.schedules || [])]
+  if (team) delete team.schedules
+  return removed
 }
 
 export function removeTeamSchedule(team, scheduleId) {
@@ -447,6 +482,7 @@ export function publicTeamSchedule(schedule) {
     expiresAt: schedule.expiresAt,
     note: schedule.note || '',
     occurrences: Number(schedule.occurrences || 0),
+    ...(schedule.sourceTaskId ? { sourceTaskId: schedule.sourceTaskId } : {}),
     createdAt: schedule.createdAt,
   }
 }
