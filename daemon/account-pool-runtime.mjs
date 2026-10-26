@@ -11,6 +11,18 @@ import { accountCredentialReference } from './account-profiles.mjs'
 const fail = code => { throw new Error(code) }
 const requestPattern = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
 const proofKey = (from, to) => `${from}:${to}`
+// Plain causes for the pre-teardown rejections an owner can act on.
+const rejectionCauses = {
+  account_identity_unverified: 'the target login could not be verified',
+  account_switch_blocked: 'the session had work or input pending',
+  account_switch_not_proven_idle: 'its terminal was not proven idle',
+  account_registry_changed: 'the account registry changed',
+  account_background_process_changed: 'a background process changed',
+}
+// A rejected automatic handover is retried after 15 min, doubling per
+// consecutive rejection up to 4 h, never on every monitor tick.
+const automaticRetryDelay = journal => Math.min(4 * 3600000, 900000 * 2 ** Math.min(4, (journal.attempt || 1) - 1))
+const retryLabel = ms => ms < 3600000 ? `${Math.round(ms / 60000)} min` : `${Math.round(ms / 3600000)} h`
 export function accountPoolMode(value) {
   const mode = value || 'off'
   if (!['off', 'shadow', 'manual', 'auto'].includes(mode)) fail('invalid_account_pool_mode')
@@ -201,6 +213,9 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     const journal = { requestId, digest, channelId, sessionId: session.id, sourceAccountId: source?.id || null, targetAccountId: target.id,
       registryRevision: record.revision, phase: 'prepared', at: now(), automatic }
     if (taskMaintenance) journal.taskMaintenance = taskMaintenance
+    const prior = poolState().switches[channelId]
+    if (automatic && prior?.automatic && prior.phase === 'rejected' && prior.sessionId === session.id &&
+        prior.targetAccountId === target.id) journal.attempt = (prior.attempt || 1) + 1
     switching.add(channelId)
     try {
       poolState().receipts[key] = journal
@@ -254,10 +269,13 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     } catch (error) {
       const rejected = journal.phase === 'prepared' || error.accountPreflightRejected === true
       journal.phase = rejected ? 'rejected' : 'interrupted'
+      if (rejected && /^account_[a-z_]{1,60}$/.test(error.message)) journal.reason = error.message
       journal.failure = rejected ? 'Rejected before provider teardown; verify credentials, idle state and pending work, then use a new request ID.'
         : 'Verify this exact session with /sab-status before requesting another handover; the restart will not be replayed.'
       if (!persistenceFailed) save()
-      await notify(channelId, rejected ? 'Account handover was rejected before teardown. The existing provider was not stopped.'
+      const cause = rejectionCauses[journal.reason] ? `: ${rejectionCauses[journal.reason]}` : ''
+      const retry = automatic ? ` If it is still needed, SAB retries automatically in ${retryLabel(automaticRetryDelay(journal))}.` : ''
+      await notify(channelId, rejected ? `Account handover was rejected before teardown${cause}. The existing provider was not stopped.${retry}`
         : 'Account handover did not establish a verified resume. No automatic retry will occur; inspect /sab-status.').catch(() => {})
       fail(rejected ? 'account_handover_rejected' : 'account_handover_uncertain')
     } finally { switching.delete(channelId) }
@@ -335,9 +353,18 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
           poolState().observations[source.id]?.observation?.windows?.some(w => w.usedPercent >= 90)
         const draining = source.lifecycle === 'draining' || info.group.drainingMembers.includes(source.id)
         if (!quotaExhausted && !draining && info.decision.reason !== 'preferred-recovered') continue
-        if (poolState().switches[session.channel]?.phase === 'interrupted') continue
-        try { await switchAccount(session, target, { requestId: `automatic-${crypto.randomUUID()}`, automatic: true }) }
-        catch (error) { if (error.message !== 'automatic_handover_unproven') await notify(session.channel, 'Automatic account handover is blocked; inspect /sab-account.').catch(() => {}) }
+        const last = poolState().switches[session.channel]
+        if (last?.phase === 'interrupted') continue
+        // A rejection left the provider untouched. Do not announce another
+        // attempt, and keep another receipt, on every tick.
+        if (last?.automatic && last.phase === 'rejected' && last.sessionId === session.id && now() - last.at < automaticRetryDelay(last)) continue
+        const requestId = `automatic-${crypto.randomUUID()}`
+        try { await switchAccount(session, target, { requestId, automatic: true }) }
+        catch (error) {
+          // A journaled outcome was already explained by switchAccount.
+          if (error.message !== 'automatic_handover_unproven' && poolState().switches[session.channel]?.requestId !== requestId)
+            await notify(session.channel, 'Automatic account handover is blocked; inspect /sab-account.').catch(() => {})
+        }
       }
     } finally { tickRunning = false }
   }

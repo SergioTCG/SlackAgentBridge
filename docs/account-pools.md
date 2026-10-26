@@ -352,6 +352,10 @@ State receipts are bounded to 4,096; exhaustion requires a designed migration,
 not silently pruning deduplication identities. Interrupted handovers block
 new input, automatic handover, and ordinary resume for that channel and require
 operator inspection. The next Slack prompt never silently retries them.
+A handover rejected before teardown leaves the provider running. Its notice
+names the cause. While the switch is still needed, SAB retries an automatic
+one after 15 minutes, doubling per consecutive rejection up to four hours. An
+explicit switch is never delayed.
 `sab account pool reconcile --channel ID --session NATIVE_ID --request-id
 ORIGINAL_ID` (or `/sab-account reconcile ORIGINAL_ID`) verifies an already-live
 exact target without restarting or replaying input, and creates no automatic
