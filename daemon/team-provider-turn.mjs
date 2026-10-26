@@ -8,6 +8,11 @@ function promptDigest(prompt) {
   return crypto.createHash('sha256').update(prompt.trim()).digest('base64url')
 }
 
+// The digest journaled for exact bridge-submitted team input. A prompt hook
+// that arrives after the in-memory injection record expired (or a restart)
+// proves provenance by matching it; a matching tag alone is never enough.
+export const teamPromptDigest = promptDigest
+
 function normalizedTurn(value, startedAt = Date.now(), providerTurnId = null) {
   const taskId = String(value?.taskId || '')
   const providerWorkGeneration = Number(value?.providerWorkGeneration)

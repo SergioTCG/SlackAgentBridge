@@ -86,12 +86,15 @@ test('teams are lazy, normalized, immutable-channel groups with one coordinator'
   }), error => error instanceof TeamError && error.code === 'channel_already_teamed')
 })
 
-test('worker membership uses unique aliases and one active team per channel', () => {
+test('worker membership uses unique aliases and at most one parent team per channel', () => {
   const { state, team } = fixture()
   assert.throws(() => addTeamWorker(state, team.id, { channel: 'C-WORKER-3', alias: 'parallel-1' }),
     error => error.code === 'alias_in_use')
+  const other = createTeam(state, { name: 'other', coordinatorChannel: 'C-OTHER', createdBy: 'U-OWNER' })
+  assert.throws(() => addTeamWorker(state, other.id, { channel: 'C-WORKER-1', alias: 'twice' }),
+    error => error.code === 'channel_already_teamed')
   assert.throws(() => createTeam(state, {
-    name: 'other', coordinatorChannel: 'C-WORKER-1', createdBy: 'U-OWNER',
+    name: 'again', coordinatorChannel: 'C-MASTER', createdBy: 'U-OWNER',
   }), error => error.code === 'channel_already_teamed')
   const context = teamContext(state, 'C-MASTER')
   assert.equal(context.role, 'coordinator')

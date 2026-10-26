@@ -449,10 +449,43 @@ the canonical manifest, help, or public launcher surface.
 collaboration graph. Team creation makes the current authoritative private SAB
 channel the coordinator. The Block Kit picker accepts only another exact
 authoritative private SAB channel. Membership and permission changes are
-persisted before acknowledgement and reported in affected channels. The first
-topology is a star: coordinator-to-worker tasks and worker-to-coordinator
+persisted before acknowledgement and reported in affected channels. Each team
+is a star: coordinator-to-worker tasks and worker-to-coordinator
 replies/status/finals. Worker mesh is absent; files are denied until explicitly
 enabled for that worker.
+
+Stars nest into an owner-rooted tree. `coordinatedTeamForChannel` and
+`parentTeamForChannel` each return at most one team per channel.
+`activeTeamForChannel` returns the coordinated team, else the parent team.
+`teamDepth` and `teamHeight` bound the tree to two team levels. Adding a worker
+or creating a team refuses a second parent, a cycle or a third level, and
+refuses a sub-team for a channel that holds exclusive work in its parent. A
+task to a worker that coordinates a sub-team is **standing**
+(`task.reservation = 'standing'`). It binds `session.teamStandingTaskId`
+rather than `teamActiveTaskId`, so it never reserves or reports provider turns:
+
+- `reportTeamTaskTurn` ignores it, and its completion declaration makes it ready
+  for release;
+- delivery is the same exact one-shot claim and transport as an exclusive task,
+  with no staged provider turn and with `task.promptHash` journaled for hook
+  provenance;
+- coordinator messages for it are submitted only on an idle input surface, with
+  `message.promptHash` journaled, and the attempt's fences are released on
+  failure;
+- its lifetime slides to 30 days after the last authenticated activity, and
+  dormancy does not fail it.
+
+The turn that handles a standing task's prompt or message gets a `delegated`
+`teamTurn` for the worker's own team. `delegatedTeamTurnValid` checks it on
+every use against the exact active standing task and session binding. It ends
+with the turn, the task, or a restart's idle-turn cleanup.
+
+Opt-in `team.autoRelease` calls the same `releaseTeamTask` path. It runs after
+turn reports and completion declarations, plus a reconciler catch-all, and only
+when `teamTaskReleaseReady` holds for the exact binding. It wakes an automatic
+coordinator with a `released` event. A team whose coordinator channel is
+archived is closed by the hourly sweep, which removes that coordinator from its
+parent team.
 
 The agent surface is `sab team`, never Slack Web API access. Its loopback request
 derives the source from process ancestry and requires exact PID, tmux, provider,

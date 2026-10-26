@@ -87,14 +87,24 @@ accounts, and the Mac user running the daemon.
   successful setup persists the display name with the allowlist entry.
 - **Explicit session-team graph:** only the owner may create or mutate a team,
   and Slack's picker accepts only an exact authoritative private SAB channel.
-  The default graph permits coordinator-to-worker tasks and exact-task replies
-  back to the coordinator; it has no worker mesh or generic Slack history read.
-  Agents receive neither Slack credentials nor a raw destination selector.
+  The exception is the coordinator's own team-bound automation (above). The
+  graph permits coordinator-to-worker tasks and exact-task replies back to the
+  coordinator; it has no worker mesh or generic Slack history read. Teams nest
+  into an owner-rooted tree of at most two team levels: one parent per
+  channel, cycles refused. A message crosses one edge at a time, through an
+  explicit reply or coordinator message. Agents receive neither Slack
+  credentials nor a raw destination selector.
 - **Turn-scoped lateral authority:** persistent team membership is insufficient
   to dispatch work. `sab team` proves provider-process ancestry, exact PID/tmux,
   native session, authoritative channel mapping, and the implicit local node on
   every call. Only a current owner-initiated coordinator turn receives a
-  bounded dispatch budget and exact-task control. Collaborator and unrelated
+  bounded dispatch budget and exact-task control. So may an opted-in automatic
+  continuation for the same team. A sub-team coordinator may also hold a
+  delegated turn, which handles its standing parent task or a coordinator
+  message for it. Authority thus flows down only with an authorized task. A
+  delegated turn is valid only while that exact standing task is active and
+  bound to that exact native session. Its acknowledgement after a restart
+  requires the digest journaled before submission. Collaborator and unrelated
   terminal turns fail closed. A coordinator may cancel/replace only its queued
   work and may message only the exact active task/session it created; the
   message is journaled before visible Slack and provider delivery, and an
@@ -377,6 +387,11 @@ Slack when its scope or progress is no longer appropriate.
   proof, review, or merge state that SAB cannot independently observe. SAB
   compares the timestamp captured at the provider event boundary; delayed hook
   processing and Slack backoff cannot turn an earlier final into later proof.
+- Auto-release is opt-in per team (`/sab-team auto-release on`). It performs
+  only the release a coordinator could: exact binding, completion declared, all
+  gates clear and every follow-up delivered, with a report covering the
+  declaration for an exclusive task. A programmatic sub-team inherits its
+  parent's auto-release and continuation settings and never widens them.
 - Automatic continuation is opt-in (`/sab-team auto`) and bounded. Worker
   replies create only durable event identifiers; the coordinator rereads the
   authenticated team inbox before acting. An exhausted coordinator turn can

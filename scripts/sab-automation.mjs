@@ -10,7 +10,7 @@ function usage(message = '') {
   process.stderr.write(`Usage:
   sab automation create --external-key KEY --cwd DIR --provider claude|codex|pi \\
     [--collaborator USER_ID ...] (--prompt-file FILE|- | --task-file FILE|-) \\
-    [--channel-name NAME] [--team TEAM [--alias ALIAS]] -- [PROVIDER_FLAGS...]
+    [--channel-name NAME] [--team TEAM [--alias ALIAS] [--create-team NAME]] -- [PROVIDER_FLAGS...]
   sab automation status EXTERNAL_KEY
   sab automation stop EXTERNAL_KEY [--archive]
   sab automation release EXTERNAL_KEY --session ID --channel ID --tmux NAME --request-id ID
@@ -23,7 +23,8 @@ shell interpolation. SAB_AUTOMATION_URL may override the loopback base URL.
 an existing name fails without launching anything. --team must run inside the
 live SAB session that coordinates TEAM, during an owner or automatic turn: the
 new channel joins TEAM as worker ALIAS, and --task-file becomes its first team
-task, delivered as the initial prompt.\n`)
+task, delivered as the initial prompt. --create-team also makes the new channel
+the coordinator of a new sub-team NAME under TEAM; its first task is standing.\n`)
   process.exit(message ? 2 : 0)
 }
 
@@ -98,6 +99,7 @@ if (command === 'validate-flags') {
   let channelName = null
   let team = null
   let alias = null
+  let createTeam = null
   const collaborators = []
   let flags = []
   for (let i = 0; i < args.length; i++) {
@@ -112,6 +114,7 @@ if (command === 'validate-flags') {
     if (arg === '--channel-name') { channelName = requiredValue(args, i, arg); i++; continue }
     if (arg === '--team') { team = requiredValue(args, i, arg); i++; continue }
     if (arg === '--alias') { alias = requiredValue(args, i, arg); i++; continue }
+    if (arg === '--create-team') { createTeam = requiredValue(args, i, arg); i++; continue }
     usage(`unknown create option: ${arg}`)
   }
   if (!externalKey || !cwd || !provider || (promptFile === null && taskFile === null)) {
@@ -120,6 +123,7 @@ if (command === 'validate-flags') {
   if (promptFile !== null && taskFile !== null) usage('choose only one of --prompt-file or --task-file')
   if (taskFile !== null && !team) usage('--task-file requires --team')
   if (alias !== null && !team) usage('--alias requires --team')
+  if (createTeam !== null && !team) usage('--create-team requires --team: a new sub-team always nests under the calling coordinator\'s team')
   if (channelName !== null && !SLACK_CHANNEL_NAME.test(channelName)) {
     usage('--channel-name must be 1-80 lowercase letters, digits, hyphens or underscores')
   }
@@ -136,7 +140,14 @@ if (command === 'validate-flags') {
     body: {
       externalKey, cwd, provider, flags, collaborators, initialPrompt,
       ...(channelName === null ? {} : { channelName }),
-      ...(team ? { team: { name: team, ...(alias === null ? {} : { alias }), ...(task === null ? {} : { task }) } } : {}),
+      ...(team ? {
+        team: {
+          name: team,
+          ...(alias === null ? {} : { alias }),
+          ...(task === null ? {} : { task }),
+          ...(createTeam === null ? {} : { createTeam }),
+        },
+      } : {}),
     },
   })
 } else if (command === 'status') {

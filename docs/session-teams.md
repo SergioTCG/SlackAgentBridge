@@ -2,7 +2,9 @@
 
 Session teams let one SAB channel coordinate explicit work in other SAB
 channels without giving Claude Code, Codex, or Pi Slack credentials or generic
-channel access. The first release is local-node only and uses a safe star:
+channel access. Each team is a safe star. Stars nest at most two levels into
+an owner-rooted tree (see [Agent hierarchies](#agent-hierarchies)). Teams are
+local-node only:
 
 ```text
 coordinator ── task/text/optional files ──▶ worker
@@ -98,6 +100,113 @@ teams refuse new workers. `sab automation stop KEY --archive` removes the
 worker's membership (cancelling only its active tasks) and closes any team the
 stopped session coordinated. Task journals and the Slack audit trail remain.
 
+## Agent hierarchies
+
+A channel may coordinate one team and also be a worker in at most one other,
+its parent. That gives a tree of at most two team levels, three channel levels:
+
+```text
+main (owner's conversation)          team `main`
+├── epic coordinator A  ── worker in `main`, coordinator of `epic-a`
+│   ├── executor 1      ── worker in `epic-a`
+│   └── executor 2
+└── epic coordinator B  ── worker in `main`, coordinator of `epic-b`
+```
+
+Cycles, a second parent and a third team level fail closed. The owner can nest
+an existing team (`/sab-team create` in a worker channel, or `/sab-team add`
+with a channel that coordinates a leaf team). A coordinator can create a nested
+coordinator programmatically: `sab automation create --team main --create-team
+epic-a --task-file epic.md`, during its authorized turn. A programmatic
+sub-team inherits its parent's continuation mode and auto-release setting, and
+records `createdVia` provenance.
+
+### Standing tasks
+
+A task to a worker that coordinates its own sub-team is **standing**. A
+standing task:
+
+- binds the exact native session for `reply`, `checkpoint` and `complete`, but
+  never reserves its provider turns, so its own sub-team keeps working;
+- is not reported from provider finals: the worker reports deliberately with
+  `sab team reply` and declares the whole assignment done with
+  `sab team complete`, which makes the task ready for release with no turn
+  report;
+- gets coordinator follow-ups (`sab team message`) as new turns, submitted only
+  when the worker's input surface is idle, with the same digest provenance,
+  generation fencing and exactly-once delivery as other messages;
+- survives dormancy: a dormant standing worker keeps its binding, and pending
+  messages wait for it;
+- lives 30 days after its last authenticated activity (replies, checkpoints,
+  messages, completion), instead of seven days from creation.
+
+A worker holds at most one active standing task. Amend it with
+`sab team message --task ID` rather than sending another task. Exclusive tasks
+for that worker wait until the standing task ends. The coordinator may cancel
+an active standing task, since it interrupts no provider turn. `sab team send
+--standing` gives a plain worker, such as a liaison, a standing task
+explicitly.
+
+### Authority flows down
+
+Dispatch authority for a team comes from three places:
+
+- an owner turn in the coordinator's channel;
+- a same-team automatic continuation (worker events or scheduled wakes);
+- for a sub-team coordinator, a **delegated** turn: the turn that handles its
+  standing task's prompt, or a coordinator message for it.
+
+A delegated turn has the usual bounded budget of 20 dispatches and a 12-hour
+limit. It is valid only while that standing task is active and bound to this
+exact session, and it ends with the turn. Collaborator turns and local terminal
+input never gain dispatch or membership authority, at any level.
+
+Commands resolve their team unambiguously:
+
+- `send`, `message`, `release`, `cancel`, `replace`, `continue` and `mode` act
+  on the team the channel coordinates;
+- `reply`, `checkpoint` and `complete` act on its task in the parent team.
+
+`--team` names the expected team where no task ID decides it, and
+`sab team inbox --team NAME` filters by team. `sab team context --json` shows
+the coordinated team plus a `parentTeam` object carrying the standing task ID,
+and the private prompt context describes both roles.
+
+Questions and results flow up by explicit replies. Answers flow down by
+messages:
+
+```text
+executor:  sab team reply --task T_exec      → wakes the epic coordinator
+epic:      sab team reply --task T_epic      → wakes main
+main:      sab team message --task T_epic    → a delegated epic turn
+epic:      sab team message --task T_exec    → the executor
+```
+
+### Auto-release
+
+`/sab-team auto-release on` (owner, per team) lets SAB perform the release
+itself. It happens once a worker's completion is accepted, every declared gate
+is clear and the release is ready. SAB then posts the result and wakes an
+automatic coordinator with a `released` event. Nothing else changes: follow-ups
+still invalidate readiness, and reports, gates, generations and exact binding
+are checked as for an explicit release. It is off by default.
+
+### Liaisons
+
+A worker with a standing task may take prompts from its invited collaborators,
+since a standing task does not reserve its turns. A `sab team reply` written
+in a turn a collaborator started is labelled `origin: collaborator` in JSON
+and *collaborator-originated* in Slack, so the coordinator can weigh it as a
+suggestion. Collaborators still gain no dispatch or membership authority.
+
+### Closing
+
+A team closes when its coordinator channel is archived. The hourly archive
+sweep checks every active coordinator channel. The archived coordinator also
+leaves its parent team, cancelling its standing task. `sab automation stop
+--archive` on a coordinator automation does the same at once. Closing a parent
+team leaves its sub-teams in place as top-level teams.
+
 ## How agents discover their role
 
 Roles are bridge state, not a sentence remembered by a model:
@@ -138,7 +247,9 @@ sab team context --json
 sab team peers --json
 sab team send --to WORKER_ALIAS --stdin
 sab team send --to WORKER_ALIAS --stdin --request-id STABLE_ID
+sab team send --to LIAISON_ALIAS --standing --stdin
 sab team inbox --after TASK_ID --limit 100 --json
+sab team inbox --team PARENT_TEAM --active --limit 20 --page --json
 sab team inbox --active --target WORKER_ALIAS --status queued,running --limit 20 --page --json
 sab team inbox --since 2026-09-07T08:00:00Z --cursor OPAQUE_CURSOR --limit 20 --page --json
 sab team wait --task TASK_ID --timeout 3600 --json
@@ -240,8 +351,8 @@ retain their historical provider-final completion behavior. This deliberate
 compatibility boundary prevents a daemon update from changing the meaning of
 an already-running task.
 
-The coordinator may send up to 20 tasks in one current owner or automatic
-continuation budget. When that budget is exhausted, automatic mode can renew one
+The coordinator may send up to 20 tasks in one current owner, delegated or
+automatic continuation budget. When that budget is exhausted, automatic mode can renew one
 bounded budget only by atomically claiming pending authenticated worker events
 for the same team. It cannot renew from a collaborator, another team, stale
 local input, or no event. A team holds at most 64 active tasks and one worker at
@@ -252,8 +363,10 @@ seven-day lifetime. The last reply slot stays reserved for the checkpoint that
 clears the final gate, and terminal cancellation and release remain available
 if the control journal is full. The journals keep their full history for
 idempotency and recovery. Task views and command responses show the latest 32
-replies and coordinator messages, with total counts. Tasks expire after seven
-days. Overflow, expiry, revocation, and identity disagreement fail visibly.
+replies and coordinator messages, with total counts. Exclusive tasks expire
+seven days after creation. Standing tasks expire 30 days after their last
+authenticated activity. Overflow, expiry, revocation, and identity disagreement
+fail visibly.
 
 ## Delivery and recovery
 

@@ -1,13 +1,34 @@
 import { isProviderInternalPrompt, isSystemPrompt } from './providers.mjs'
 import {
-  acknowledgeCoordinatorTaskMessageDelivery, clearTeamTurn, markTeamTaskRunning, taskMarker,
-  teamTaskProviderWorkGeneration,
+  acknowledgeCoordinatorTaskMessageDelivery, beginDelegatedTeamTurn, clearTeamTurn,
+  completeCoordinatorTaskMessageDelivery, coordinatedTeamForChannel, isStandingTeamTask, markTeamTaskRunning,
+  taskMarker, teamTaskProviderWorkGeneration,
 } from './teams.mjs'
 import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, journaledTeamProviderPrompt,
   pendingTeamProviderTurn, providerPromptAcknowledgesTask, providerPromptTurnMarker,
-  retireTeamProviderTurn, unacknowledgedPromptTeamEffect,
+  retireTeamProviderTurn, teamPromptDigest, unacknowledgedPromptTeamEffect,
 } from './team-provider-turn.mjs'
+
+// A standing task's envelope or coordinator message is the bridge's own input
+// only with exact provenance: the in-memory injection record, or the digest
+// journaled before submission. Returns what the prompt acknowledges, if any.
+export function standingTeamPromptAcknowledgement(state, session, {
+  promptTurn, prompt, injected = false, isTaskEnvelope = false,
+} = {}) {
+  const task = session?.teamStandingTaskId ? state.teamTasks?.[session.teamStandingTaskId] : null
+  if (!task || !isStandingTeamTask(task) || promptTurn?.taskId !== task.id ||
+      task.targetSessionId !== session.id || task.targetChannel !== session.channel) return null
+  const digest = teamPromptDigest(prompt)
+  if (isTaskEnvelope) {
+    if (!injected && !(task.promptHash && digest === task.promptHash)) return null
+    return { task, message: null }
+  }
+  const generation = Number(promptTurn.providerWorkGeneration)
+  const message = (task.messages || []).find(item => Number(item.workGeneration) === generation) || null
+  if (!message || (!injected && !(message.promptHash && digest === message.promptHash))) return null
+  return { task, message }
+}
 import { unwrapPastedContent } from './util.mjs'
 
 // UserPromptSubmit: decide whether a native prompt is the bridge's own input
@@ -86,6 +107,10 @@ export function createPromptSubmitHandler({
     const staleSameTaskPrompt = Boolean(task && promptTeamTurn?.taskId === task.id &&
       Number.isSafeInteger(promptTeamTurn.providerWorkGeneration) &&
       promptTeamTurn.providerWorkGeneration < teamTaskProviderWorkGeneration(task))
+    const standingAck = providerInternal ? null : standingTeamPromptAcknowledgement(state, session, {
+      promptTurn: promptTeamTurn, prompt: deliveredPrompt, injected,
+      isTaskEnvelope: Boolean(teamTaskId && teamTaskId === promptTeamTurn?.taskId),
+    })
     let acknowledgedCoordinatorMessage = null
     if (acknowledgedTurn) {
       // An uncertain tmux delivery may leave only the pending generation for
@@ -154,6 +179,30 @@ export function createPromptSubmitHandler({
         log('acknowledged journaled coordinator message', acknowledgedTurn.taskId,
           acknowledgedTurn.providerWorkGeneration)
       }
+    } else if (standingAck) {
+      // A standing task never owns the provider turn: acknowledging it only
+      // settles the exact dispatch or coordinator message it carries, and
+      // attaches the sub-team authority it carries to this exact turn.
+      try {
+        const ownTeam = coordinatedTeamForChannel(state, session.channel)
+        if (ownTeam && session.teamTurn?.actor !== 'delegated') {
+          beginDelegatedTeamTurn(session, { teamId: ownTeam.id, sourceTaskId: standingAck.task.id })
+          saveStateNow(state)
+        }
+        if (!standingAck.message && standingAck.task.status === 'dispatching') {
+          markTeamTaskRunning(state, standingAck.task.id)
+          saveStateNow(state)
+          await updateTeamTaskAudit(standingAck.task)
+        } else if (standingAck.message &&
+            ['delivering', 'uncertain'].includes(standingAck.message.providerDeliveryStatus)) {
+          completeCoordinatorTaskMessageDelivery(state, standingAck.task.id, standingAck.message.id)
+          saveStateNow(state)
+          persistedCoordinatorMessageAcks.add(standingAck.message)
+          await updateTeamTaskAudit(standingAck.task)
+        }
+      } catch (error) {
+        log('standing team prompt acknowledgement rejected', standingAck.task.id, String(error?.message || error))
+      }
     } else if (staleSameTaskPrompt) {
       // Provider hooks may be delayed beyond the in-memory injected-text cache
       // or a daemon restart. An older exact generation for this same task is
@@ -180,7 +229,7 @@ export function createPromptSubmitHandler({
     // Mirror only genuine typing: skip the bridge's own input, recognized by its
     // injected-text record or, once that expires, its persisted team journal,
     // and system-injected content (task notifications, reminders, echoes).
-    if (p && !automationEcho && !injected && !acknowledgedTurn && !journaledDelivery &&
+    if (p && !automationEcho && !injected && !acknowledgedTurn && !journaledDelivery && !standingAck &&
         !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
