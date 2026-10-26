@@ -141,11 +141,52 @@ test('new live sessions outside their channel route cannot receive prompts even 
 })
 
 test('credential mismatch is rejected before teardown and does not poison the current input surface', async () => {
-  const { runtime, session, events } = setup({ verifyIdentity: async () => 'identity-mismatch' })
+  const { runtime, session, events, notices } = setup({ verifyIdentity: async () => 'identity-mismatch' })
   await assert.rejects(runtime.switchAccount(session, 'second', { requestId: 'wrong-identity' }), /account_handover_rejected/)
   assert.equal(events.filter(e => e.restart).length, 0)
   assert.equal(runtime.status(session.channel).pendingSwitch.phase, 'rejected')
+  assert.equal(runtime.status(session.channel).pendingSwitch.reason, 'account_identity_unverified')
+  assert.deepEqual(notices.map(n => n.notice), ['Account handover was rejected before teardown: the target login could not be verified. The existing provider was not stopped.'])
   runtime.assertInputAllowed(session)
+})
+
+test('a rejected automatic handover names its cause once and backs off instead of retrying every tick', async () => {
+  let time = now, idle = true, restarts = 0
+  const { runtime, session, other, notices, state } = setup({ mode: 'auto', now: () => time,
+    readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: time, identity: { email: account.email, principalId: account.id },
+      quota: { five_hour: { utilization: account.key === 'primary' ? 99 : 10, resets_at: new Date(time + 3600000).toISOString() } } }),
+    restart: async (current, alias) => {
+      if (!idle) throw Object.assign(new Error('account_switch_not_proven_idle'), { accountPreflightRejected: true })
+      restarts++; current.account = alias; current.pid = 200
+    } })
+  other.pid = null
+  await runtime.switchAccount(session, 'second', { requestId: 'prove-outward' })
+  await runtime.switchAccount(session, 'primary', { requestId: 'prove-return' })
+  idle = false; notices.length = 0
+  await runtime.tick()
+  const first = state.accountPools.switches.CMINE
+  assert.equal(first.phase, 'rejected')
+  assert.equal(first.reason, 'account_switch_not_proven_idle')
+  assert.deepEqual(notices.map(n => n.notice), ['Account handover was rejected before teardown: its terminal was not proven idle. ' +
+    'The existing provider was not stopped. If it is still needed, SAB retries automatically in 15 min.'])
+  const receipts = Object.keys(state.accountPools.receipts).length
+  for (const minutes of [1, 5, 14]) { time = now + minutes * 60000; await runtime.tick() }
+  assert.equal(Object.keys(state.accountPools.receipts).length, receipts, 'no attempt inside the back-off window')
+  assert.equal(notices.length, 1)
+  time = now + 16 * 60000
+  await runtime.tick()
+  const second = state.accountPools.switches.CMINE
+  assert.equal(second.attempt, 2)
+  assert.match(notices.at(-1).notice, /retries automatically in 30 min\.$/)
+  assert.equal(notices.length, 2, 'a journaled rejection is not repeated as a generic blocked notice')
+  time += 29 * 60000
+  await runtime.tick()
+  assert.equal(state.accountPools.switches.CMINE, second, 'the doubled window holds')
+  idle = true; time += 2 * 60000
+  await runtime.tick()
+  assert.equal(state.accountPools.switches.CMINE.phase, 'committed')
+  assert.equal(session.account, 'second')
+  assert.equal(restarts, 3)
 })
 
 test('an unverified replacement cannot mint resume proof or receive input; exact reconciliation never restarts it', async () => {

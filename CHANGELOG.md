@@ -31,6 +31,23 @@ Notable changes to this project. Format based on
   repeat the identical request; otherwise it fails with
   `external_key_conflict`. Plain automations keep their historical replay.
 
+### Fixed
+
+- Automatic account handover no longer rejects an idle Claude session whose
+  terminal shows a queued feedback-draft card ("1 to review · 2 to send · 0 to
+  dismiss").
+  - The card replaces Claude Code's permission-mode footer, which SAB's idle
+    check required, so the session looked like it was still starting.
+  - Provider-switch readiness and live input recovery use the same check and
+    are fixed too.
+- A rejected automatic handover no longer retries on every monitor tick.
+  - Each retry posted the switching notice, the rejection and a "blocked"
+    notice, and kept another switch receipt.
+  - SAB now waits 15 minutes before retrying, doubling per consecutive
+    rejection up to four hours.
+  - The single rejection notice names the cause and says when SAB retries.
+  - An explicit `/sab-account` switch is never delayed.
+
 ## [2.2.0] — 2026-10-25
 
 ### Added

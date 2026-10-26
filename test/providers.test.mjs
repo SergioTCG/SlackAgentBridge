@@ -322,6 +322,34 @@ Press enter to continue`
   assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
 })
 
+test('a queued Claude feedback draft card hides the footer but keeps the idle input surface ready', () => {
+  const rule = '─'.repeat(80)
+  const card = [
+    '  The tests pass.',
+    '',
+    '✻ Crunched for 5m 45s · done 12:02 PM',
+    '',
+    `╭${'─'.repeat(78)}╮`,
+    '│ ✻ Bug report drafted: An example report title that is long enough to trunc… │',
+    '│ │ - What happened: an example description of the drafted report.           │',
+    '│ 1 to review · 2 to send · 0 to dismiss · +1 more queued                      │',
+    `╰${'─'.repeat(78)}╯`,
+    '',
+    '                                        ✔ Update installed · Restart to update',
+    rule,
+    '❯ ',
+  ].join('\n')
+
+  assert.equal(targetStartupState('claude', card), 'ready')
+  assert.equal(targetStartupState('claude', `${card}\n${'\n'.repeat(30)}`), 'ready')
+  assert.equal(targetStartupState('claude', `${card.replace(/ · 0 to dismiss/, '')}`), 'starting')
+  assert.equal(targetStartupState('claude', `Example output\n${rule}\n❯ `), 'starting', 'a bare prompt row is not proof')
+  assert.equal(targetStartupState('claude', card.replace(`${rule}\n`, '')), 'starting')
+  assert.equal(targetStartupState('claude', `${card}\n  continued input`), 'starting')
+  assert.equal(targetStartupState('claude', `${card}\n Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit`), 'trust')
+  assert.equal(targetStartupState('codex', card), 'starting')
+})
+
 test('Codex idle recovery ignores conversational mentions of working timers', () => {
   for (const text of [
     'User: Please explain the line Working (21s)',

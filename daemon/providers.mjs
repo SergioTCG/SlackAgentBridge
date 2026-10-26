@@ -440,6 +440,15 @@ const codexVisibleWork = lines => {
   })
 }
 
+// Claude Code replaces its permission-mode footer with a queued feedback draft
+// card ("1 to review · 2 to send · 0 to dismiss"). The prompt row under its
+// rule, as the last visible row, is still the normal input surface.
+const claudeFeedbackCardSurface = lines => {
+  const prompt = lines.length - 1
+  return prompt > 1 && /^\s*[❯>](?:\s|$)/.test(lines[prompt]) && /^\s*─{8,}\s*$/.test(lines[prompt - 1]) &&
+    lines.slice(0, prompt - 1).some(line => /\bto review\b.*\bto send\b.*\bto dismiss\b/i.test(line))
+}
+
 // A tmux session exists before an interactive agent is ready to accept input.
 // Inspect only the visible bottom of the pane: trust text may remain above the
 // live Codex UI in scrollback, while the model/effort/path footer proves that
@@ -462,7 +471,8 @@ export function targetStartupState(provider, pane) {
     if (/trust|approve project|project resources/i.test(visible)) return 'trust'
     return 'starting' // Pi readiness is its authenticated native extension stream.
   }
-  if (/shift\+tab to cycle|bypass permissions/i.test(visible) && /(?:^|\n)\s*[❯>]\s*/.test(visible)) return 'ready'
+  if (/shift\+tab to cycle|bypass permissions/i.test(visible) && /(?:^|\n)\s*[❯>]\s*/.test(visible) ||
+      claudeFeedbackCardSurface(lines)) return 'ready'
   if (/trust|development channels|approve/i.test(visible)) return 'trust'
   return 'starting'
 }
