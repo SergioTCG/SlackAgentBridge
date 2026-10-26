@@ -11,9 +11,12 @@ import {
 } from '../daemon/team-automation.mjs'
 import {
   TEAM_MAX_MEMBERS, TeamError, addTeamWorker, assertCoordinatorDispatch, beginCollaboratorTeamTurn,
-  beginContinuationTeamTurn, beginOwnerTeamTurn, closeTeam, commitTeamWorkerReservation, createTeam,
-  releaseTeamWorkerReservation, reserveTeamWorker, teamContext,
+  beginContinuationTeamTurn, beginDelegatedTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask,
+  claimTeamTaskForSession, closeTeam, commitTeamWorkerReservation, coordinatedTeamForChannel, createTeam,
+  parentTeamForChannel, releaseTeamWorkerReservation, reserveTeamWorker, setTeamAutoRelease, teamAutoRelease,
+  teamContext,
 } from '../daemon/teams.mjs'
+import { setContinuationMode } from '../daemon/team-continuation.mjs'
 
 function teamState() {
   const state = {
@@ -141,7 +144,10 @@ test('validation keeps Slack channel names verbatim and team tasks in place of a
       assert.throws(() => validateAutomationRequest({ ...base, channelName }, { home }), /channelName/)
     }
     assert.deepEqual(validateAutomationRequest({ ...base, team: { name: 'epic', task: '  Go.  ' } }, { home }).team,
-      { name: 'epic', alias: null, task: 'Go.' })
+      { name: 'epic', alias: null, task: 'Go.', createTeam: null })
+    assert.equal(validateAutomationRequest({ ...base, team: { name: 'main', task: 'Coordinate.', createTeam: 'epic-2990' } }, { home }).team.createTeam,
+      'epic-2990')
+    assert.throws(() => validateAutomationRequest({ ...base, team: { name: 'main', createTeam: 'Bad Name' } }, { home }), /createTeam/)
     for (const team of [
       'epic', { alias: 'x' }, { name: 'epic', alias: 'Bad Alias' }, { name: 'epic', task: '   ' },
       { name: 'epic', other: true }, { name: 'epic', task: 'x'.repeat(24 * 1024 + 1) }, [{ name: 'epic' }],
@@ -466,4 +472,117 @@ test('stopping an automation removes its worker membership and closes a team it 
   assert.equal(closed[0].kind, 'closed')
   assert.ok(team.closedAt)
   assert.deepEqual(detachAutomationTeams(state, { externalKey: 'none', channelId: null }), [])
+})
+
+// main (owner turn) creates an epic coordinator; the epic's standing first
+// task carries delegated authority to create its own executors.
+function hierarchyFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-team-hierarchy-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(root, 'worktree-')))
+  const state = {
+    sessions: { main: { id: 'main', channel: 'C-MAIN', provider: 'claude', pid: 10, tmux: 'sab-main' } },
+    channels: { 'C-MAIN': 'main' },
+    automations: {},
+  }
+  const main = createTeam(state, { id: 'team_main', name: 'main', coordinatorChannel: 'C-MAIN', createdBy: 'U-OWNER', now: 1 })
+  setContinuationMode(main, 'auto-until-blocked')
+  setTeamAutoRelease(main, true)
+  beginOwnerTeamTurn(state.sessions.main, { messageTs: '1.0' })
+  let caller = state.sessions.main
+  const queue = []
+  const launched = []
+  const lifecycle = createAutomationLifecycle({
+    state,
+    home: root,
+    persist: () => {},
+    schedule: fn => queue.push(fn),
+    launch: async record => launched.push(record.externalKey),
+    invite: async () => ({ name: 'x' }),
+    inject: async () => {},
+    terminate: async () => {},
+    archive: async () => {},
+    prepareChannel: async record => ({ channelId: `C-${record.channelName}`.toUpperCase(), channelName: record.channelName }),
+    teamBootstrap: createAutomationTeamBootstrap({
+      state,
+      resolveCaller: async () => caller,
+      requireDispatch: (session, current) => {
+        const authority = { teamId: current.id, allowContinuation: current.continuation?.mode === 'auto-until-blocked', state }
+        assertCoordinatorDispatch(session, authority)
+        return authority
+      },
+    }),
+  })
+  const request = overrides => ({
+    externalKey: 'github:barrique#epic-2990', cwd, provider: 'claude', flags: ['--dsp'], collaborators: [],
+    initialPrompt: '', channelName: 'cc-barrique-epic-2990',
+    team: { name: 'main', alias: 'epic-2990', task: 'Coordinate epic 2990.', createTeam: 'epic-2990' },
+    ...overrides,
+  })
+  return { state, main, lifecycle, request, setCaller: session => { caller = session }, drain: async () => { while (queue.length) await queue.shift()() }, launched }
+}
+
+test('main creates an epic coordinator whose sub-team inherits policy and whose task is standing', async t => {
+  const f = hierarchyFixture(t)
+  const { automation } = await f.lifecycle.submit(f.request(), { caller: {} })
+  const epicChannel = automation.channelId
+  const epicTeam = coordinatedTeamForChannel(f.state, epicChannel)
+  assert.equal(epicTeam.name, 'epic-2990')
+  assert.equal(parentTeamForChannel(f.state, epicChannel).id, f.main.id)
+  assert.equal(epicTeam.continuation.mode, 'auto-until-blocked', 'continuation mode is inherited')
+  assert.equal(teamAutoRelease(epicTeam), true, 'auto-release is inherited')
+  assert.equal(epicTeam.createdVia.kind, 'automation')
+  assert.equal(epicTeam.createdVia.parentTeamId, f.main.id)
+  assert.deepEqual(automation.team.createdTeam, { teamId: epicTeam.id, teamName: 'epic-2990' })
+  const task = f.state.teamTasks[automation.team.taskId]
+  assert.equal(task.reservation, 'standing')
+  assert.equal(task.teamId, f.main.id)
+  assert.deepEqual(f.lifecycle.status(automation.externalKey).team.coordinates, { teamId: epicTeam.id, teamName: 'epic-2990' })
+
+  // The epic session starts and receives its standing task with delegated authority.
+  const epic = { id: 'epic', channel: epicChannel, provider: 'claude', pid: 20, tmux: automation.tmux }
+  f.state.sessions.epic = epic
+  f.state.channels[epicChannel] = 'epic'
+  claimTeamTaskForSession(f.state, task.id, epic, { targetProvider: 'claude' })
+  beginDelegatedTeamTurn(epic, { teamId: epicTeam.id, sourceTaskId: task.id })
+  f.setCaller(epic)
+  const executor = await f.lifecycle.submit(f.request({
+    externalKey: 'github:barrique#2995', channelName: 'cc-barrique-2995-vivian-holding-lines',
+    team: { name: 'epic-2990', alias: 'issue-2995', task: 'Implement issue 2995.' },
+  }), { caller: {} })
+  const execTask = f.state.teamTasks[executor.automation.team.taskId]
+  assert.equal(execTask.teamId, epicTeam.id)
+  assert.equal(execTask.reservation, undefined, 'an executor task is exclusive')
+  assert.equal(execTask.sourceChannel, epicChannel)
+
+  // A depth-3 executor may not create a team; main's turn cannot target the
+  // epic's team, and a delegated turn cannot create under main.
+  const exec = { id: 'exec', channel: executor.automation.channelId, provider: 'claude', pid: 30 }
+  f.state.sessions.exec = exec
+  f.state.channels[exec.channel] = 'exec'
+  await assert.rejects(f.lifecycle.submit(f.request({
+    externalKey: 'k-epic-under-main', channelName: 'cc-x', team: { name: 'main', task: 'x', createTeam: 'x' },
+  }), { caller: {} }), error => error.code === 'team_not_coordinated')
+  await assert.rejects(f.lifecycle.submit(f.request({
+    externalKey: 'k-too-deep', channelName: 'cc-too-deep', team: { name: 'epic-2990', task: 'x', createTeam: 'deeper' },
+  }), { caller: {} }), error => error.code === 'team_depth_exceeded')
+  // Once the standing task ends, the epic's delegated authority ends too.
+  cancelQueuedTeamTask(f.state, task.id, { sourceChannel: 'C-MAIN', reason: 'Epic dropped.', requestId: 'cancel-1' })
+  await assert.rejects(f.lifecycle.submit(f.request({
+    externalKey: 'k-after', channelName: 'cc-after', team: { name: 'epic-2990', task: 'x' },
+  }), { caller: {} }), error => error.code === 'owner_turn_required')
+})
+
+test('a sub-team name is reserved with its slot and taken names are refused', async t => {
+  const f = hierarchyFixture(t)
+  createTeam(f.state, { name: 'taken', coordinatorChannel: 'C-OTHER', createdBy: 'U-OWNER' })
+  await assert.rejects(f.lifecycle.submit(f.request({ team: { name: 'main', task: 'x', createTeam: 'taken' } }), { caller: {} }),
+    error => error.code === 'team_name_in_use')
+  const pending = f.lifecycle.submit(f.request(), { caller: {} })
+  // While the first channel is being created its sub-team name is reserved.
+  await assert.rejects(f.lifecycle.submit(f.request({
+    externalKey: 'k2', channelName: 'cc-k2', team: { name: 'main', task: 'x', createTeam: 'epic-2990' },
+  }), { caller: {} }), error => error.code === 'team_name_in_use')
+  const { automation } = await pending
+  assert.equal(coordinatedTeamForChannel(f.state, automation.channelId).name, 'epic-2990')
 })

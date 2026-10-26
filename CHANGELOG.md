@@ -6,6 +6,43 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- Nested session teams. A channel may coordinate one team and be a worker in
+  one parent team, up to two team levels, with no cycles or second parent.
+  Both roles appear in `sab team context` (`parentTeam`) and the private prompt
+  context. Send, message, release and cancel act on the coordinated team;
+  reply, checkpoint and complete act on the parent-team task. `--team` names
+  the expected team where no task ID decides it.
+- Standing tasks, used for tasks to sub-team coordinators and available to any
+  worker with `sab team send --standing`. They bind the exact session for
+  replies, checkpoints and completion but never reserve or report its provider
+  turns. Follow-ups enter only an idle input surface, dormancy does not fail
+  them, and their lifetime slides to 30 days after the last activity.
+- Delegated authority. The turn that handles a sub-team coordinator's standing
+  task, or a follow-up for it, may dispatch to and control its own team within
+  the usual bounded budget. It is valid only while that exact task is active
+  and bound.
+- `sab automation create --team PARENT --create-team NAME` creates a nested
+  coordinator whose sub-team inherits the parent's continuation and
+  auto-release settings, and whose first task is standing.
+- Opt-in `/sab-team auto-release on`: once completion is accepted, gates are
+  clear and the release is ready, SAB releases the task and wakes an automatic
+  coordinator with the result.
+- Liaison labelling: a `sab team reply` written in a collaborator-started turn
+  is labelled collaborator-originated in JSON and Slack.
+- `sab team inbox --team NAME` filters a nested channel's tasks by team.
+
+### Changed
+
+- A team now closes when its coordinator channel is archived, even while its
+  workers' channels remain open. The archived coordinator also leaves its
+  parent team. A worker channel may now create its own sub-team with
+  `/sab-team create`.
+- Agent-visible team JSON adds `reservation` on tasks, `origin` on replies, and
+  `continuation`, `autoRelease` and `coordinatesTeam` in context. Existing
+  fields are unchanged.
+
 ## [2.3.0] — 2026-10-26
 
 ### Added

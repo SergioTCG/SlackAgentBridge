@@ -19,7 +19,8 @@ const SLACK_USER_ID = /^[UW][A-Z0-9]{8,}$/
 export const SLACK_CHANNEL_NAME = /^[a-z0-9_-]{1,80}$/
 const TEAM_SELECTOR = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const TEAM_ALIAS = /^[a-z0-9][a-z0-9_-]{0,47}$/
-const TEAM_REQUEST_KEYS = new Set(['name', 'alias', 'task'])
+const TEAM_REQUEST_KEYS = new Set(['name', 'alias', 'task', 'createTeam'])
+const NEW_TEAM_NAME = /^[a-z0-9][a-z0-9_-]{0,47}$/
 const TERMINAL_STATUSES = new Set(['stopped', 'released'])
 
 export const automationOwnsSession = (record, session) => Boolean(record && !TERMINAL_STATUSES.has(record.status) &&
@@ -145,7 +146,15 @@ export function validateAutomationRequest(input, { home = process.env.HOME } = {
         requestError('invalid_initial_prompt', 'a team bootstrap task replaces initialPrompt; send an empty initialPrompt')
       }
     }
-    team = { name: input.team.name, alias, task }
+    // The new channel may also coordinate a new sub-team of the caller's team.
+    let createTeam = null
+    if (input.team.createTeam !== undefined && input.team.createTeam !== null) {
+      if (typeof input.team.createTeam !== 'string' || !NEW_TEAM_NAME.test(input.team.createTeam)) {
+        requestError('invalid_team_name', 'team.createTeam must be 1-48 lowercase letters, digits, hyphens or underscores')
+      }
+      createTeam = input.team.createTeam
+    }
+    team = { name: input.team.name, alias, task, createTeam }
   }
   return { externalKey, cwd, provider, flags, collaborators, initialPrompt: input.initialPrompt, channelName, team }
 }
@@ -163,6 +172,7 @@ function requestFingerprint(request) {
     channelName: request.channelName,
     team: request.team ? {
       name: request.team.name, alias: request.team.alias, task: promptDigest(request.team.task),
+      createTeam: request.team.createTeam || null,
     } : null,
   })).digest('hex')
 }
@@ -222,6 +232,7 @@ function publicStatus(record) {
         alias: record.team.alias,
         role: 'worker',
         taskId: record.team.taskId || null,
+        ...(record.team.createdTeam ? { coordinates: { ...record.team.createdTeam } } : {}),
       },
     } : {}),
     cwd: record.cwd,

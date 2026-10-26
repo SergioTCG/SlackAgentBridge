@@ -50,8 +50,10 @@ test('team task injection is journal-first and uncertain claims are not replayed
   assert.doesNotMatch(injection.slice(transportTry, transportCatchEnd), /acceptExpectedTeamTurn/,
     'post-write lifecycle persistence must not be caught by the transport fallback')
   assert.match(injection.slice(transportTry, transportCatchEnd),
-    /expectedTeamTurn[\s\S]*uncertainTeamProviderInput/,
+    /exactDelivery[\s\S]*uncertainTeamProviderInput/,
     'an exact delegated tmux rejection is uncertain and must not reach another transport')
+  assert.match(injection, /const exactDelivery = Boolean\(options\.expectedTeamTaskId\)/,
+    'every exact team delivery, standing or exclusive, is one transport attempt')
   const acceptedBoundary = injection.indexOf('if (tmuxAccepted)', tmuxWrite)
   const acceptancePersist = injection.indexOf('acceptExpectedTeamTurn()', acceptedBoundary)
   assert.ok(tmuxWrite > 0 && acceptedBoundary > tmuxWrite && acceptancePersist > acceptedBoundary)
@@ -77,8 +79,8 @@ test('team lifecycle recovery cannot rebind, lose finals, or fence a worker inde
   assert.match(daemon, /no live-turn proof returned/)
   assert.match(daemon, /exceeded its seven-day lifetime/)
   assert.match(daemon, /task\.status === 'dispatching' && task\.replies\?\.length[\s\S]*markTeamTaskRunning\(state, task\.id/)
-  assert.match(daemon, /const workerProof = appended\.accepted[\s\S]*session\.teamActiveTaskId === task\.id[\s\S]*recordTeamWorkerProof\(session, task\)/)
-  assert.match(daemon, /const startCodexStatus = recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)[\s\S]*updateTeamTaskAudit\(task\)/)
+  assert.match(daemon, /const workerProof = !isStandingTeamTask\(task\) && \(appended\.accepted[\s\S]*session\.teamActiveTaskId === task\.id[\s\S]*recordTeamWorkerProof\(session, task\)/)
+  assert.match(daemon, /const startCodexStatus = !isStandingTeamTask\(task\) && recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)[\s\S]*updateTeamTaskAudit\(task\)/)
   assert.match(daemon, /target\.teamActiveTaskId !== task\.id/)
   assert.match(daemon, /claimTeamTaskForSession\(state, task\.id, target[\s\S]*saveStateNow\(state\)[\s\S]*injectText\(target, prompt/)
   assert.match(daemon, /teamInputReservation/)
@@ -102,7 +104,7 @@ test('hookless successful workers report with warning and cannot race an authent
 
 test('team task control is journal-first, exact-task scoped, and drain-aware', () => {
   assert.match(daemon, /appendCoordinatorTaskMessage\(state, task\.id[\s\S]*saveStateNow\(state\)[\s\S]*ensureCoordinatorTaskMessageDelivery/)
-  assert.match(daemon, /target\.teamActiveTaskId !== task\.id[\s\S]*target_authority_lost/)
+  assert.match(daemon, /boundTeamTaskIdFor\(target, task\) !== task\.id[\s\S]*target_authority_lost/)
   assert.match(daemon, /providerDeliveryStatus = 'delivering'[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /teamDispatchMode\(team\) === 'draining'/)
   assert.match(daemon, /tasksPageForChannel/)
@@ -228,7 +230,7 @@ test('completion, pruning, and retry side effects remain durable and idempotent'
   assert.match(daemon, /completionDeliveryStatus = 'delivering'[\s\S]*client_msg_id: teamAuditClientId\(task, 'completion'\)/)
   assert.match(daemon, /ensureTeamCompletionDelivery\(task\)/)
   assert.match(daemon, /for \(const removed of result\.pruned \|\| \[\]\) removeTeamTaskFiles\(removed\)/)
-  assert.match(daemon, /const priorReply = task\.replies\.find[\s\S]*session\.teamActiveTaskId !== task\.id/)
+  assert.match(daemon, /const priorReply = task\.replies\.find[\s\S]*boundTeamTaskIdFor\(session, task\) !== task\.id/)
   assert.match(cli, /timeout: 10 \* 60_000/)
   assert.match(cli, /retry safely with --request-id/)
   assert.match(daemon, /!Object\.hasOwn\(task, 'completionDeliveryStatus'\)[\s\S]*completionDeliveryStatus = 'delivered'/)
@@ -272,7 +274,8 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(daemon, /providerMissing && task\.status !== 'awaiting_release'/)
   assert.match(daemon, /SessionEnd[\s\S]*failTeamTaskForSession\(session,[\s\S]*preserveReported: true/)
   assert.match(daemon, /preserveReported && existingTask\?\.status === 'awaiting_release'/)
-  assert.match(daemon, /releaseTeamTask\(state[\s\S]*delete target\.teamActiveTaskId[\s\S]*persistTeamLifecycle\(task, \{ enqueueContinuation: false \}\)/)
+  assert.match(daemon, /releaseTeamTask\(state[\s\S]*releaseTeamTaskBinding\(target, task\)[\s\S]*persistTeamLifecycle\(task, \{ enqueueContinuation: false \}\)/)
+  assert.match(/function releaseTeamTaskBinding\([\s\S]*?\n}/.exec(daemon)?.[0] || '', /delete target\.teamActiveTaskId/)
   assert.match(daemon, /beginCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)[\s\S]*injectCoordinatorTaskMessageOnce/)
   assert.match(daemon, /injectCoordinatorTaskMessageOnce[\s\S]*completeCoordinatorTaskMessageDelivery\(state[\s\S]*saveStateNow\(state\)/)
   assert.match(daemon, /const teamTaskTurn = currentTeamTaskProviderTurn\(session, body\)[\s\S]*completePrivateTurn[\s\S]*finalizeTurn\(session, \{[\s\S]*teamTaskTurn,[\s\S]*deferredFinal: matchingDeferredTeamProviderFinal/)
@@ -323,7 +326,7 @@ test('provider turn reporting preserves task and process ownership until explici
   assert.match(completionDeclaration,
     /invalid_work_generation[\s\S]*requestTeamTaskCompletion\(state[\s\S]*expectedProviderWorkGeneration:\s*request\.providerWorkGeneration/,
   'completion must validate and carry the immutable generation observed by the worker')
-  assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('session.teamActiveTaskId !== task.id'),
+  assert.ok(completionDeclaration.indexOf('priorRequest') < completionDeclaration.indexOf('boundTeamTaskIdFor(session, task) !== task.id'),
     'an exact completion retry must be recovered before the released session binding is rejected')
   assert.match(completionDeclaration,
     /requestTeamTaskCompletion\(state[\s\S]*recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)/)
@@ -378,7 +381,7 @@ test('coordinator wait returns actionable release state and dormant message retr
   assert.match(reconciliation,
     /task\.status === 'awaiting_release'[\s\S]*pidAlive\(target\.pid\)[\s\S]*tmuxAlive\(target\.tmux\)[\s\S]*continue/)
   assert.match(reconciliation,
-    /\['worker_dormant', 'task_message_predecessor_pending'\]\.includes\(error\?\.code\)[\s\S]*return/)
+    /\['worker_dormant', 'worker_not_idle', 'task_message_predecessor_pending'\]\.includes\(error\?\.code\)[\s\S]*return/)
 })
 
 test('task status cards use the canonical release-readiness predicate', () => {
@@ -477,7 +480,7 @@ test('authenticated coordinator-message acknowledgement wins a late uncertain tr
   'only a separately persisted authenticated acknowledgement may win a racing transport error')
   assert.ok(pendingDiscard > failureDisposition,
     'only a classified known-undelivered result may discard the recovery marker')
-  assert.match(delivery, /if \(failure\.retryable\)[\s\S]*discardPendingTeamProviderTurn/)
+  assert.match(delivery, /if \(failure\.retryable && !standing\)[\s\S]*discardPendingTeamProviderTurn/)
   assert.match(daemon, /const persistedCoordinatorMessageAcks = new WeakSet\(\)/)
   assert.ok(promptHook.indexOf('saveStateNow(state)') <
     promptHook.indexOf('persistedCoordinatorMessageAcks.add(acknowledgedCoordinatorMessage.message)'),
@@ -687,10 +690,10 @@ test('only a provably unstaged tmux write fails delegated input as undelivered',
   const transportCatch = injection.slice(injection.indexOf('await tmuxPaste('),
     injection.indexOf('// Only a provably failed tmux write'))
   assert.match(transportCatch,
-    /if \(expectedTeamTurn && !e\?\.inputNotDelivered\) \{[\s\S]*?throw uncertainTeamProviderInput\(/,
+    /if \(exactDelivery && !e\?\.inputNotDelivered\) \{[\s\S]*?throw uncertainTeamProviderInput\(/,
     'a write that may have reached the provider stays uncertain and is never retried')
   assert.match(transportCatch,
-    /forgetInjected\(session\.id, delivered\)\s*if \(expectedTeamTurn\) \{[\s\S]*?discardExpectedTeamTurn\(\)\s*throw new TeamError\('provider_input_rejected'/,
+    /forgetInjected\(session\.id, delivered\)\s*if \(exactDelivery\) \{[\s\S]*?discardExpectedTeamTurn\(\)\s*throw new TeamError\('provider_input_rejected'/,
     'an unstaged delegated write releases its staged turn and fails definitively')
   assert.ok(transportCatch.indexOf("throw new TeamError('provider_input_rejected'") <
     transportCatch.indexOf('falling back to channel event'),
@@ -698,7 +701,7 @@ test('only a provably unstaged tmux write fails delegated input as undelivered',
 
   const dispatchBody = /async function dispatchTeamTask\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.match(dispatchBody,
-    /if \(error\?\.providerInputUncertain\) \{[\s\S]*?return true\s*\}\s*delete target\.teamActiveTaskId[\s\S]*?failTeamTask\(state, task\.id, `Provider injection failed:/,
+    /if \(error\?\.providerInputUncertain\) \{[\s\S]*?return true\s*\}\s*if \(standing\) \{[\s\S]*?delete target\.teamStandingTaskId[\s\S]*?\} else delete target\.teamActiveTaskId[\s\S]*?failTeamTask\(state, task\.id, `Provider injection failed:/,
     'a definite injection failure fails the task immediately instead of expiring as uncertain')
 
   const coordinatorMessage = /async function injectCoordinatorTaskMessageOnce\([\s\S]*?\n}/.exec(daemon)?.[0] || ''

@@ -129,10 +129,18 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Generated-file delivery is provider-neutral. The daemon, not the agent,
   chooses the Slack destination from a short-lived grant tied to an accepted
   Slack message and its live session.
-- Session teams are channel-level, owner-created, bounded star graphs. Only a
-  current owner coordinator turn—or an explicitly enabled, bounded
-  `auto-until-blocked` continuation turn—may dispatch to linked workers; collaborators
-  have no lateral authority. An exhausted automatic turn may renew one bounded
+- Session teams are channel-level, bounded star graphs nested into an
+  owner-rooted tree of at most two team levels. A channel coordinates at most
+  one team and is a worker in at most one other; cycles fail closed. Only a
+  current owner coordinator turn may dispatch to linked workers. So may an
+  explicitly enabled, bounded `auto-until-blocked` continuation turn, or the
+  bounded delegated turn that handles a sub-team coordinator's exact standing
+  parent task. Collaborators have no lateral authority. A standing task binds
+  its exact worker session for replies, checkpoints and completion but never
+  reserves or reports its provider turns; its follow-ups enter only an idle
+  input surface. Opt-in auto-release may perform only an exact release that
+  the coordinator could perform. A team closes when its coordinator channel is
+  archived. An exhausted automatic turn may renew one bounded
   dispatch budget only by atomically claiming an authenticated pending worker
   event for that exact team. Durable drain mode must let active work finish while
   blocking queued claims and continuation wakes. Worker replies, checkpoints,
@@ -215,7 +223,9 @@ channel ID or arbitrary destination.
 Team calls must additionally prove exact provider-process ancestry, PID/tmux,
 native session, active channel, node, current owner turn or delegated task, and
 directed team permission. Aliases are presentation only. Membership alone does
-not authorize a collaborator prompt or stale provider leg to dispatch work.
+not authorize a collaborator prompt or stale provider leg to dispatch work. A
+delegated sub-team turn is authority only while its standing parent task is
+active and bound to that exact session.
 
 Provider switching is owner-only. Queue owner prompts by channel during the
 transaction, reject collaborator prompts, revoke source artifact grants on

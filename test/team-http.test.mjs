@@ -58,7 +58,7 @@ test('team HTTP exposes context, peers, inbox, and exact task status', async () 
     assert.deepEqual(await response.json(), { ok: true, tasks: [{ id: 'limit-5-after-null' }], nextCursor: 'next-page' })
     assert.deepEqual(inboxSeen[0], {
       limit: '5', after: null, cursor: 'page-one', active: true,
-      target: 'parallel-1', status: ['queued', 'running'], since: '2026-01-01T00:00:00.000Z',
+      target: 'parallel-1', status: ['queued', 'running'], since: '2026-01-01T00:00:00.000Z', team: null,
     })
     response = await fetch(`${base}/team/inbox${caller}&limit=5&after=task_old`, { headers })
     assert.deepEqual((await response.json()).tasks, [{ id: 'limit-5-after-task_old' }])

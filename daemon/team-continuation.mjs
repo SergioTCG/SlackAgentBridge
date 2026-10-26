@@ -108,7 +108,7 @@ export function claimContinuationDispatchAuthority(team, session, {
   const prior = session?.teamTurn
   if (!team?.id || continuation?.mode !== 'auto-until-blocked' || !prior) return null
   const chained = prior.actor === 'owner' || (
-    prior.actor === 'continuation' && prior.teamId === team.id
+    ['continuation', 'delegated'].includes(prior.actor) && prior.teamId === team.id
   )
   if (!chained) return null
   const current = Date.parse(prior.expiresAt || 0) > now && prior.remaining > 0

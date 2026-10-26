@@ -173,6 +173,21 @@
 - [ ] `sab automation stop KEY --archive` on that worker removes its
       membership and archives only its channel, while task history remains;
       stopping a coordinator automation closes its team.
+- [ ] Nested hierarchy canary: from main's owner turn, create an epic
+      coordinator with `--create-team` and a task file. Confirm the sub-team
+      inherits continuation and auto-release, the epic task is standing, and the
+      epic's first turn can create two executors. An executor cannot create a
+      third level, and adding main to the epic team is refused as a cycle.
+- [ ] An executor question travels up through an epic `sab team reply` and the
+      answer comes down through `sab team message` twice. The standing message
+      waits while the epic is busy and enters once when it is idle. No turn
+      report is posted for the epic's own turns.
+- [ ] With auto-release on, both executors' releases happen without a
+      coordinator turn and wake the epic once. Archiving the epic channel closes
+      its team on the next sweep and removes it from main.
+- [ ] Restart while the epic holds its standing task, both idle and mid-turn.
+      The binding survives, a stale delegated turn is cleared for an idle
+      session, and a pending message is delivered exactly once.
 - [ ] Launch a fresh Codex automation with its native SessionStart hook
       suppressed. Confirm the exact root App Server thread identity binds the
       pending tmux once, while a child thread, unrelated session, cwd mismatch,

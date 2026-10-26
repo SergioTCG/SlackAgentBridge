@@ -78,6 +78,7 @@ export async function handleAutomationHttp(req, res, url, lifecycle) {
             alias: automation.team.alias,
             role: 'worker',
             taskId: automation.team.taskId || null,
+            ...(automation.team.createdTeam ? { coordinates: { ...automation.team.createdTeam } } : {}),
           },
         } : {}),
       })

@@ -86,8 +86,9 @@ export async function handleTeamHttp(req, res, url, service) {
         target: url.searchParams.get('target'),
         status: url.searchParams.get('status')?.split(',').filter(Boolean) || null,
         since: url.searchParams.get('since'),
+        team: url.searchParams.get('team'),
       }
-      if (options.after && (options.cursor || options.active || options.target || options.status || options.since)) {
+      if (options.after && (options.cursor || options.active || options.target || options.status || options.since || options.team)) {
         throw new TeamError('invalid_filter_combo',
           'The legacy after cursor cannot be combined with inbox filters or cursor pagination.')
       }

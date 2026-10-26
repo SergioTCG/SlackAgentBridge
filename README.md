@@ -406,6 +406,7 @@ giving an agent Slack credentials or arbitrary channel access:
 /sab-team permissions codex-barrique-parallel-1 files on
 /sab-team status
 /sab-team auto   # opt into bounded continuation; use /sab-team manual to disable
+/sab-team auto-release on   # release ready, gate-free work without a coordinator turn
 /sab-team drain  # finish active tasks but dispatch nothing queued; resume later
 ```
 
@@ -464,6 +465,19 @@ follow-up is already visible in both channels and is delivered after re-adoption
 Availability and the `queued → dispatching` task claim are persisted together,
 and context output includes observation time plus the last task/availability
 transition reason.
+
+Teams nest into an owner-rooted hierarchy of at most two team levels. A channel
+may coordinate one team and also be a worker in one parent team. For example:
+main → epic coordinators → executors. A task to a sub-team coordinator is
+*standing*: it binds the exact session for replies and completion but never
+reserves its turns, so its own team keeps working, and it lives 30 days past
+its last activity. The turn handling that task, or a follow-up for it, carries
+bounded delegated authority for the coordinator's own team. Questions travel up
+with `sab team reply` and answers down with `sab team message`, one edge at a
+time. `/sab-team auto-release on` lets SAB release ready work itself. A team
+closes when its coordinator channel is archived. A coordinator can create a
+nested coordinator with `sab automation create --team main --create-team
+epic-a`.
 
 See [Session teams](docs/session-teams.md) for the complete workflow, limits,
 recovery behavior, and file boundary. Initial relay is local-node only; the

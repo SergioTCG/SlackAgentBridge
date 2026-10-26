@@ -16,8 +16,8 @@ function usage(message = '') {
   process.stderr.write(`Usage:
   sab team context [--json]
   sab team peers [--json]
-  sab team inbox [--active] [--target ALIAS] [--status STATUS[,STATUS]] [--since ISO] [--cursor CURSOR] [--after TASK_ID] [--limit N] [--page] [--json]
-  sab team send --to ALIAS (--stdin | --message TEXT) [--request-id ID]
+  sab team inbox [--team TEAM] [--active] [--target ALIAS] [--status STATUS[,STATUS]] [--since ISO] [--cursor CURSOR] [--after TASK_ID] [--limit N] [--page] [--json]
+  sab team send --to ALIAS (--stdin | --message TEXT) [--standing] [--team TEAM] [--request-id ID]
   sab team send-file (--to ALIAS | --task TASK_ID) [--message TEXT] [--request-id ID] -- FILE_PATH [FILE_PATH ...]
   sab team wait --task TASK_ID [--timeout SECONDS] [--json]
   sab team reply --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
@@ -29,10 +29,13 @@ function usage(message = '') {
   sab team replace --task TASK_ID (--stdin | --message TEXT) [--request-id ID]
   sab team cancel --task TASK_ID [--reason TEXT] [--request-id ID]
   sab team mutation --request-id ID [--task TASK_ID]
-  sab team mode <active|draining>
+  sab team mode <active|draining> [--team TEAM]
 
 Team identity and destinations are resolved by the bridge. These commands must
-run inside an authoritative live Slack Agent Bridge session.\n`)
+run inside an authoritative live Slack Agent Bridge session. A channel that
+coordinates a sub-team is also a worker in its parent team: send, message,
+release, cancel and mode act on the team it coordinates; reply, checkpoint and
+complete act on its task in the parent team. --team names the expected team.\n`)
   process.exit(message ? 2 : 0)
 }
 
@@ -95,18 +98,22 @@ function readText(mode, input) {
   return String(input || '')
 }
 
-function commonMessageArgs(args, { files = false } = {}) {
+function commonMessageArgs(args, { files = false, send = false } = {}) {
   let to = null
   let taskId = null
   let mode = null
   let message = ''
   let requestId = null
+  let standing = false
+  let team = null
   const paths = []
   let pathsOnly = false
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (pathsOnly) { paths.push(path.resolve(arg)); continue }
     if (arg === '--') { pathsOnly = true; continue }
+    if (send && arg === '--standing') { standing = true; continue }
+    if (send && arg === '--team') { team = value(args, i, arg); i++; continue }
     if (arg === '--to') { to = value(args, i, arg); i++; continue }
     if (arg === '--task') { taskId = value(args, i, arg); i++; continue }
     if (arg === '--request-id') { requestId = value(args, i, arg); i++; continue }
@@ -122,7 +129,7 @@ function commonMessageArgs(args, { files = false } = {}) {
   }
   if (files && !paths.length) usage('provide at least one file path after --')
   if (!files && paths.length) usage('file paths are accepted only by send-file')
-  return { to, taskId, text: mode ? readText(mode, message).trim() : '', paths, requestId }
+  return { to, taskId, text: mode ? readText(mode, message).trim() : '', paths, requestId, standing, team }
 }
 
 function output(value) {
@@ -216,8 +223,10 @@ try {
     let status = null
     let since = null
     let page = false
+    let team = null
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--json') continue
+      if (args[i] === '--team') { team = value(args, i, args[i]); i++; continue }
       if (args[i] === '--active') { active = true; continue }
       if (args[i] === '--page') { page = true; continue }
       if (args[i] === '--limit') { limit = Number(value(args, i, args[i])); i++; continue }
@@ -229,8 +238,9 @@ try {
       usage(`unknown inbox option: ${args[i]}`)
     }
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) usage('--limit must be an integer from 1 to 200')
-    if (after && (cursor || active || target || status || since)) usage('--after is the legacy new-items cursor and cannot be combined with inbox filters or --cursor')
+    if (after && (cursor || active || target || status || since || team)) usage('--after is the legacy new-items cursor and cannot be combined with inbox filters or --cursor')
     const params = new URLSearchParams({ limit: String(limit) })
+    if (team) params.set('team', team)
     if (after) params.set('after', after)
     if (cursor) params.set('cursor', cursor)
     if (active) params.set('active', 'true')
@@ -240,10 +250,12 @@ try {
     const result = await request(`/team/inbox?${params}`)
     output(page ? { tasks: result.tasks, nextCursor: result.nextCursor || null } : result.tasks)
   } else if (command === 'send') {
-    const parsed = commonMessageArgs(args)
+    const parsed = commonMessageArgs(args, { send: true })
     if (!parsed.to || !parsed.text) usage('send requires --to and either --stdin or --message')
     const result = await mutate('/team/send', {
       to: parsed.to, text: parsed.text, paths: [], requestId: parsed.requestId,
+      ...(parsed.standing ? { standing: true } : {}),
+      ...(parsed.team ? { team: parsed.team } : {}),
     })
     outputMutation(result, result.task)
   } else if (command === 'send-file') {
@@ -328,8 +340,11 @@ try {
     const suffix = params.size ? `?${params}` : ''
     output((await request(`/team/mutations/${encodeURIComponent(parsed.requestId)}${suffix}`)).mutation)
   } else if (command === 'mode') {
-    if (args.length !== 1 || !['active', 'draining'].includes(args[0])) usage('mode requires active or draining')
-    output(await request('/team/mode', { method: 'POST', body: { mode: args[0] } }))
+    const teamIndex = args.indexOf('--team')
+    const team = teamIndex >= 0 ? value(args, teamIndex, '--team') : null
+    const rest = teamIndex >= 0 ? args.filter((_, index) => index !== teamIndex && index !== teamIndex + 1) : args
+    if (rest.length !== 1 || !['active', 'draining'].includes(rest[0])) usage('mode requires active or draining')
+    output(await request('/team/mode', { method: 'POST', body: { mode: rest[0], ...(team ? { team } : {}) } }))
   } else if (command === 'wait') {
     let taskId = null
     let timeoutSeconds = 3600

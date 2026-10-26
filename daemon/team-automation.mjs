@@ -2,10 +2,11 @@ import crypto from 'node:crypto'
 import { AutomationRequestError } from './automation.mjs'
 import { LOCAL_NODE_ID } from './nodes.mjs'
 import { providerOf } from './providers.mjs'
+import { setContinuationMode } from './team-continuation.mjs'
 import {
-  TeamError, activeTeamForChannel, activeTeams, closeTeam, commitTeamWorkerReservation, consumeCoordinatorDispatch,
-  createTeamTask, normalizeTeamAlias, releaseTeamWorkerReservation, removeTeamWorker, reserveTeamWorker,
-  teamById, teamDispatchMode,
+  TeamError, activeTeams, closeTeam, commitTeamWorkerReservation, consumeCoordinatorDispatch, coordinatedTeamForChannel,
+  createTeam, createTeamTask, normalizeTeamAlias, releaseTeamWorkerReservation, removeTeamWorker, reserveTeamWorker,
+  setTeamAutoRelease, teamAutoRelease, teamById, teamDispatchMode,
 } from './teams.mjs'
 
 // Automations that start inside a session team. The coordinator's own
@@ -24,7 +25,7 @@ export function automationTeamError(error) {
 }
 
 export function coordinatedTeamFor(state, session, selector) {
-  const team = activeTeamForChannel(state, session?.channel)
+  const team = coordinatedTeamForChannel(state, session?.channel)
   const wanted = String(selector || '')
   if (!team || team.coordinatorChannel !== session.channel || team.members?.[session.channel]?.role !== 'coordinator' ||
       (team.id !== wanted && team.name !== wanted.toLowerCase())) {
@@ -89,6 +90,7 @@ export function createAutomationTeamBootstrap({
           key: record.externalKey,
           alias: request.team.alias || defaultAutomationAlias(record),
           provenance: authorizedBy,
+          createsTeam: request.team.createTeam || null,
           now: now(),
         })
         try { consumeCoordinatorDispatch(session, authority) }
@@ -115,6 +117,27 @@ export function createAutomationTeamBootstrap({
         const member = commitTeamWorkerReservation(state, team.id, record.externalKey, {
           channel: record.channelId, now: now(),
         })
+        let createdTeam = null
+        if (request.team.createTeam) {
+          // The new worker also coordinates a new sub-team. It inherits the
+          // parent's automatic continuation and auto-release policy, which
+          // the owner chose for the parent; neither is widened here.
+          try {
+            const child = createTeam(state, {
+              name: request.team.createTeam,
+              coordinatorChannel: record.channelId,
+              createdBy: team.createdBy,
+              provenance: { ...record.team.authorizedBy, parentTeamId: team.id },
+              now: now(),
+            })
+            if (team.continuation?.mode === 'auto-until-blocked') setContinuationMode(child, 'auto-until-blocked', { now: now() })
+            if (teamAutoRelease(team)) setTeamAutoRelease(child, true, { now: now() })
+            createdTeam = { teamId: child.id, teamName: child.name }
+          } catch (error) {
+            removeTeamWorker(state, team.id, record.channelId, { now: now() })
+            throw error
+          }
+        }
         let taskId = null
         if (request.team.task) {
           try {
@@ -133,11 +156,12 @@ export function createAutomationTeamBootstrap({
             taskId = result.task.id
             for (const removed of result.pruned || []) removeTaskFiles(removed)
           } catch (error) {
+            if (createdTeam) closeTeam(state, createdTeam.teamId, { now: now() })
             removeTeamWorker(state, team.id, record.channelId, { now: now() })
             throw error
           }
         }
-        return { alias: member.alias, taskId, joinedAt: member.joinedAt }
+        return { alias: member.alias, taskId, joinedAt: member.joinedAt, ...(createdTeam ? { createdTeam } : {}) }
       } catch (error) { throw automationTeamError(error) }
     },
 
