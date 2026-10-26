@@ -167,6 +167,13 @@ run from the checkout already named by the live LaunchAgent; invoking it from
 an isolated development worktree fails before changing hooks, configuration,
 Git state, or the public `sab` link.
 
+Existing 2.3 installations should read [Migrating to
+2.4](docs/migrating-to-2.4.md). Version 2.4 adds agent hierarchies: nested
+session teams with standing tasks and delegated authority, opt-in
+auto-release, scheduled and worker wakes, and the team tree. It also stops
+restarts from stranding a Claude session that has not received its first
+message. Nothing new is activated and no session state is migrated.
+
 Existing 2.2 installations should read [Migrating to
 2.3](docs/migrating-to-2.3.md). Version 2.3 lets a team coordinator create
 named worker automations that join its team with a first task, accepts

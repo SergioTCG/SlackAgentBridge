@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-10-26
+
 ### Added
 
 - Nested session teams. A channel may coordinate one team and be a worker in
@@ -68,6 +70,8 @@ Notable changes to this project. Format based on
   - Automatic account handover now skips such a session.
   - `/sab-account`, `/sab-update`, bulk and scheduled updates and launch-flag
     changes refuse it before stopping anything, and ask for a first message.
+
+[2.4.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.4.0
 
 ## [2.3.0] — 2026-10-26
 
