@@ -167,6 +167,15 @@ run from the checkout already named by the live LaunchAgent; invoking it from
 an isolated development worktree fails before changing hooks, configuration,
 Git state, or the public `sab` link.
 
+Existing 2.4 installations should read [Migrating to
+2.5](docs/migrating-to-2.5.md). Version 2.5 keeps held work moving at a usage
+limit. In auto mode, a team task, an automation or a turn the limit ended moves
+to an account with capacity, or resumes in place once its own account
+recovers. New sessions start on an account with capacity, and Codex sessions
+get the same handling. It also keeps the 1M-context model across resumes and
+stops restarts from failing an automation that works in a subfolder. The
+usage-limit handling runs only in auto mode, and no session state is migrated.
+
 Existing 2.3 installations should read [Migrating to
 2.4](docs/migrating-to-2.4.md). Version 2.4 adds agent hierarchies: nested
 session teams with standing tasks and delegated authority, opt-in

@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-10-28
+
 ### Added
 
 - A turn that a usage limit paused resumes in place once its own account has
@@ -68,6 +70,8 @@ Notable changes to this project. Format based on
   subfolder of its launch directory. Recovery re-checked the launch folder
   against the session's current folder, which follows the agent. A record
   failed this way is restored at the next recovery.
+
+[2.5.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.5.0
 
 ## [2.4.0] — 2026-10-26
 
