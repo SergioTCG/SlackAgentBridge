@@ -647,3 +647,45 @@ test('legacy state and manual spawn state remain untouched until automation is u
   assert.deepEqual(state, before)
   assert.equal(lifecycle.status('missing'), null)
 })
+
+test('an agent working in a subfolder keeps its automation active across recovery', async t => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  const session = { id: 'drift-native', channel: 'CDRIFT', tmux: automation.tmux, cwd: f.cwd, pid: 42 }
+  f.state.sessions[session.id] = session
+  f.state.channels[session.channel] = session.id
+  f.lifecycle.correlateSessionStart(session)
+  await f.drain()
+  const record = f.state.automations[f.request.externalKey]
+  assert.equal(record.status, 'active')
+  session.cwd = path.join(f.cwd, 'infrastructure', 'vivian-e2e') // the status line follows the agent
+  f.lifecycle.recover(); await f.drain()
+  assert.equal(record.status, 'active')
+  assert.equal(record.failure, null)
+  // A record an earlier release failed exactly this way is restored.
+  record.status = 'failed'
+  record.failure = { code: 'session_cwd_mismatch', message: 'The tmux session registered from a different working directory.', at: 5 }
+  f.lifecycle.recover(); await f.drain()
+  assert.equal(record.status, 'active')
+  assert.equal(record.failure, null)
+  assert.deepEqual([f.calls.launch.length, f.calls.inject.length], [1, 1], 'nothing relaunched or re-prompted')
+  // Any other failure stays.
+  record.status = 'failed'
+  record.failure = { code: 'session_correlation_lost', message: 'lost', at: 6 }
+  f.lifecycle.recover(); await f.drain()
+  assert.equal(record.status, 'failed')
+})
+
+test('a first SessionStart from another folder still fails its automation', async t => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }))
+  const { automation } = f.lifecycle.create(f.request)
+  await f.drain()
+  const session = { id: 'elsewhere', channel: 'CELSE', tmux: automation.tmux, cwd: path.join(f.root, 'other'), pid: 43 }
+  f.state.sessions[session.id] = session
+  f.state.channels[session.channel] = session.id
+  assert.equal(f.lifecycle.correlateSessionStart(session), false)
+  assert.equal(f.state.automations[f.request.externalKey].failure.code, 'session_cwd_mismatch')
+})

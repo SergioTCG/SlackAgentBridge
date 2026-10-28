@@ -608,7 +608,11 @@ export function createAutomationLifecycle({
     const record = Object.values(records()).find(item =>
       item.tmux === session.tmux && item.provider === provider && !stopRequested(item) && !['stopping', 'stopped', 'released'].includes(item.status))
     if (!record) return false
-    if (path.resolve(session.cwd || record.cwd) !== record.cwd) {
+    // A session's cwd follows its agent's working folder, so only the first
+    // correlation proves the launch directory. A record already bound to this
+    // exact session is being re-observed, for example at daemon recovery.
+    const rebound = Boolean(record.sessionId) && record.sessionId === session.id
+    if (!rebound && path.resolve(session.cwd || record.cwd) !== record.cwd) {
       setFailure(record, 'session_cwd_mismatch', 'The tmux session registered from a different working directory.', 'Stop the automation and investigate the launcher before retrying.')
       return false
     }
@@ -623,6 +627,14 @@ export function createAutomationLifecycle({
     record.sessionStartedAt ||= now()
     sessionRefs.set(session.id, session)
     if (record.status === 'active' || record.status === 'failed') {
+      // Earlier releases failed a set-up automation exactly this way once its
+      // agent changed folder. Restore that case, and only that case.
+      if (rebound && record.status === 'failed' && record.failure?.code === 'session_cwd_mismatch' &&
+          ['delivered', 'team_task'].includes(record.prompt?.status) && !record.initialPrompt &&
+          (record.collaborators || []).every(item => item.status === 'ready')) {
+        record.status = 'active'
+        record.failure = null
+      }
       touch(record)
       return true
     }
