@@ -522,8 +522,9 @@ Codex sessions get the same handling:
 - **Halt.** A Codex handover that ends uncertain halts only Codex handovers.
 - **Handover and resume.** Held work moves when the group has another Codex
   account with capacity, and otherwise resumes in place.
-- **Not needed for Codex.** Codex has no limit chooser and no Bash-tool
-  background shells.
+- **Not done for Codex.** Codex has no limit chooser. SAB does not inspect a
+  Codex session's child processes before the restart, as it does for Claude's
+  Bash-tool shells.
 - **Testing.** Unit tests cover this path; no live Codex canary has run.
 
 ### Additional Codex login profiles

@@ -144,6 +144,7 @@ test('a Codex usage limit is recognised only as a whole provider sentence in the
   assert.equal(codexUsageLimitSurface([notice, '', '› Your usage limit has reset; resume your task', '', '• ok', ...tail].join('\n')), null)
   assert.equal(codexUsageLimitSurface([notice, '', '› Your usage limit has reset; resume your task', ...tail].join('\n')), null,
     'a newer message row means the notice is history')
-  assert.equal(codexUsageLimitSurface(['• Usage limit reached. Retrying the build in 5 minutes.', ...tail].join('\n')), 'ended',
-    'a bulleted agent line that reads as the provider sentence still needs measured exhaustion before anything acts on it')
+  assert.equal(codexUsageLimitSurface(['• Usage limit reached. The upstream API returned 429.', ...tail].join('\n')), null,
+    'an agent reply bullet is not the provider error row')
+  assert.equal(codexUsageLimitSurface(["You've hit your usage limit. Try again later.", ...tail].join('\n')), null, 'no error glyph, no notice')
 })

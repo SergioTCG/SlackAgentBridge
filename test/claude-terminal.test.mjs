@@ -121,6 +121,9 @@ test('only Claude\'s own limit rendering counts, never a reply that quotes it', 
   assert.equal(claudeUsageLimitSurface([LIMIT_NOTICE, '❯ typed but not sent', ...footer].join('\n')), null, 'typed input is newer')
   // Quoted option rows without the dialog's footer are not an open chooser.
   assert.equal(claudeUsageLimitSurface([LIMIT_NOTICE, '   1. Stop and wait for limit to reset', ...footer].join('\n')), 'ended')
+  for (const wording of ['  ⎿  Opus weekly limit reached ∙ resets 4pm', '  ⎿  Claude usage limit reached. Your limit will reset at 4pm.']) {
+    assert.equal(claudeUsageLimitSurface([wording, ...footer].join('\n')), 'ended', wording)
+  }
   assert.equal(claudeUsageLimitSurface(['⏺ Reply quoting a chooser:', '  ❯ 1. Stop and wait for limit to reset',
     '  Enter to confirm · Esc to cancel', ...footer].join('\n')), null, 'no notice row, no surface')
 })

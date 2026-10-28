@@ -94,7 +94,8 @@ test('a turn a usage limit paused is resumed, never reported, failed or released
   assert.ok(poller > 0 && poller < daemon.indexOf("'Codex returned to idle without its lifecycle completion hook. The accepted worker turn completed"))
   assert.match(daemon, /if \(accountPools\.mode === 'auto' && usageLimitSurface\('codex', pane\) \|\| accountMaintenanceHoldsTask\(s\)\) \{[\s\S]*?\} else if \(idleTask\) await releaseIdleReadoptedTeamTaskIfStillIdle\(s, idleTask, 'Codex'\)/)
   const coordinator = /async function reconcileIdleCodexCoordinator\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
-  assert.ok(coordinator.indexOf('codexUsageLimitSurface(pane)') > 0 && coordinator.indexOf('codexUsageLimitSurface(pane)') < coordinator.indexOf('clearTeamTurn(coordinator)'))
+  assert.ok(coordinator.indexOf('codexUsageLimitSurface(pane) && accountPools.measuredExhaustion(coordinator)') > 0 &&
+    coordinator.indexOf('codexUsageLimitSurface(pane)') < coordinator.indexOf('clearTeamTurn(coordinator)'))
   // The in-place resume: held work only, rate-limited, the chooser closed with
   // the one-Escape helper, then one bridge-injected line.
   const resume = /async function resumeSessionAfterLimit\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''

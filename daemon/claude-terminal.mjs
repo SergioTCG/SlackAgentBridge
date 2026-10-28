@@ -90,7 +90,7 @@ export function prepareClaudeTerminalDelivery(text, previousFailure = null, now 
 // Claude renders the notice as its own result row (`⎿`) under the turn, and the
 // chooser as numbered option rows above its "Enter to confirm" footer; a reply
 // that merely quotes either is a `⏺` paragraph and does not count.
-const USAGE_LIMIT_NOTICE = /^\s*⎿\s+(?:You['’]ve hit your (?:[\w-]+ )*limit|(?:usage|session|weekly|daily|5-hour) limit reached)\b/i
+const USAGE_LIMIT_NOTICE = /^\s*⎿\s+.*?\b(?:You['’]ve hit your (?:[\w-]+ )*limit|(?:usage|session|weekly|daily|5-hour) limit reached)\b/i
 const USAGE_LIMIT_MENU_OPTION = /^\s*(?:❯\s*)?1\.\s+Stop and wait for (?:the )?limit to reset\s*$/i
 const USAGE_LIMIT_MENU_FOOTER = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$/i
 

@@ -40,7 +40,8 @@ export function codexTerminalFailure(pane) {
 // You've reached your usage limit…" or "You're out of credits…". Like the
 // capacity banner, it counts only in the visible tail and only as a whole
 // rendered sentence, never as a quoted substring of model output.
-const usageLimitPattern = /^(?:[■⚠!•]\s*(?:️)?\s*)?(?:You['’]ve (?:hit|reached) your usage limit|Usage limit reached\.|You['’]re out of credits\.)/i
+// Codex's own error glyph is required: its agent replies are `•` bullets.
+const usageLimitPattern = /^[■⚠]\s*(?:️)?\s*(?:You['’]ve (?:hit|reached) your usage limit|Usage limit reached\.|You['’]re out of credits\.)/i
 
 // The notice must also be the latest output: after its paragraph (up to the
 // next blank row) only the composer row and the footer may follow. A reply, a

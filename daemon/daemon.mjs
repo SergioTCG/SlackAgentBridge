@@ -4582,10 +4582,11 @@ async function reconcileIdleCodexCoordinator(team, coordinator) {
   if (decision.observation) teamCoordinatorIdleProof.set(team.id, decision.observation)
   else reset()
   if (decision.action !== 'release') return false
-  if (accountPools.mode === 'auto' && codexUsageLimitSurface(pane)) {
-    // A usage limit ended this turn unfinished. Keep its authority for the
-    // handover or the limit's reset to resume, rather than releasing it into a
-    // continuation that the exhausted account would only fail again.
+  if (codexUsageLimitSurface(pane) && accountPools.measuredExhaustion(coordinator)) {
+    // A usage limit ended this turn unfinished, on an account the pool can act
+    // on. Keep its authority for the handover or the limit's reset to resume,
+    // rather than releasing it into a continuation that the exhausted account
+    // would only fail again.
     if (coordinator.codexTurnStartedAt) { stopPoller(coordinator); saveStateNow(state) }
     reset()
     return false
@@ -7323,14 +7324,16 @@ async function resumeSessionAfterLimit(session) {
   let pane = await tmuxCapture(expected.tmux)
   if (provider === 'claude') {
     try {
-      ({ pane } = await dismissClaudeUsageLimitMenu({
+      const result = await dismissClaudeUsageLimitMenu({
         capture: () => tmuxCapture(expected.tmux),
         sendKey: async key => {
           if (!authoritative() || busy()) throw new Error('session changed before its usage-limit chooser was closed')
           await execFile('tmux', ['send-keys', '-t', expected.tmux, key])
         },
         sleep,
-      }))
+      })
+      pane = result.pane
+      if (result.dismissed) { await sleep(500); pane = await tmuxCapture(expected.tmux) }
     } catch (error) {
       log('usage-limit resume deferred', session.id.slice(0, 8), String(error?.message || error))
       return false
