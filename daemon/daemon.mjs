@@ -66,8 +66,8 @@ import {
   normalizeManagedPolicy, parseManagedRunCommand, sanitizeManagedSnapshot, sanitizeRoutingSnapshot,
 } from '../pi/managed-core.mjs'
 import {
-  CLAUDE_FAILURE_DEDUPE_MS, claudePollerDecision, prepareClaudeTerminalDelivery,
-  resetClaudePollerEvidence,
+  CLAUDE_FAILURE_DEDUPE_MS, claudeBackgroundShellCommand, claudePollerDecision, claudeUsageLimitSurface,
+  dismissClaudeUsageLimitMenu, prepareClaudeTerminalDelivery, resetClaudePollerEvidence, usageLimitResumeInput,
 } from './claude-terminal.mjs'
 import {
   staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
@@ -82,7 +82,7 @@ import {
   readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionPatch, validateInstructionResult,
   writeInstructionProposal,
 } from './instructions.mjs'
-import { createAutomationLifecycle, proveAutomationReleaseProcess, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
+import { automationOwnsSession, createAutomationLifecycle, proveAutomationReleaseProcess, shouldFenceAutomationHook, waitForProviderInput } from './automation.mjs'
 import { handleAutomationHttp } from './automation-http.mjs'
 import {
   automationSetupPending, bootstrapTaskHold, createAutomationTeamBootstrap, detachAutomationTeams,
@@ -233,11 +233,14 @@ const accountPools = createAccountPoolRuntime({
       const alias = ref.kind === 'legacy-claude' ? ref.alias : ref.kind.endsWith('-profile') ? ref.profile : null
       if ((session.account || null) !== alias || ref.kind === 'claude-profile' && session.accountKind !== ref.kind) return 'identity-mismatch'
       await waitForAutomationInput(session)
-      const checkpoint = state.accountPools?.switches?.[session.channel]?.taskMaintenance
-      if (checkpoint) {
+      const journal = state.accountPools?.switches?.[session.channel]
+      const checkpoint = journal?.taskMaintenance
+      if (checkpoint || journal?.usageLimit) {
+        // A long conversation takes a while to load. Nothing is delivered to
+        // the replacement before it shows its idle prompt.
         let ready = false
-        for (let attempt = 0; attempt < 40; attempt++) {
-          assertTaskMaintenance(state, session, checkpoint)
+        for (let attempt = 0; attempt < 240; attempt++) {
+          if (checkpoint) assertTaskMaintenance(state, session, checkpoint)
           const pane = await tmuxCapture(expected.tmux)
           if (targetStartupState('claude', pane) === 'ready' && !extractSpinner(pane)) { ready = true; break }
           await sleep(250)
@@ -252,12 +255,21 @@ const accountPools = createAccountPoolRuntime({
     return identity
   },
   restart: async (session, alias, options) => {
-    let preflightPassed = false
-    try { return await restartSessionWithMutation(session, {
+    let preflightPassed = false, usageLimit = null
+    try { await restartSessionWithMutation(session, {
     expectedSessionId: options.expectedSessionId,
-    notice: `🔐 Switching subscription to ${options.account.email}; resuming the same conversation with its current settings…`,
+    notice: options.usageLimit
+      ? `🔐 ${options.source?.email || 'This account'} has reached its usage limit. Switching subscription to ${options.account.email}; resuming the same conversation with its current settings…` +
+        (options.taskMaintenance ? ` Team task \`${options.taskMaintenance.taskId}\` continues unchanged.` : '')
+      : `🔐 Switching subscription to ${options.account.email}; resuming the same conversation with its current settings…`,
     beforeMutation: async () => {
       options.authorize()
+      if (options.usageLimit) {
+        usageLimit = await prepareUsageLimitRestart(session, options.taskMaintenance)
+        options.authorize()
+        preflightPassed = true
+        return
+      }
       if (accountPoolBlockReason(session, true, options.taskMaintenance)) throw new Error('account_switch_blocked')
       const expected = { id: session.id, pid: session.pid, tmux: session.tmux, provider: providerOf(session) }
       const childProof = options.taskMaintenance ? await proveIdleTaskProcessTree(session, { execFile, bridge: BRIDGE }) : null
@@ -274,15 +286,25 @@ const accountPools = createAccountPoolRuntime({
       preflightPassed = true
     },
     mutate: current => { current.account = alias; current.accountKind = accountCredentialReference(options.account).kind },
+    afterStop: () => usageLimit?.shells.length ? stopClaudeBackgroundShells(usageLimit.shells) : null,
     }) } catch (error) {
       // A failed idle/child-process/authority proof never reached mutation or
       // teardown. Do not strand an untouched task behind a recovery fence.
       if (!preflightPassed) error.accountPreflightRejected = true
       throw error
     }
+    return usageLimit ? queueUsageLimitResume(session, usageLimit) : null
   },
   notify: (channel, message) => post(channel, message),
-  onSettled: session => scheduleSessionInputDrain(session, providerOf(session), session.tmux, 0),
+  log: (...args) => log(...args),
+  usageLimitBlockReason: (session, taskMaintenance) => usageLimitBlockReason(session, taskMaintenance),
+  onSettled: (session, settled) => {
+    if (settled?.journal?.usageLimit) {
+      try { settleUsageLimitHandover(session, settled) }
+      catch (error) { log('usage-limit handover annotation failed', session.id.slice(0, 8), String(error?.message || error)) }
+    }
+    scheduleSessionInputDrain(session, providerOf(session), session.tmux, 0)
+  },
 })
 const bootSessionInputClaims = createBootSessionInputClaims(state)
 const isNoSpaceError = error => error?.code === 'ENOSPC' || /no space left on device/i.test(String(error?.message || error))
@@ -6973,6 +6995,7 @@ async function restartSessionWithMutation(session, {
   notice,
   mutate,
   beforeMutation,
+  afterStop,
 } = {}) {
   if (claudeConversationGone(session)) throw new Error('no conversation to resume yet: send this Claude session a first message, then try again. Nothing was changed.')
   const reservation = reserveSessionMaintenance(session, { expectedSessionId })
@@ -6989,6 +7012,7 @@ async function restartSessionWithMutation(session, {
     // window must resume with the newly selected setting, account, or flags.
     saveStateNow(state)
     await stopReservedSession(session, reservation)
+    if (afterStop) await afterStop()
     await resurrect(session)
     if (!session.tmux || !(await tmuxAlive(session.tmux))) {
       throw new Error('replacement tmux session did not become active')
@@ -7018,6 +7042,124 @@ function accountPoolBlockReason(session, reserved = false, taskMaintenance = nul
   const subject = taskMaintenance ? { ...session, teamActiveTaskId: null } : session
   return bulkUpdateBlockReason(subject, { ...context, automations: state.automations }) ||
     (!(session.pid && pidAlive(session.pid)) ? 'provider is dormant' : null)
+}
+
+// A usage limit waives only the protections that exist for the held work
+// itself: its team task, its automation's ownership and the Claude turn the
+// limit already ended. Questions, permissions, provider switches, other
+// maintenance, private turns and in-flight team deliveries still block.
+async function usageLimitBlockReason(session, taskMaintenance = null, { reserved = false } = {}) {
+  if (providerOf(session) !== 'claude' || !session.tmux || !(session.pid && pidAlive(session.pid))) return 'provider is dormant'
+  if (taskMaintenance) assertTaskMaintenance(state, session, taskMaintenance)
+  else if (session.teamActiveTaskId || session.teamStandingTaskId) return 'team task checkpoint unavailable'
+  const automation = Object.values(state.automations || {}).find(record => automationOwnsSession(record, session))
+  if (automation && (automation.status !== 'active' || automation.stop?.requestedAt || automation.sessionId !== session.id ||
+      automation.channelId !== session.channel || automation.initialPrompt || !['delivered', 'team_task'].includes(automation.prompt?.status) ||
+      !automation.collaborators?.every(item => item.status === 'ready'))) return 'automation setup in progress'
+  if (Object.values(state.teamTasks || {}).some(task => task.targetSessionId === session.id &&
+      (task.messages || []).some(message => teamMessageDeliveries.has(message.id)))) return 'team message delivery in progress'
+  const context = bulkUpdateContext()
+  if (reserved) context.restartingSessionIds.delete(session.id)
+  // A turn that failed at once leaves a poller that never saw a spinner.
+  if (claudeUsageLimitSurface(await tmuxCapture(session.tmux))) context.busySessionIds.delete(session.id)
+  return bulkUpdateBlockReason({ ...session, teamActiveTaskId: null }, { ...context, automations: {} })
+}
+
+// Bash-tool shells Claude is running in the background. The restart ends the
+// pane, so they are named to the agent rather than lost silently. Their argv
+// reaches only that agent's own prompt, never Slack or the log.
+async function claudeBackgroundShells(session) {
+  const panes = (await execFile('tmux', ['list-panes', '-s', '-t', session.tmux, '-F', '#{pane_id}'], { timeout: 5000 })).stdout.trim().split('\n')
+  if (panes.length !== 1 || !panes[0]) throw new Error('account_background_panes')
+  const output = (await execFile('ps', ['-axww', '-o', 'pid=,ppid=,pgid=,command='], { timeout: 5000, maxBuffer: 16 << 20 })).stdout
+  const shells = []
+  for (const line of output.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line)
+    if (!match || Number(match[2]) !== session.pid) continue
+    const command = claudeBackgroundShellCommand(match[4])
+    if (command) shells.push({ pid: Number(match[1]), pgid: Number(match[3]), argv: match[4], command })
+  }
+  return shells
+}
+
+// Claude's usage-limit chooser offers paid credits on the exhausted account;
+// it is dismissed with one Escape only. The rest is the ordinary idle and
+// authority proof.
+async function prepareUsageLimitRestart(session, taskMaintenance) {
+  const expected = { id: session.id, pid: session.pid, tmux: session.tmux }
+  const authoritative = () => session.id === expected.id && session.pid === expected.pid && session.tmux === expected.tmux
+  if (await usageLimitBlockReason(session, taskMaintenance, { reserved: true })) throw new Error('account_switch_blocked')
+  const surface = claudeUsageLimitSurface(await tmuxCapture(expected.tmux))
+  let { pane, dismissed } = await dismissClaudeUsageLimitMenu({
+    capture: () => tmuxCapture(expected.tmux),
+    sendKey: async key => {
+      if (!authoritative()) throw new Error('account_switch_not_proven_idle')
+      await execFile('tmux', ['send-keys', '-t', expected.tmux, key])
+    },
+    sleep,
+  })
+  if (dismissed) { await sleep(500); pane = await tmuxCapture(expected.tmux) }
+  if (targetStartupState('claude', pane) !== 'ready' || extractSpinner(pane)) throw new Error('account_switch_not_proven_idle')
+  const shells = await claudeBackgroundShells(session)
+  await sleep(250)
+  const repeated = await tmuxCapture(expected.tmux)
+  if (repeated !== pane || targetStartupState('claude', repeated) !== 'ready' || !authoritative() ||
+      !await validProviderRootClaim(expected.pid, expected.tmux, 'claude') ||
+      await usageLimitBlockReason(session, taskMaintenance, { reserved: true })) throw new Error('account_switch_not_proven_idle')
+  const signature = list => list.map(shell => `${shell.pid}:${shell.pgid}`).join(',')
+  if (signature(await claudeBackgroundShells(session)) !== signature(shells)) throw new Error('account_background_process_changed')
+  return { interrupted: Boolean(surface), shells }
+}
+
+// Stop exactly the shells named to the agent: same pid, group and argv as when
+// listed. A Bash-tool shell leads its own process group, so its jobs end too.
+async function stopClaudeBackgroundShells(shells) {
+  const unchanged = async shell => {
+    try {
+      const row = (await execFile('ps', ['-ww', '-o', 'pgid=,command=', '-p', String(shell.pid)], { timeout: 5000, maxBuffer: 1 << 20 })).stdout
+      const match = /^\s*(\d+)\s+(.+?)\s*$/s.exec(row)
+      return Boolean(match && Number(match[1]) === shell.pgid && match[2] === shell.argv)
+    } catch { return false }
+  }
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    let signalled = false
+    for (const shell of shells) {
+      if (!await unchanged(shell)) continue
+      try { process.kill(shell.pgid === shell.pid ? -shell.pgid : shell.pid, signal); signalled = true }
+      catch (error) { log('background shell stop failed', shell.pid, error?.code || String(error)) }
+    }
+    if (!signalled) return
+    await sleep(1000)
+  }
+}
+
+// The re-delivery joins the replacement's input queue, which drains only after
+// the handover commits and ahead of any team delivery.
+function queueUsageLimitResume(session, { interrupted, shells }) {
+  const queued = pendingBySid.get(session.id) || []
+  const { prompt, note } = usageLimitResumeInput({ interrupted, shells, queued: queued.length })
+  if (prompt) pendingBySid.set(session.id, [prompt, ...queued])
+  return { note }
+}
+
+// The coordinator learns of the move from its own team inbox. The task is
+// otherwise untouched: this annotation is not a lifecycle transition. An
+// automation keeps owning the exact replacement terminal.
+function settleUsageLimitHandover(session, { journal, source, target }) {
+  const task = state.teamTasks?.[journal.taskMaintenance?.taskId]
+  if (task && task.targetSessionId === session.id && task.targetChannel === session.channel) {
+    const at = new Date().toISOString()
+    task.accountHandovers = [...(Array.isArray(task.accountHandovers) ? task.accountHandovers : []),
+      { at, reason: 'usage_limit', fromAccount: source?.email || null, toAccount: target?.email || null, taskStatus: task.status }].slice(-8)
+    task.updatedAt = at
+  }
+  for (const record of Object.values(state.automations || {})) {
+    if (record.sessionId !== session.id || record.channelId !== session.channel || ['stopped', 'released'].includes(record.status) ||
+        !session.tmux || record.tmux === session.tmux || Object.values(state.sessions || {}).some(other => other !== session && other.tmux === session.tmux)) continue
+    record.tmux = session.tmux
+    record.updatedAt = Date.now()
+  }
+  saveStateNow(state)
 }
 
 async function postAccountPoolStatus(channel) {
@@ -8236,13 +8378,20 @@ async function launchAutomation(record) {
     const timer = setTimeout(() => pendingSpawnChannels.delete(record.tmux), 10 * 60000)
     timer.unref?.()
   }
+  // Start on the account the pool would move the session to anyway, so no
+  // launch begins on an exhausted login. A ready native login is kept.
+  let launchAccount = null
+  try { launchAccount = accountPools.enabled ? accountPools.launchSelection({ channelId: record.channelId, provider: record.provider }) : null }
+  catch (error) { log('automation launch account selection unavailable', record.externalKey, String(error?.message || error)) }
+  if (launchAccount) log('automation launch account', record.externalKey, launchAccount.accountId)
   await executionNodes.spawn(LOCAL_NODE_ID, {
     cwd: record.cwd,
     args: record.flags,
     title: `sab automation ${path.basename(record.cwd)}`,
     tmuxName: record.tmux,
     autoConsent: record.provider === 'claude',
-    account: null,
+    account: launchAccount?.account || null,
+    accountKind: launchAccount?.accountKind || null,
     provider: record.provider,
     accountPool: accountPools.enforcing,
   })
@@ -8610,7 +8759,9 @@ http.createServer(async (req, res) => {
         if (session?.channel) {
           if (j.cwd) session.cwd = j.cwd // folder can change; keep it current
           if (j.effort?.level && session.effort !== j.effort.level) session.effort = j.effort.level // persist actual telemetry for topics
-          if (resumeModel && session.model !== resumeModel) session.model = resumeModel // persist the latest native selection for resume
+          // Persist the latest native selection for resume. A base id reported for
+          // a session already on that id's 1M variant is not a model change.
+          if (resumeModel && session.model !== resumeModel && session.model !== `${resumeModel}[1m]`) session.model = resumeModel
           const changed = prev.model !== next.model || prev.effort !== next.effort
           if (changed || Date.now() - (lastTopicAt.get(session.channel) || 0) > 6000) {
             lastTopicAt.set(session.channel, Date.now())

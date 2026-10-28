@@ -1773,6 +1773,12 @@ export function publicTeamTask(task, callerChannel) {
     replyCount: task.replies.length,
     messages: (task.messages || []).slice(-TEAM_TASK_VIEW_ENTRIES).map(publicTeamMessage),
     messageCount: (task.messages || []).length,
+    // Subscription moves of the worker, e.g. after a usage limit. The task
+    // continued unchanged through each one.
+    accountHandovers: (Array.isArray(task.accountHandovers) ? task.accountHandovers : []).map(event => ({
+      at: event.at, reason: event.reason, fromAccount: event.fromAccount || null, toAccount: event.toAccount || null,
+      taskStatus: event.taskStatus || null,
+    })),
     reports: (task.reports || []).map(report => ({
       id: report.id,
       result: report.result,

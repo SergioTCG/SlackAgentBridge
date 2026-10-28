@@ -116,6 +116,7 @@ function setup({ mode = 'manual', initialState = null, ...overrides } = {}) {
     readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: now,
       identity: { email: account.email, principalId: account.id }, quota: { five_hour: { utilization: account.key === 'primary' ? 99 : 10, resets_at: new Date(now + 3600000).toISOString() } } }),
     blockReason: () => blocked,
+    usageLimitBlockReason: async () => blocked,
     verifyIdentity: async () => 'verified',
     restart: async (current, alias) => { events.push({ restart: true, alias }); current.account = alias; current.pid = 200 },
     notify: async (channel, notice) => { notices.push({ channel, notice }) }, ...overrides,
@@ -504,4 +505,188 @@ test('Codex profile handover preserves native identity, requested settings, chan
   assert.deepEqual(state.lineages, before.lineages)
   assert.deepEqual(state.sessions.standby, before.sessions.standby)
   assert.equal(restarts, 1)
+})
+
+// The worker (or, standing, the sub-coordinator) of a team led from CCOORD.
+function holdTask(f, { standing = false, status = 'running' } = {}) {
+  f.state.teams = { team: { id: 'team', coordinatorChannel: 'CCOORD', members: { CMINE: { role: 'worker' } } } }
+  const task = { id: 'task-held', teamId: 'team', status, completionPolicy: 'coordinator-release', sourceChannel: 'CCOORD',
+    targetSessionId: f.session.id, targetChannel: 'CMINE', targetProvider: 'claude', workGeneration: 3, providerWorkGeneration: 3,
+    pendingGates: [], replies: [], reports: [{ workGeneration: 2, deliveryStatus: 'delivered' }],
+    messages: [{ id: 'message_done', workGeneration: 3, deliveryStatus: 'delivered', providerDeliveryStatus: 'delivered' }] }
+  if (standing) { task.reservation = 'standing'; f.session.teamStandingTaskId = task.id } else f.session.teamActiveTaskId = task.id
+  f.state.teamTasks = { [task.id]: task }
+  return structuredClone(f.state.teamTasks)
+}
+const heldWork = s => s.teamActiveTaskId || s.teamStandingTaskId ? 'delegated team task in progress' : null
+
+async function usageLimitFixture({ quota = { primary: 99, secondary: 10 }, ...overrides } = {}) {
+  const settled = [], restarts = []
+  const f = setup({ mode: 'auto', blockReason: heldWork, usageLimitBlockReason: async () => null,
+    readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: now,
+      identity: { email: account.email, principalId: account.id }, quota: { five_hour: { utilization: quota[account.key] ?? 10,
+        resets_at: new Date(now + 3600000).toISOString() } } }),
+    restart: async (current, alias, options) => { restarts.push(options); current.account = alias; current.pid = 200; return { note: 'Shell note.' } },
+    onSettled: (session, info) => settled.push(info), ...overrides })
+  f.other.pid = null
+  // Automatic switching needs a proven manual round trip first.
+  await f.runtime.switchAccount(f.session, 'second', { requestId: 'prove-outward' })
+  await f.runtime.switchAccount(f.session, 'primary', { requestId: 'prove-return' })
+  restarts.length = 0; settled.length = 0; f.notices.length = 0
+  for (const key of ['primary', 'secondary']) await f.runtime.refresh(key)
+  return { ...f, settled, restarts }
+}
+
+test('an exhausted account hands over a session with an active coordinator (standing) task, leaving the task unchanged', async () => {
+  const f = await usageLimitFixture()
+  const tasks = holdTask(f, { standing: true })
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.restarts[0].usageLimit, true)
+  assert.equal(f.restarts[0].taskMaintenance.kind, 'usage-limit')
+  assert.equal(f.restarts[0].source.email, 'primary@example.test')
+  assert.equal(f.session.account, 'second')
+  assert.deepEqual(f.state.teamTasks, tasks)
+  assert.equal(f.session.teamStandingTaskId, 'task-held')
+  const journal = f.state.accountPools.switches.CMINE
+  assert.equal(journal.phase, 'committed')
+  assert.equal(journal.usageLimit, true)
+  assert.equal(journal.taskMaintenance.taskId, 'task-held')
+  assert.equal(f.settled.length, 1)
+  assert.equal(f.settled[0].journal, journal)
+  assert.equal(f.settled[0].target.email, 'secondary@example.test')
+  assert.deepEqual(f.notices.map(n => n.notice), ['Account handover complete: secondary@example.test (Mine). ' +
+    'primary@example.test had reached its usage limit; team task `task-held` continues unchanged. Shell note.'])
+})
+
+test('an exhausted account hands over a running delegated task without failing, completing or releasing it', async () => {
+  const f = await usageLimitFixture()
+  const tasks = holdTask(f)
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+  assert.deepEqual(f.state.teamTasks, tasks)
+  assert.equal(f.state.teamTasks['task-held'].status, 'running')
+  assert.equal(f.session.teamActiveTaskId, 'task-held')
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1, 'the committed handover is not repeated')
+  assert.equal(Object.values(f.state.accountPools.receipts).filter(r => r.usageLimit).length, 1)
+})
+
+test('held work on an account with capacity is never moved by a usage-limit handover', async () => {
+  const f = await usageLimitFixture({ quota: { primary: 50, secondary: 10 } })
+  holdTask(f)
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 0)
+  assert.equal(f.session.account, null)
+})
+
+test('a preferred-account return, or a drain, still waits until the held task is at a safe boundary', async () => {
+  const f = await usageLimitFixture({ quota: { primary: 10, secondary: 60 } })
+  await f.runtime.switchAccount(f.session, 'second', { requestId: 'onto-secondary' })
+  f.state.accountPools.bindings.CMINE = { ...f.state.accountPools.bindings.CMINE, preferredResetAt: now - 1, switchedAt: now - 7200000 }
+  f.restarts.length = 0
+  holdTask(f)
+  assert.equal(f.runtime.status('CMINE').decision.reason, 'preferred-recovered')
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 0, 'no preference switch mid-task')
+  assert.equal(f.session.account, 'second')
+  delete f.session.teamActiveTaskId
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.restarts[0].usageLimit, false)
+  assert.equal(f.session.account, null)
+})
+
+test('a usage-limit handover that is not yet safe is retried quietly on the next tick', async () => {
+  const logs = []
+  let reason = 'turn in progress'
+  const f = await usageLimitFixture({ usageLimitBlockReason: async () => reason, log: (...args) => logs.push(args) })
+  holdTask(f)
+  for (let i = 0; i < 3; i++) await f.runtime.tick()
+  assert.equal(f.restarts.length, 0)
+  assert.deepEqual(f.notices, [])
+  assert.equal(logs.length, 1, 'one log line per distinct refusal')
+  reason = null
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+})
+
+test('an exhausted session moves on measured capacity when the reservation estimate is spent', async () => {
+  const f = await usageLimitFixture()
+  holdTask(f)
+  for (let i = 0; i < 20; i++) {
+    const busy = { id: `busy-${i}`, channel: `CBUSY${i}`, pid: 300 + i, tmux: `sab-busy-${i}`, cwd: '/busy', account: 'second', teamActiveTaskId: 'elsewhere' }
+    f.state.sessions[busy.id] = busy; f.state.channels[busy.channel] = busy.id
+  }
+  assert.equal(f.runtime.status('CMINE').decision.accountId, null, 'the estimate alone finds no capacity')
+  await f.runtime.tick()
+  assert.equal(f.restarts.filter(r => r.usageLimit).length, 1)
+  assert.equal(f.session.account, 'second')
+})
+
+test('a daemon restart during a usage-limit handover leaves it interrupted, fenced and never replayed', async () => {
+  const f = await usageLimitFixture({ restart: async (current, alias, options) => {
+    current.account = alias; current.pid = 200
+    if (options.usageLimit) throw new Error('daemon stopped')
+  } })
+  const tasks = holdTask(f)
+  await f.runtime.tick()
+  const disk = structuredClone(f.events.findLast(e => e.accountPools?.switches?.CMINE?.phase === 'restarting'))
+  assert.ok(disk, 'the restart phase was journaled before teardown')
+  const settled = []
+  const recovered = setup({ mode: 'auto', initialState: disk, readRegistry: () => f.registry, blockReason: heldWork,
+    usageLimitBlockReason: async () => null, onSettled: (session, info) => settled.push(info),
+    restart: async () => assert.fail('recovery must not restart') })
+  recovered.session.account = 'second'; recovered.session.pid = 200
+  await recovered.runtime.recover()
+  assert.equal(recovered.state.accountPools.switches.CMINE.phase, 'interrupted')
+  assert.throws(() => recovered.runtime.assertInputAllowed(recovered.session), /uncertain/)
+  await recovered.runtime.tick()
+  assert.deepEqual(recovered.state.teamTasks, tasks)
+  const requestId = recovered.state.accountPools.switches.CMINE.requestId
+  assert.equal((await recovered.runtime.reconcile(recovered.session, { requestId })).status, 'reconciled')
+  assert.equal(settled.length, 1)
+  assert.equal(settled[0].journal.usageLimit, true)
+  assert.deepEqual(recovered.state.teamTasks, tasks)
+})
+
+test('only the monitor may declare a usage limit', async () => {
+  const f = await usageLimitFixture()
+  holdTask(f)
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'owner-claims-limit', usageLimit: true }), /blocked/)
+  await assert.rejects(f.runtime.switchAccount(f.session, 'second', { requestId: 'owner-switch' }), /blocked/)
+  assert.equal(f.restarts.length, 0)
+})
+
+test('a new launch starts on an account with capacity when the native login is exhausted', async () => {
+  const f = await usageLimitFixture()
+  const selection = f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' })
+  assert.deepEqual({ ...selection, accountId: undefined }, { account: 'second', accountKind: 'legacy-claude', accountId: undefined, email: 'secondary@example.test' })
+  assert.match(selection.accountId, /^acct_/)
+  assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'codex' }), null)
+  const healthy = await usageLimitFixture({ quota: { primary: 40, secondary: 10 } })
+  assert.equal(healthy.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }), null, 'a ready native login is kept')
+  const manual = setup({ mode: 'manual' })
+  assert.equal(manual.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }), null)
+})
+
+test('an uncertain usage-limit handover halts the others until it is reconciled', async () => {
+  const logs = []
+  const f = await usageLimitFixture({ log: (...args) => logs.push(args), restart: async (current, alias, options) => {
+    current.account = alias; current.pid = 200
+    if (options.usageLimit && current.channel === 'CMINE') throw new Error('resume never became ready')
+  } })
+  holdTask(f)
+  const second = { id: 'native-two', channel: 'CTWO', pid: 102, tmux: 'sab-two', cwd: '/two', model: 'opus', effort: 'max', launchFlags: '--dsp' }
+  f.state.sessions[second.id] = second; f.state.channels.CTWO = second.id
+  f.state.accountPools.proofs = { ...f.state.accountPools.proofs }
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted')
+  assert.equal(f.state.accountPools.switches.CTWO, undefined, 'the next exhausted session waits')
+  assert.ok(logs.some(args => /halted/.test(args[0])))
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CTWO, undefined)
+  await f.runtime.reconcile(f.session, { requestId: f.state.accountPools.switches.CMINE.requestId })
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CTWO.phase, 'committed')
 })

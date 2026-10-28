@@ -156,6 +156,18 @@ test('Codex launch metadata excludes the optional resume prompt', () => {
   assert.equal(codexFlagsWithoutInitialPrompt('--search', sid), '--search')
 })
 
+test('Claude resume keeps the 1M-context variant when the status line reports its base id', () => {
+  // A long Barrique coordinator ran at 966k tokens while its status line said
+  // claude-opus-5-5. Resuming without the suffix would shrink its window.
+  assert.deepEqual(resumeArgsFor({
+    id: 'big', model: 'claude-opus-5-5', effort: 'max',
+    launchFlags: '--model claude-opus-5-5[1m] --effort max --dangerously-skip-permissions --chrome',
+  }), ['--dangerously-skip-permissions', '--chrome', '--model', 'claude-opus-5-5[1m]', '--effort', 'max', '--resume', 'big'])
+  assert.deepEqual(resumeArgsFor({
+    id: 'other', model: 'claude-sonnet-5-5', launchFlags: '--model claude-opus-5-5[1m] --dangerously-skip-permissions',
+  }), ['--dangerously-skip-permissions', '--model', 'claude-sonnet-5-5', '--resume', 'other'], 'a different model is a real change')
+})
+
 test('Claude resume args preserve the latest model and effort', () => {
   assert.deepEqual(resumeArgsFor({
     id: 'abc', launchFlags: '--chrome --continue --model fable --effort low', model: 'opus', effort: 'high',

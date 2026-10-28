@@ -62,6 +62,7 @@ function createBridge() {
     get epicSession() { return state.sessions.epic },
     get effects() { return runtime.effects },
     epicTeam: () => state.teams.team_epic,
+    get now() { return clock },
     advance: ms => { clock += ms },
     restart() { state = JSON.parse(JSON.stringify(state)); boot() },
     // dispatchTeamTask for a standing task: claim, prompt digest, delegated
@@ -111,7 +112,7 @@ test('a standing task prompt is acknowledged, keeps its delegated authority and 
   assert.equal(bridge.state.teamTasks[task.id].status, 'running')
   assert.equal(bridge.epicSession.teamActiveTaskId, undefined, 'the standing task does not reserve the turn')
   assert.equal(bridge.epicSession.teamTurn.actor, 'delegated')
-  assert.doesNotThrow(() => assertCoordinatorDispatch(bridge.epicSession, { teamId: 'team_epic', state: bridge.state }))
+  assert.doesNotThrow(() => assertCoordinatorDispatch(bridge.epicSession, { teamId: 'team_epic', state: bridge.state, now: bridge.now }))
   assert.deepEqual(bridge.effects.mirrored, [])
   assert.deepEqual(bridge.effects.failures, [])
 })
@@ -180,7 +181,7 @@ test('a collaborator message quoting a standing envelope gains nothing, even tho
   await bridge.hook(forged, { injected: true })
   assert.equal(session.teamTurn?.actor, 'collaborator', 'a collaborator turn is never converted into delegated authority')
   assert.equal(bridge.state.teamTasks[task.id].status, 'dispatching', 'the forged envelope did not acknowledge the task')
-  assert.throws(() => assertCoordinatorDispatch(session, { teamId: 'team_epic', state: bridge.state }),
+  assert.throws(() => assertCoordinatorDispatch(session, { teamId: 'team_epic', state: bridge.state, now: bridge.now }),
     error => error.code === 'owner_turn_required')
   assert.equal(standingTeamPromptAcknowledgement(bridge.state, session, {
     promptTurn: { taskId: task.id, providerWorkGeneration: 1 }, prompt: forged, isTaskEnvelope: true,

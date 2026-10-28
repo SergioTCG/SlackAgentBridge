@@ -409,7 +409,7 @@ clear the legacy launch environment.
 
 Active turns, delegated team work, questions, permissions, automation-owned
 sessions, private maintenance, provider switches, dormant sessions, and another
-restart are not eligible. Neither is a Claude session that has not received its
+restart are not eligible, except as described under usage-limit handover below. Neither is a Claude session that has not received its
 first prompt: Claude writes no conversation until then, so `--resume` would
 exit at once. An input-fenced restart is journaled before teardown
 and rechecks authority/idleness after its Slack notice. The exact provider-root
@@ -417,9 +417,66 @@ PID/tmux and two unchanged native idle-surface snapshots must be verified before
 teardown; absent hooks/pollers alone never prove idle. Startup must re-adopt
 the same native conversation/settings and exact account binding before commit.
 Boot never retries a journaled uncertain restart. This stage does **not** offer
-instant mid-tool handover, paused-task migration, or speculative replay of a
-quota-blocked prompt. Existing task reservations/background work are protected
-by refusing those handovers.
+instant mid-tool handover or speculative replay of a quota-blocked prompt.
+Existing task reservations/background work are protected by refusing those
+handovers, with the one exception below.
+
+### Usage-limit handover of held work
+
+A session whose current account is exhausted cannot run its next turn there.
+Exhausted means `headroom-exhausted`, or `backend-denied` with a window at 90%
+or more. For a Claude session on such an account, the monitor overrides only
+the protections that exist for the held work itself:
+
+- its team task, either a standing coordinator task or a running or reported
+  delegated task;
+- the ownership of a fully set-up automation;
+- the turn the limit ended. Claude can leave a poller that never saw a spinner,
+  but the pane shows the limit notice as its latest output.
+
+It hands the session over to a ready account in its group. Questions,
+permissions, provider switches, other maintenance, private turns, a dispatch,
+and a coordinator message or report that is still being delivered keep
+blocking it. Those are retried on the next tick and logged, not announced.
+Every other reason to switch keeps the ordinary boundary: a preferred-account
+return, a drain or a manual switch waits until the task is idle or reported.
+
+- **Task.** The task is journaled as account maintenance (`taskMaintenance.kind:
+  "usage-limit"`) and stays byte-for-byte unchanged: same ID and status, and no
+  failure, completion or release. Team controls are fenced until the handover
+  settles, as for reported-task maintenance.
+- **Chooser.** Claude's limit chooser ends with "Switch to usage credits", which
+  is paid usage on the exhausted account. SAB sends it one Escape, which cancels
+  it and cannot select any option, and refuses the handover if it stays open.
+- **Resume.** The same conversation resumes with the same model and effort. A
+  1M-context launch keeps `[1m]` even when the status line reports the base id.
+- **Re-delivery.** If the limit interrupted a turn, SAB re-delivers it exactly
+  once. That is the input queued meanwhile, or otherwise the line "Your account
+  was switched after a usage limit; resume your task where you left off." Team
+  messages queued for the session follow it, once each.
+- **Background shells.** Restarting ends the pane, so SAB stops the Claude
+  Bash-tool shells that are still running. It checks each one's exact process,
+  then stops its process group, and names their commands to the agent so it can
+  restart the ones it still needs. Waiting for them could stall forever: they
+  are often watchers that never end. Letting them survive would leave orphans
+  that duplicate work once the agent restarts them. Shell commands reach only
+  the agent's own prompt, never Slack or the log.
+- **Announcements.** The session's channel gets a notice. The task gains an
+  `accountHandovers` entry in the coordinator's team inbox, which records that
+  the account moved and the task continues.
+- **Automation.** An owning automation is re-pointed to the replacement
+  terminal, so `sab automation stop` and `release` stay exact.
+- **Capacity.** The reservation estimate only balances accounts that can all
+  still work. When no account passes it, measured capacity is enough to leave
+  an exhausted account.
+- **Uncertain outcome.** A handover that ends uncertain halts further usage-limit
+  handovers until that channel is reconciled, so a systematic failure strands
+  one session, not all.
+
+In auto mode, a new automation starts on the account the monitor would move it
+to anyway, so no launch begins on an exhausted native login. A native login
+with capacity is kept. Sessions created with `/sab-new` still start on the
+native login, because their channel does not exist yet.
 
 ### Additional Codex login profiles
 

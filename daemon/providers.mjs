@@ -332,7 +332,10 @@ export function resumeArgsFor(session, {
       keep.push(t)
     }
     if (!keep.length) keep.push(...String(defaultClaudeFlags).split(/\s+/).filter(Boolean))
-    const model = session.model || launchModel
+    // The status line can report the base id while the session runs the 1M
+    // variant it was launched with; resuming without `[1m]` would shrink its
+    // context window under a long conversation.
+    const model = session.model && launchModel === `${session.model}[1m]` ? launchModel : session.model || launchModel
     const effort = session.effort || launchEffort
     if (model) keep.push('--model', model)
     if (effort) keep.push('--effort', effort)

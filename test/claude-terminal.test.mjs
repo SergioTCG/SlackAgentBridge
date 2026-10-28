@@ -2,10 +2,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   CLAUDE_FAILURE_DEDUPE_MS,
+  USAGE_LIMIT_RESUME_PROMPT,
+  claudeBackgroundShellCommand,
   claudePollerDecision,
   claudeTerminalFailureBatch,
+  claudeUsageLimitSurface,
+  dismissClaudeUsageLimitMenu,
   prepareClaudeTerminalDelivery,
   resetClaudePollerEvidence,
+  usageLimitResumeInput,
 } from '../daemon/claude-terminal.mjs'
 
 const LOGIN = 'Login expired · Please run /login'
@@ -90,4 +95,73 @@ test('Claude terminal failure delivery is deduplicated for a bounded interval', 
   const recovery = prepareClaudeTerminalDelivery('Authentication restored.', first.failure, now + 2_000)
   assert.equal(recovery.suppress, false)
   assert.equal(recovery.failure, null)
+})
+
+const LIMIT_NOTICE = "  ⎿  You've hit your weekly limit · resets Oct 31 at 4pm (Europe/Ljubljana)"
+const IDLE_FOOTER = ['', '✻ Churned for 44s · done 7:52 AM', '────────', '❯ ', '────────', '  HEAD',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)']
+const LIMIT_IDLE = ['  </sab-team-message>', '', '  Ran 1 shell command', LIMIT_NOTICE, ...IDLE_FOOTER].join('\n')
+const LIMIT_MENU = ['  </sab-team-message>', LIMIT_NOTICE, '', '✻ Cooked for 9s · done 7:52 AM · 2 shells still running', '▔▔▔▔▔▔▔▔',
+  '   What do you want to do?', '', '   ❯ 1. Stop and wait for limit to reset',
+  '     2. Wait here, then continue automatically at Oct 31 at 4pm', '     3. Switch to usage credits', '',
+  '   Enter to confirm · Esc to cancel'].join('\n')
+
+test('a usage-limit surface is recognised only while its notice is the latest output', () => {
+  assert.equal(claudeUsageLimitSurface(LIMIT_MENU), 'menu')
+  assert.equal(claudeUsageLimitSurface(LIMIT_IDLE), 'ended')
+  assert.equal(claudeUsageLimitSurface(['⏺ Done.', ...IDLE_FOOTER].join('\n')), null)
+  for (const later of ['⏺ Resumed on the new account.', '> next prompt', '✶ Newspapering… (8s · ↓ 487 tokens)']) {
+    assert.equal(claudeUsageLimitSurface([LIMIT_NOTICE, later, ...IDLE_FOOTER].join('\n')), null, later)
+  }
+})
+
+test('the usage-limit chooser is dismissed with one Escape and never buys credits', async () => {
+  const sent = []
+  let pane = LIMIT_MENU
+  const result = await dismissClaudeUsageLimitMenu({
+    capture: async () => pane,
+    sendKey: async key => { sent.push(key); pane = LIMIT_IDLE },
+    sleep: async () => {},
+  })
+  assert.deepEqual(sent, ['Escape'])
+  assert.equal(result.dismissed, true)
+  assert.equal(claudeUsageLimitSurface(result.pane), 'ended')
+
+  const stuck = []
+  await assert.rejects(dismissClaudeUsageLimitMenu({
+    capture: async () => LIMIT_MENU, sendKey: async key => { stuck.push(key) }, sleep: async () => {}, attempts: 3,
+  }), /account_limit_menu_not_dismissed/)
+  assert.deepEqual(stuck, ['Escape'], 'a chooser that stays up is never answered with a second key')
+
+  const idle = []
+  assert.equal((await dismissClaudeUsageLimitMenu({ capture: async () => LIMIT_IDLE, sendKey: async key => { idle.push(key) },
+    sleep: async () => {} })).dismissed, false)
+  assert.deepEqual(idle, [])
+})
+
+test('usage-limit re-delivery is the queued input or one short line, and names stopped shells', () => {
+  assert.deepEqual(usageLimitResumeInput({ interrupted: true }), { prompt: USAGE_LIMIT_RESUME_PROMPT,
+    note: 'The interrupted turn was asked to resume.' })
+  assert.equal(USAGE_LIMIT_RESUME_PROMPT, 'Your account was switched after a usage limit; resume your task where you left off.')
+  assert.deepEqual(usageLimitResumeInput({ interrupted: true, queued: 1 }), { prompt: null,
+    note: 'Its queued input resumes the interrupted turn.' })
+  assert.deepEqual(usageLimitResumeInput({}), { prompt: null, note: '' }, 'an idle session is not prompted')
+  const shells = [{ command: 'gh run watch 42' }, { command: 'sleep 600' }]
+  const idle = usageLimitResumeInput({ shells })
+  assert.match(idle.prompt, /^Your account was switched after a usage limit\.\n\nThe restart stopped these 2 background shells/)
+  assert.match(idle.prompt, /- gh run watch 42\n- sleep 600\nRestart any you still need\.$/)
+  assert.match(usageLimitResumeInput({ interrupted: true, shells }).prompt, /^Your account was switched after a usage limit; resume your task where you left off\.\n\n/)
+  assert.match(idle.note, /2 background shells were stopped/)
+})
+
+test('only Claude Bash-tool shells are recognised, with their exact command', () => {
+  const wrap = command => `/bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1-abc.sh 2>/dev/null || true && ` +
+    `setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval '${command}' < /dev/null && pwd -P >| /tmp/claude-ce1d-cwd`
+  assert.equal(claudeBackgroundShellCommand(wrap(`gh pr view 1 --jq '"'"'.state'"'"'; sleep 600`)), "gh pr view 1 --jq '.state'; sleep 600")
+  assert.equal(claudeBackgroundShellCommand(wrap('python3 -I watch.py').replace('/Users/me/.claude', '/Users/me/.config/ccs/account-auth/claude/personal')),
+    'python3 -I watch.py', 'a profile login keeps its snapshots elsewhere')
+  assert.equal(claudeBackgroundShellCommand(wrap('x'.repeat(400))).length, 300)
+  for (const other of ['node /bridge/channel/server.mjs', 'claude --resume abc', '/bin/zsh -c npm test', '']) {
+    assert.equal(claudeBackgroundShellCommand(other), null, other)
+  }
 })

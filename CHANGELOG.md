@@ -6,6 +6,37 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- A session holding a team task now leaves an exhausted account. When a Claude
+  session's account is exhausted (`headroom-exhausted`, or `backend-denied` with
+  a window at 90% or more), the monitor hands it over to a ready account. This
+  covers a standing coordinator task, a running or reported delegated task, an
+  automation-owned session, and a turn the limit ended. Before, the monitor
+  skipped every such session, so whole team programmes stalled at the weekly
+  limit.
+  - The task stays unchanged and is journaled as account maintenance.
+  - Claude's limit chooser is dismissed with one Escape and never answered with
+    credits.
+  - The interrupted turn is re-delivered exactly once.
+  - Running Bash-tool background shells are stopped and named to the agent.
+  - The coordinator sees an `accountHandovers` entry in its team inbox.
+  - Preference returns, drains and manual switches still wait for a safe
+    boundary.
+  - An uncertain outcome halts further usage-limit handovers until it is
+    reconciled.
+- A session that leaves an exhausted account can use measured capacity
+  elsewhere even when the reservation estimate is spent. Before, the last
+  sessions of a large group stayed on the exhausted account.
+- In auto mode, a new automation starts on an account with capacity instead of
+  an exhausted native login.
+- A resume keeps the 1M-context `[1m]` model that the session was launched
+  with, even when Claude's status line reports the base model id. Before, such
+  a resume shrank the context window. An account handover was also marked
+  uncertain when that report arrived during its verification.
+- Two team tests read the real clock against a fixed one and began failing on
+  2026-10-26 at 21:00Z.
+
 ## [2.4.0] — 2026-10-26
 
 ### Added
