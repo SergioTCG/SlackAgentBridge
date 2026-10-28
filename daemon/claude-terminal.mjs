@@ -87,8 +87,12 @@ export function prepareClaudeTerminalDelivery(text, previousFailure = null, now 
 // it can sell extra usage, a chooser whose last option buys credits on the
 // exhausted account. Report that surface only while the notice is the latest
 // output, so an old notice never hides a newer prompt, answer or spinner.
-const USAGE_LIMIT_NOTICE = /\b(?:You['’]ve hit your (?:[\w-]+ )*limit|(?:usage|session|weekly|daily|5-hour) limit reached)\b/i
-const USAGE_LIMIT_MENU = /\bStop and wait for (?:the )?limit to reset\b/i
+// Claude renders the notice as its own result row (`⎿`) under the turn, and the
+// chooser as numbered option rows above its "Enter to confirm" footer; a reply
+// that merely quotes either is a `⏺` paragraph and does not count.
+const USAGE_LIMIT_NOTICE = /^\s*⎿\s+(?:You['’]ve hit your (?:[\w-]+ )*limit|(?:usage|session|weekly|daily|5-hour) limit reached)\b/i
+const USAGE_LIMIT_MENU_OPTION = /^\s*(?:❯\s*)?1\.\s+Stop and wait for (?:the )?limit to reset\s*$/i
+const USAGE_LIMIT_MENU_FOOTER = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$/i
 
 export function claudeUsageLimitSurface(pane) {
   const lines = String(pane || '').split('\n')
@@ -96,8 +100,14 @@ export function claudeUsageLimitSurface(pane) {
   for (let i = lines.length - 1; i >= 0 && notice < 0; i--) if (USAGE_LIMIT_NOTICE.test(lines[i])) notice = i
   if (notice < 0) return null
   const later = lines.slice(notice + 1)
-  if (later.some(line => /^\s*(?:⏺|>\s+\S)/.test(line) || /[A-Za-z][A-Za-z ]*…\s*\(.*?\)/.test(line))) return null
-  return later.some(line => USAGE_LIMIT_MENU.test(line)) ? 'menu' : 'ended'
+  const option = later.findIndex(line => USAGE_LIMIT_MENU_OPTION.test(line))
+  const menu = option >= 0 && later.slice(option + 1).some(line => USAGE_LIMIT_MENU_FOOTER.test(line))
+  // Newer output, a newer or typed prompt, or a live spinner means the limit
+  // no longer describes the current turn. The chooser's own cursor row is not
+  // a prompt.
+  if (later.some(line => /^\s*⏺/.test(line) || /[A-Za-z][A-Za-z ]*…\s*\(.*?\)/.test(line) ||
+      /^\s*[>❯]\s*\S/.test(line) && !(menu && /^\s*❯\s*\d\.\s/.test(line)))) return null
+  return menu ? 'menu' : 'ended'
 }
 
 // The chooser's last option buys credits on the exhausted account. Send one

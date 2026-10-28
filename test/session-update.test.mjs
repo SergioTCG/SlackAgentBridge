@@ -6,7 +6,7 @@ import {
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
   shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake,
 } from '../daemon/session-update.mjs'
-import { USAGE_LIMIT_RESUME_INTERVAL_MS, usageLimitResumeWanted } from '../daemon/session-update.mjs'
+import { USAGE_LIMIT_RESUME_INTERVAL_MS, holdsUsageLimitWork, usageLimitResumeWanted } from '../daemon/session-update.mjs'
 import {
   artifactDeliveryInstruction, artifactGrantTokensFromPrompts, createArtifactGrantStore,
 } from '../daemon/artifacts.mjs'
@@ -474,4 +474,11 @@ test('only held work resumes by itself after a usage limit, at most once per int
   const recent = { id: 'recent', teamActiveTaskId: 'task', usageLimitResumedAt: now - USAGE_LIMIT_RESUME_INTERVAL_MS + 1 }
   assert.equal(usageLimitResumeWanted(recent, { now }), false)
   assert.equal(usageLimitResumeWanted(recent, { now: now + 1 }), true)
+})
+
+test('held work for usage-limit pausing is a team task or turn, or an automation, never an ended session', () => {
+  assert.equal(holdsUsageLimitWork({ teamTurn: { actor: 'continuation' } }), true)
+  assert.equal(holdsUsageLimitWork({}, { automationOwned: true }), true)
+  assert.equal(holdsUsageLimitWork({ teamInputReservation: { source: 'provider' } }), false, 'a reservation alone is not held work')
+  assert.equal(holdsUsageLimitWork({ teamActiveTaskId: 'task', ownerEndedAt: 1 }), false)
 })

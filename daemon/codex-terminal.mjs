@@ -42,14 +42,24 @@ export function codexTerminalFailure(pane) {
 // rendered sentence, never as a quoted substring of model output.
 const usageLimitPattern = /^(?:[■⚠!•]\s*(?:️)?\s*)?(?:You['’]ve (?:hit|reached) your usage limit|Usage limit reached\.|You['’]re out of credits\.)/i
 
+// The notice must also be the latest output: after its paragraph (up to the
+// next blank row) only the composer row and the footer may follow. A reply, a
+// second prompt row (a newer message) or anything else makes it history.
+// These mirror the composer and footer grammar in providers.mjs.
+const codexPromptRow = line => /^\s*[›❯>]\s/.test(line)
+const codexFooterRow = line => /[·•].*(?:~\/|\/)[^\s]*/.test(line)
+
 export function codexUsageLimitSurface(pane) {
   const rendered = stripTerminalControls(pane).split('\n')
   while (rendered.length && !rendered.at(-1).trim()) rendered.pop()
   const lines = rendered.slice(-CODEX_FAILURE_TAIL_LINES)
-  for (let start = 0; start < lines.length; start++) {
-    for (let length = 1; length <= 3 && start + length <= lines.length; length++) {
-      if (usageLimitPattern.test(compact(lines.slice(start, start + length).join(' ')))) return 'ended'
-    }
+  for (let start = lines.length - 1; start >= 0; start--) {
+    if (!usageLimitPattern.test(compact(lines.slice(start, start + 3).join(' ')))) continue
+    let end = start + 1
+    while (end < lines.length && lines[end].trim()) end++
+    const after = lines.slice(end).filter(line => line.trim() && !/^\s*[─━]{3,}\s*$/.test(line))
+    return after.filter(codexPromptRow).length <= 1 && after.every(line => codexPromptRow(line) || codexFooterRow(line))
+      ? 'ended' : null
   }
   return null
 }

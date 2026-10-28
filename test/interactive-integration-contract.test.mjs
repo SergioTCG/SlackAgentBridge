@@ -98,11 +98,26 @@ test('a turn a usage limit paused is resumed, never reported, failed or released
   // The in-place resume: held work only, rate-limited, the chooser closed with
   // the one-Escape helper, then one bridge-injected line.
   const resume = /async function resumeSessionAfterLimit\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
-  assert.match(resume, /if \(!usageLimitResumeWanted\(session, \{/)
-  assert.match(resume, /dismissClaudeUsageLimitMenu\(/)
-  assert.ok(resume.indexOf('session.usageLimitResumedAt = Date.now()') < resume.indexOf('injectText(session, USAGE_LIMIT_LIFTED_PROMPT)'))
+  assert.match(resume, /!session\.usageLimitPause/)
+  assert.ok(resume.indexOf('accountPools.assertInputAllowed(session)') < resume.indexOf('tmuxCapture('),
+    'policy and handover state are checked before the terminal is touched')
+  assert.ok(resume.indexOf('session.usageLimitResumedAt = Date.now()') < resume.indexOf('dismissClaudeUsageLimitMenu('),
+    'the attempt is recorded before any key')
+  assert.ok(resume.lastIndexOf('busy()') < resume.indexOf('injectText(session, USAGE_LIMIT_LIFTED_PROMPT)'))
+  assert.match(resume, /repeated !== pane/)
+  assert.match(resume, /provider === 'codex' && \(session\.codexTurnStartedAt \|\| codexPollers\.has\(session\.id\)\)/)
   assert.doesNotMatch(resume, /send-keys', '-t', expected\.tmux, '(?:[0-9]|Enter)'/)
   assert.match(daemon, /resumeAfterLimit: session => resumeSessionAfterLimit\(session\),/)
+  // Pause markers come only from measured exhaustion (or boot), and any new
+  // prompt or a handover clears them.
+  assert.match(daemon, /markLimitPause: \(session, accountId\) => markSessionLimitPause\(session, accountId\),/)
+  const prompts = fs.readFileSync(new URL('../daemon/prompt-submit.mjs', import.meta.url), 'utf8')
+  assert.match(prompts, /if \(session\.usageLimitPause\) \{\n\s+delete session\.usageLimitPause/)
+  assert.match(/function settleUsageLimitHandover\([\s\S]*?\n\}/.exec(daemon)?.[0] || '', /delete session\.usageLimitPause/)
+  // The Codex pause acts only where the pool can, never on a dispatch, and says so.
+  const pause = daemon.slice(daemon.indexOf('const exhaustion = idleDecision.action'), daemon.indexOf("log('Codex turn paused at a usage limit'"))
+  assert.match(pause, /accountPools\.measuredExhaustion\(session\)/)
+  assert.match(pause, /!session\.teamProviderTurnPending && heldTask\?\.status !== 'dispatching'/)
   // New sessions start on an account with capacity.
   assert.equal((daemon.match(/const launch = account \? null : newSessionLaunchAccount\(provider\)/g) || []).length, 2)
 })

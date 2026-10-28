@@ -40,7 +40,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   onSettled = () => {}, notify = async () => {}, now = Date.now, log = () => {},
   isDormant = async session => !session.pid && !session.tmux, adoptReplacement = async () => null,
   usageLimitBlockReason = async () => 'usage-limit maintenance unavailable',
-  resumeAfterLimit = async () => false,
+  resumeAfterLimit = async () => false, markLimitPause = async () => false,
 }) {
   mode = accountPoolMode(mode)
   const enabled = mode !== 'off', enforcing = ['manual', 'auto'].includes(mode), flights = new Map(), switching = new Set()
@@ -49,8 +49,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   // A usage-limit handover that ends uncertain halts the others until that
   // channel is reconciled, so a systematic failure strands one session, not all.
   // The journal is the record, so the halt also survives a daemon restart.
-  const usageLimitHalt = () => Object.values(poolState().switches).find(journal => journal?.usageLimit &&
-    journal.phase === 'interrupted' && authoritative(state.sessions?.[journal.sessionId])) || null
+  // Scoped by provider: a Codex path that ends uncertain never halts Claude's.
+  const usageLimitHalt = provider => Object.values(poolState().switches).find(journal => journal?.usageLimit &&
+    journal.phase === 'interrupted' && authoritative(state.sessions?.[journal.sessionId]) &&
+    providerOf(state.sessions[journal.sessionId]) === provider) || null
   let haltLogged = null
   const save = () => {
     try { persist() }
@@ -406,6 +408,19 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     if (!newChannel) previewPoolAccountSelection(record, { channelId, provider, account: target.id })
     return { account: ref.kind === 'legacy-claude' ? ref.alias : ref.profile, accountKind: ref.kind, accountId: target.id, email: target.email }
   }
+  // The daemon's Codex poller pauses a limit-ended turn only when the pool can
+  // act on it: auto mode and the session's own account measured exhausted.
+  const measuredExhaustion = session => {
+    if (mode !== 'auto' || persistenceFailed || !authoritative(session)) return null
+    try {
+      const info = status(session.channel), source = info.currentAccount
+      const reading = source && info.accounts.find(a => a.id === source.id)
+      const reason = reading?.readiness?.reason
+      const exhausted = reason === 'headroom-exhausted' || reason === 'backend-denied' &&
+        reading.observation?.windows?.some(w => w.usedPercent >= 90)
+      return exhausted ? { accountId: source.id, email: source.email } : null
+    } catch { return null }
+  }
   const tick = async () => {
     if (!enabled || tickRunning || persistenceFailed) return
     tickRunning = true
@@ -426,9 +441,18 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         // reason is the account's own observed usage.
         const quotaExhausted = exhausted(info.decision.candidates.find(c => c.accountId === source.id)?.reason)
         const measuredExhausted = exhausted(info.accounts.find(a => a.id === source.id)?.readiness?.reason)
-        // A turn a usage limit paused resumes in place once its own account
-        // has measured capacity again; nothing is restarted or moved.
-        if (!measuredExhausted && info.accounts.find(a => a.id === source.id)?.readiness?.ready) {
+        // Pane text alone never resumes anything: the daemon marks a held turn
+        // paused only while its account is measured exhausted. It resumes in
+        // place once a newer reading of that same account shows capacity again;
+        // nothing is restarted or moved.
+        const own = info.accounts.find(a => a.id === source.id)
+        if (measuredExhausted) {
+          try { await markLimitPause(session, source.id) }
+          catch (error) { log('usage-limit pause not recorded', session.channel, String(error?.message || error)) }
+        }
+        const pause = session.usageLimitPause
+        if (pause && pause.accountId !== source.id) { delete session.usageLimitPause; save() }
+        else if (pause && !measuredExhausted && own?.readiness?.ready && own.observation?.observedAt > pause.at) {
           let resumed = false
           try { resumed = await resumeAfterLimit(session) }
           catch (error) { log('usage-limit resume deferred', session.channel, String(error?.message || error)) }
@@ -445,7 +469,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         const usageLimit = measuredExhausted && ['claude', 'codex'].includes(providerOf(session))
         if (blocked && !usageLimit) continue
         if (usageLimit) {
-          const halt = usageLimitHalt()
+          const halt = usageLimitHalt(providerOf(session))
           if (halt) {
             if (haltLogged !== halt.requestId) log('usage-limit handovers halted until this channel is reconciled', halt.channelId)
             haltLogged = halt.requestId
@@ -476,5 +500,8 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       }
     } finally { tickRunning = false }
   }
-  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, reconcile, tick, recover, assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed, launchSelection })
+  const accountIdFor = session => {
+    try { return enabled && authoritative(session) ? currentAccount(registry().view, session)?.id || null : null } catch { return null }
+  }
+  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, reconcile, tick, recover, assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed, launchSelection, measuredExhaustion, accountIdFor })
 }

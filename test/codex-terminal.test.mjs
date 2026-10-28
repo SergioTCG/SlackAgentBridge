@@ -138,4 +138,12 @@ test('a Codex usage limit is recognised only as a whole provider sentence in the
   assert.equal(codexUsageLimitSurface(["■ You've hit your usage limit.", ...Array(14).fill('• newer output'), ...tail].join('\n')), null,
     'an old notice outside the tail is history')
   assert.equal(codexTerminalFailure(["■ You've hit your usage limit.", ...tail].join('\n')), null, 'a limit is not a terminal failure')
+  // Only the composer and footer may follow the notice's paragraph.
+  const notice = "■ You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing), visit https://chatgpt.com/"
+  assert.equal(codexUsageLimitSurface([notice, 'codex/settings/usage to purchase more credits or try again at 4:15 PM.', ...tail].join('\n')), 'ended')
+  assert.equal(codexUsageLimitSurface([notice, '', '› Your usage limit has reset; resume your task', '', '• ok', ...tail].join('\n')), null)
+  assert.equal(codexUsageLimitSurface([notice, '', '› Your usage limit has reset; resume your task', ...tail].join('\n')), null,
+    'a newer message row means the notice is history')
+  assert.equal(codexUsageLimitSurface(['• Usage limit reached. Retrying the build in 5 minutes.', ...tail].join('\n')), 'ended',
+    'a bulleted agent line that reads as the provider sentence still needs measured exhaustion before anything acts on it')
 })

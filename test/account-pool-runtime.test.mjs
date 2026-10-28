@@ -762,24 +762,53 @@ test('concurrent reconciles of one handover settle it once', async () => {
   assert.equal(f.settled.length, 1)
 })
 
-test('a paused turn resumes in place when its own account has measured capacity again, without moving it', async () => {
+const primaryId = f => publicAccountRegistry(f.registry).accounts.find(a => a.key === 'primary').id
+
+test('a paused turn resumes in place only with a pause marker and a newer reading of its own account', async () => {
   const resumed = []
   const f = await usageLimitFixture({ quota: { primary: 40, secondary: 10 }, resumeAfterLimit: async session => { resumed.push(session.id); return true } })
   holdTask(f)
+  await f.runtime.tick()
+  assert.deepEqual(resumed, [], 'pane text alone never resumes: no marker, no resume')
+  f.session.usageLimitPause = { at: now + 1, accountId: primaryId(f) }
+  await f.runtime.tick()
+  assert.deepEqual(resumed, [], 'the reading predates the pause')
+  f.session.usageLimitPause = { at: now - 1, accountId: primaryId(f) }
   await f.runtime.tick()
   assert.deepEqual(resumed, [f.session.id])
   assert.equal(f.restarts.length, 0, 'an in-place resume restarts nothing')
   assert.equal(f.session.account, null)
 })
 
-test('an exhausted account is never resumed in place; it is handed over instead', async () => {
+test('a pause marker for another account is dropped, never acted on', async () => {
   const resumed = []
-  const f = await usageLimitFixture({ resumeAfterLimit: async session => { resumed.push(session.id); return true } })
+  const f = await usageLimitFixture({ quota: { primary: 40, secondary: 10 }, resumeAfterLimit: async session => { resumed.push(session.id); return true } })
+  holdTask(f)
+  f.session.usageLimitPause = { at: now - 1, accountId: 'acct_elsewhere' }
+  await f.runtime.tick()
+  assert.deepEqual(resumed, [])
+  assert.equal(f.session.usageLimitPause, undefined)
+})
+
+test('an exhausted account records the pause and is handed over, never resumed in place', async () => {
+  const resumed = [], marked = []
+  const f = await usageLimitFixture({ resumeAfterLimit: async session => { resumed.push(session.id); return true },
+    markLimitPause: async (session, accountId) => { marked.push(accountId); return true } })
   holdTask(f)
   await f.runtime.tick()
+  assert.deepEqual(marked, [primaryId(f)])
   assert.deepEqual(resumed, [])
   assert.equal(f.restarts.length, 1)
   assert.equal(f.restarts[0].usageLimit, true)
+})
+
+test('the pool reports measured exhaustion only in auto mode and only for the session\'s own account', async () => {
+  const f = await usageLimitFixture()
+  assert.equal(f.runtime.measuredExhaustion(f.session).accountId, primaryId(f))
+  const healthy = await usageLimitFixture({ quota: { primary: 40, secondary: 10 } })
+  assert.equal(healthy.runtime.measuredExhaustion(healthy.session), null)
+  assert.equal(setup({ mode: 'manual' }).runtime.measuredExhaustion(f.session), null)
+  assert.equal(f.runtime.accountIdFor(f.session), primaryId(f))
 })
 
 test('a /sab-new launch, whose channel does not exist yet, starts on the default group\'s account with capacity', async () => {
@@ -836,4 +865,15 @@ test('a Codex session holding a task on an exhausted account is handed over like
   assert.equal(session.account, 'second')
   tasks['task-held'].targetProvider = 'codex'
   assert.deepEqual(state.teamTasks, tasks)
+})
+
+test('an uncertain Codex usage-limit handover never halts Claude handovers', async () => {
+  const f = await usageLimitFixture()
+  holdTask(f)
+  const codex = { id: 'codex-held', channel: 'CCODEXH', provider: 'codex', pid: 600, tmux: 'sab-codex', cwd: '/codex' }
+  f.state.sessions[codex.id] = codex; f.state.channels.CCODEXH = codex.id
+  f.state.accountPools.switches.CCODEXH = { requestId: 'automatic-codex', channelId: 'CCODEXH', sessionId: codex.id, usageLimit: true,
+    phase: 'interrupted', at: now - 1, automatic: true }
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'committed', 'the Claude session still moved')
 })

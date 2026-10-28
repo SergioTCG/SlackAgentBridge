@@ -115,6 +115,16 @@ test('a usage-limit surface is recognised only while its notice is the latest ou
   }
 })
 
+test('only Claude\'s own limit rendering counts, never a reply that quotes it', () => {
+  const footer = ['❯ ', '  ⏵⏵ bypass permissions on (shift+tab to cycle)']
+  assert.equal(claudeUsageLimitSurface(["⏺ The pane said: You've hit your weekly limit · resets 4pm", ...footer].join('\n')), null)
+  assert.equal(claudeUsageLimitSurface([LIMIT_NOTICE, '❯ typed but not sent', ...footer].join('\n')), null, 'typed input is newer')
+  // Quoted option rows without the dialog's footer are not an open chooser.
+  assert.equal(claudeUsageLimitSurface([LIMIT_NOTICE, '   1. Stop and wait for limit to reset', ...footer].join('\n')), 'ended')
+  assert.equal(claudeUsageLimitSurface(['⏺ Reply quoting a chooser:', '  ❯ 1. Stop and wait for limit to reset',
+    '  Enter to confirm · Esc to cancel', ...footer].join('\n')), null, 'no notice row, no surface')
+})
+
 test('the usage-limit chooser is dismissed with one Escape and never buys credits', async () => {
   const sent = []
   let pane = LIMIT_MENU

@@ -161,7 +161,7 @@ import {
   bulkUpdateBlockReason, createBootSessionInputClaims, createSessionReplacementHookTracker,
   drainSessionInputQueue, planBulkSessionUpdate,
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
-  shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake, usageLimitResumeWanted,
+  holdsUsageLimitWork, shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake, usageLimitResumeWanted,
 } from './session-update.mjs'
 import {
   applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
@@ -300,6 +300,7 @@ const accountPools = createAccountPoolRuntime({
   log: (...args) => log(...args),
   usageLimitBlockReason: (session, taskMaintenance) => usageLimitBlockReason(session, taskMaintenance),
   resumeAfterLimit: session => resumeSessionAfterLimit(session),
+  markLimitPause: (session, accountId) => markSessionLimitPause(session, accountId),
   onSettled: (session, settled) => {
     if (settled?.journal?.usageLimit) {
       try { settleUsageLimitHandover(session, settled) }
@@ -1063,16 +1064,22 @@ function startCodexPoller(session) {
       })
       if (!teamProviderPollerObservationCurrent(p, observation)) return
       p.idleObservation = idleDecision.observation
-      if (idleDecision.action === 'release' && accountPools.mode === 'auto' && codexUsageLimitSurface(pane) &&
-          (session.teamActiveTaskId || session.teamStandingTaskId || session.teamTurn)) {
-        // A usage limit ended this turn unfinished. Pause it rather than report
-        // it: the automatic handover, or the limit's reset, resumes it. Only the
-        // native turn ends here; the task, turn authority and reservation stay.
+      const exhaustion = idleDecision.action === 'release' && codexUsageLimitSurface(pane)
+        ? accountPools.measuredExhaustion(session) : null
+      const heldTask = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
+      if (exhaustion && (session.teamActiveTaskId || session.teamStandingTaskId || session.teamTurn) &&
+          !session.teamProviderTurnPending && heldTask?.status !== 'dispatching') {
+        // A usage limit ended this turn unfinished, on an account the pool can
+        // act on. Pause it rather than report it: the automatic handover, or
+        // the limit's reset, resumes it. Only the native turn ends here; the
+        // task, turn authority and reservation stay.
         p.stopped = true
         stopPoller(session)
+        session.usageLimitPause = { at: Date.now(), accountId: exhaustion.accountId }
         saveStateNow(state)
         await clearStatus(session)
         log('Codex turn paused at a usage limit', session.id.slice(0, 8))
+        await post(session.channel, `⏸️ Codex hit the usage limit on ${exhaustion.email}. SAB paused this turn: it moves to an account with capacity, or resumes here once the limit resets.`).catch(() => {})
         return
       }
       if (idleDecision.action === 'release' && session.teamActiveTaskId) {
@@ -1843,6 +1850,7 @@ async function readoptStatus() {
           // Paused by a usage limit or owned by an account handover: kept, as
           // for Claude, for the handover or the limit's reset to resume.
           if (s.teamActiveTaskId) teamTurnProof.add(s.id)
+          markBootLimitPause(s)
           if (idleTask) log('re-adopted Codex session paused for its account', s.id.slice(0, 8))
         } else if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Codex')
         if (ts || hadTurnState) log('cleared stale Codex turn status', s.id.slice(0, 8))
@@ -1878,6 +1886,7 @@ async function readoptStatus() {
         // it, as it does a turn an account handover already owns. Its task, turn
         // authority and input reservation stay.
         if (s.teamActiveTaskId) teamTurnProof.add(s.id)
+        markBootLimitPause(s)
         if (idleTask) log('re-adopted session paused for its account', s.id.slice(0, 8))
       } else if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Claude Code')
     }
@@ -7252,45 +7261,87 @@ function queueUsageLimitResume(session, { interrupted, shells }) {
 }
 
 const USAGE_LIMIT_LIFTED_PROMPT = 'Your usage limit has reset; resume your task where you left off.'
+const ownsAutomationRecord = session => Object.values(state.automations || {}).some(record => automationOwnsSession(record, session))
 
-// A turn a usage limit paused waits until something resumes it. Once its own
-// account has measured capacity again, the monitor resumes held work in place,
-// only while the limit notice is still the pane's latest output.
+// The pause marker is the only thing an in-place resume trusts. The monitor
+// records it for held work whose pane shows the limit as the latest output
+// while it measures that session's own account exhausted; any new prompt or a
+// handover clears it.
+async function markSessionLimitPause(session, accountId) {
+  const provider = providerOf(session)
+  if (!['claude', 'codex'].includes(provider) || !accountId || !session.tmux || !(session.pid && pidAlive(session.pid)) ||
+      !holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) })) return false
+  if (!usageLimitSurface(provider, await tmuxCapture(session.tmux))) return false
+  session.usageLimitPause = { at: Date.now(), accountId }
+  saveState(state)
+  return true
+}
+
+// Boot keeps a turn a usage limit paused; marking it lets a reading taken
+// after the restart resume it if the limit lifted while SAB was down.
+function markBootLimitPause(session) {
+  const accountId = accountPools.accountIdFor(session)
+  if (session.usageLimitPause || !accountId || !holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) })) return
+  session.usageLimitPause = { at: Date.now(), accountId }
+}
+
+// Resume a marked turn in place once a newer reading shows its own account has
+// capacity again. Policy and handover state are checked before the terminal is
+// touched, the attempt is recorded before any key, and everything that could
+// mean fresh input is checked again right before the one injected line.
 async function resumeSessionAfterLimit(session) {
   const provider = providerOf(session)
-  if (!['claude', 'codex'].includes(provider) || !session.channel || !session.tmux ||
+  if (!['claude', 'codex'].includes(provider) || !session.channel || !session.tmux || !session.usageLimitPause ||
       !(session.pid && pidAlive(session.pid)) || sessionByChannel(session.channel) !== session) return false
-  if (!usageLimitResumeWanted(session, {
-    automationOwned: Object.values(state.automations || {}).some(record => automationOwnsSession(record, session)),
-  }) || accountMaintenanceHoldsTask(session) || pendingBySid.get(session.id)?.length || drainingSessionInput.has(session.id) ||
-      Object.values(state.teamTasks || {}).some(task => task.targetSessionId === session.id &&
-        (task.messages || []).some(message => teamMessageDeliveries.has(message.id)))) return false
+  try { accountPools.assertInputAllowed(session) } catch { return false }
+  const handover = state.accountPools?.switches?.[session.channel]
+  if (handover && ['prepared', 'restarting', 'interrupted'].includes(handover.phase)) return false
+  if (!usageLimitResumeWanted(session, { automationOwned: ownsAutomationRecord(session) })) return false
+  const busy = () => {
+    if (accountMaintenanceHoldsTask(session) || pendingBySid.get(session.id)?.length || drainingSessionInput.has(session.id) ||
+        session.teamProviderTurnPending || provider === 'codex' && (session.codexTurnStartedAt || codexPollers.has(session.id)) ||
+        Object.values(state.teamTasks || {}).some(task => task.targetSessionId === session.id &&
+          (task.status === 'dispatching' || (task.messages || []).some(message => teamMessageDeliveries.has(message.id))))) return true
+    // Claude can leave a poller that never saw a spinner on the turn the limit
+    // ended. Questions, permissions, switches, maintenance and private turns
+    // still wait.
+    const context = bulkUpdateContext()
+    if (provider === 'claude') context.busySessionIds.delete(session.id)
+    return Boolean(bulkUpdateBlockReason({ ...session, teamActiveTaskId: null },
+      { ...context, automations: {}, conversationMissing: () => false }))
+  }
   const expected = { id: session.id, pid: session.pid, tmux: session.tmux }
   const authoritative = () => session.id === expected.id && session.pid === expected.pid && session.tmux === expected.tmux &&
     sessionByChannel(session.channel) === session
-  let pane = await tmuxCapture(expected.tmux)
-  if (!usageLimitSurface(provider, pane)) return false
-  // The limit ended that turn: its stale poller and turn marker are not work.
-  // Questions, permissions, switches, maintenance and private turns still wait.
-  const context = bulkUpdateContext()
-  context.busySessionIds.delete(session.id)
-  if (bulkUpdateBlockReason({ ...session, teamActiveTaskId: null, codexTurnStartedAt: null },
-    { ...context, automations: {}, conversationMissing: () => false })) return false
-  if (provider === 'claude') {
-    ({ pane } = await dismissClaudeUsageLimitMenu({
-      capture: () => tmuxCapture(expected.tmux),
-      sendKey: async key => {
-        if (!authoritative()) throw new Error('session changed before its usage-limit chooser was closed')
-        await execFile('tmux', ['send-keys', '-t', expected.tmux, key])
-      },
-      sleep,
-    }))
-  }
-  if (!authoritative() || targetStartupState(provider, pane) !== 'ready' || provider === 'claude' && extractSpinner(pane) ||
-      !usageLimitSurface(provider, pane)) return false
+  const paused = pane => targetStartupState(provider, pane) === 'ready' && !(provider === 'claude' && extractSpinner(pane)) &&
+    usageLimitSurface(provider, pane)
+  if (busy() || !usageLimitSurface(provider, await tmuxCapture(expected.tmux))) return false
+  // One attempt per interval, recorded before any key: a chooser that never
+  // closes is not pressed again on the next tick.
   session.usageLimitResumedAt = Date.now()
   saveStateNow(state)
-  if (provider === 'codex') stopPoller(session) // end the turn the limit's error left open
+  let pane = await tmuxCapture(expected.tmux)
+  if (provider === 'claude') {
+    try {
+      ({ pane } = await dismissClaudeUsageLimitMenu({
+        capture: () => tmuxCapture(expected.tmux),
+        sendKey: async key => {
+          if (!authoritative() || busy()) throw new Error('session changed before its usage-limit chooser was closed')
+          await execFile('tmux', ['send-keys', '-t', expected.tmux, key])
+        },
+        sleep,
+      }))
+    } catch (error) {
+      log('usage-limit resume deferred', session.id.slice(0, 8), String(error?.message || error))
+      return false
+    }
+  }
+  await sleep(250)
+  const repeated = await tmuxCapture(expected.tmux)
+  if (!paused(pane) || repeated !== pane || !authoritative() || busy()) return false
+  try { accountPools.assertInputAllowed(session) } catch { return false }
+  delete session.usageLimitPause
+  saveStateNow(state)
   try { await injectText(session, USAGE_LIMIT_LIFTED_PROMPT) }
   catch (error) {
     log('usage-limit resume not delivered', session.id.slice(0, 8), String(error?.message || error))
@@ -7305,6 +7356,7 @@ async function resumeSessionAfterLimit(session) {
 // otherwise untouched: this annotation is not a lifecycle transition. An
 // automation keeps owning the exact replacement terminal.
 function settleUsageLimitHandover(session, { journal, source, target }) {
+  delete session.usageLimitPause
   const task = state.teamTasks?.[journal.taskMaintenance?.taskId]
   if (task && task.targetSessionId === session.id && task.targetChannel === session.channel) {
     const at = new Date().toISOString()
