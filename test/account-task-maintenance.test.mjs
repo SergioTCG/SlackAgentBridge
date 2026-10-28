@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { captureTaskMaintenance, assertTaskMaintenance, taskMaintenancePending, taskMaintenanceClaimAllowed, proveIdleTaskProcessTree } from '../daemon/account-task-maintenance.mjs'
+import { captureTaskMaintenance, captureUsageLimitTaskMaintenance, assertTaskMaintenance, taskMaintenancePending, taskMaintenanceClaimAllowed, proveIdleTaskProcessTree } from '../daemon/account-task-maintenance.mjs'
 import { appendCoordinatorTaskMessage, appendTeamTaskReply, requestTeamTaskCompletion, releaseTeamTask } from '../daemon/teams.mjs'
 
 function fixture() {
@@ -66,5 +66,64 @@ test('process proof rejects arbitrary children, nested jobs, additional panes an
   await proveIdleTaskProcessTree(session, { bridge, execFile: mock() })
   for (const options of [{ command: 'node /workspace/build.mjs' }, { tree: normal + '22 21\n' }, { panes: '%1\n%2\n' }, { tree: '10 1\n20 999\n' }]) {
     await assert.rejects(proveIdleTaskProcessTree(session, { bridge, execFile: mock(options) }), /background|process|pane/)
+  }
+})
+
+function usageLimitFixture({ standing = false, status = 'running' } = {}) {
+  const f = fixture()
+  Object.assign(f.task, { status, workGeneration: 3, providerWorkGeneration: 3, reports: [{ workGeneration: 2, deliveryStatus: 'delivered' }] })
+  if (standing) {
+    f.task.reservation = 'standing'
+    delete f.session.teamActiveTaskId
+    f.session.teamStandingTaskId = f.task.id
+  }
+  return f
+}
+
+test('a usage-limit checkpoint admits running delegated and standing tasks without changing them', () => {
+  for (const options of [{}, { status: 'awaiting_release' }, { standing: true }]) {
+    const { state, session, task } = usageLimitFixture(options)
+    session.teamInputReservation = { source: 'team-standing-message:message_x' } // the turn the limit ended
+    const before = structuredClone(state)
+    const snapshot = captureUsageLimitTaskMaintenance(state, session)
+    assert.equal(snapshot.kind, 'usage-limit')
+    assert.equal(snapshot.taskId, task.id)
+    assert.deepEqual(state, before)
+    session.pid = 30; session.tmux = 'sab-replacement'
+    assertTaskMaintenance(state, session, snapshot)
+    state.accountPools = { switches: { CWORK: { phase: 'restarting', taskMaintenance: snapshot } } }
+    assert.equal(taskMaintenancePending(state, task), true)
+    assert.equal(taskMaintenanceClaimAllowed(state, { sessionId: 'impostor', tmux: session.tmux, provider: 'claude' }), false)
+    task.status = 'failed'
+    assert.throws(() => assertTaskMaintenance(state, session, snapshot), /changed|blocked/)
+  }
+})
+
+test('a usage-limit checkpoint keeps undelivered coordinator messages queued for after the restart', () => {
+  const { state, session, task } = usageLimitFixture()
+  task.workGeneration = 4
+  task.messages = [{ id: 'message_queued', workGeneration: 4, deliveryStatus: 'pending', providerDeliveryStatus: null },
+    { id: 'message_failed', workGeneration: 3, deliveryStatus: 'failed', providerDeliveryStatus: 'uncertain' }]
+  assert.equal(captureUsageLimitTaskMaintenance(state, session).taskId, task.id, 'a terminally failed message never changes again')
+})
+
+test('a usage-limit checkpoint refuses dispatches, in-flight deliveries and unsettled journals', () => {
+  for (const mutate of [
+    f => { f.task.status = 'dispatching' },
+    f => { f.task.messages = [{ deliveryStatus: 'pending', providerDeliveryStatus: 'delivering' }] },
+    f => { f.task.messages = [{ deliveryStatus: 'uncertain', providerDeliveryStatus: 'uncertain' }] },
+    f => { f.task.reports.push({ workGeneration: 3, deliveryStatus: 'pending' }) },
+    f => { f.task.replies = [{ text: 'progress' }] },
+    f => { f.session.teamProviderTurnPending = { taskId: 'task-one', providerWorkGeneration: 4 } },
+    f => { f.session.teamStandingTaskId = 'task-other' },
+    f => { f.task.targetSessionId = 'someone-else' },
+    f => { f.state.teams.team.closedAt = '2026-10-28T07:00:00.000Z' },
+    f => { f.session.provider = 'codex' },
+    f => { f.task.reservation = 'standing' },
+  ]) {
+    const f = usageLimitFixture(); mutate(f)
+    const before = structuredClone(f.state)
+    assert.throws(() => captureUsageLimitTaskMaintenance(f.state, f.session), /blocked/)
+    assert.deepEqual(f.state, before)
   }
 })

@@ -3,7 +3,7 @@
 import crypto from 'node:crypto'
 import { channelNodeId, LOCAL_NODE_ID } from './nodes.mjs'
 import { providerOf, resumeArgsFor } from './providers.mjs'
-import { captureTaskMaintenance, assertTaskMaintenance } from './account-task-maintenance.mjs'
+import { captureTaskMaintenance, captureUsageLimitTaskMaintenance, assertTaskMaintenance } from './account-task-maintenance.mjs'
 import { accountRegistryDigest, previewPoolAccountSelection, publicAccountRegistry } from './account-registry.mjs'
 import { choosePoolAccount, nextQuotaPollAt, quotaReadiness } from './account-quota.mjs'
 import { accountCredentialReference } from './account-profiles.mjs'
@@ -18,10 +18,16 @@ const rejectionCauses = {
   account_switch_not_proven_idle: 'its terminal was not proven idle',
   account_registry_changed: 'the account registry changed',
   account_background_process_changed: 'a background process changed',
+  account_background_panes: 'its terminal has more than one pane',
+  account_limit_menu_not_dismissed: "Claude's usage-limit chooser did not close",
 }
 // A rejected automatic handover is retried after 15 min, doubling per
-// consecutive rejection up to 4 h, never on every monitor tick.
-const automaticRetryDelay = journal => Math.min(4 * 3600000, 900000 * 2 ** Math.min(4, (journal.attempt || 1) - 1))
+// consecutive rejection up to 4 h, never on every monitor tick. Held work on an
+// exhausted account cannot progress meanwhile, so it retries after 2 min,
+// doubling up to 15 min.
+const automaticRetryDelay = journal => journal.usageLimit
+  ? Math.min(900000, 120000 * 2 ** Math.min(3, (journal.attempt || 1) - 1))
+  : Math.min(4 * 3600000, 900000 * 2 ** Math.min(4, (journal.attempt || 1) - 1))
 const retryLabel = ms => ms < 3600000 ? `${Math.round(ms / 60000)} min` : `${Math.round(ms / 3600000)} h`
 export function accountPoolMode(value) {
   const mode = value || 'off'
@@ -31,12 +37,20 @@ export function accountPoolMode(value) {
 
 export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, persist, readQuota,
   blockReason = () => null, restart, writeRegistry, verifyIdentity = async () => 'credential-unavailable',
-  onSettled = () => {}, notify = async () => {}, now = Date.now,
+  onSettled = () => {}, notify = async () => {}, now = Date.now, log = () => {},
   isDormant = async session => !session.pid && !session.tmux, adoptReplacement = async () => null,
+  usageLimitBlockReason = async () => 'usage-limit maintenance unavailable',
 }) {
   mode = accountPoolMode(mode)
   const enabled = mode !== 'off', enforcing = ['manual', 'auto'].includes(mode), flights = new Map(), switching = new Set()
   let tickRunning = false, serialRead = Promise.resolve(), persistenceFailed = false
+  const deferred = new Map() // channel → last usage-limit refusal, logged once per change
+  // A usage-limit handover that ends uncertain halts the others until that
+  // channel is reconciled, so a systematic failure strands one session, not all.
+  // The journal is the record, so the halt also survives a daemon restart.
+  const usageLimitHalt = () => Object.values(poolState().switches).find(journal => journal?.usageLimit &&
+    journal.phase === 'interrupted' && authoritative(state.sessions?.[journal.sessionId])) || null
+  let haltLogged = null
   const save = () => {
     try { persist() }
     catch { persistenceFailed = true; fail('account_pool_persistence_failed') }
@@ -62,6 +76,11 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     assertTaskMaintenance(state, session, snapshot)
     return blockReason({ ...session, teamActiveTaskId: null })
   }
+  // A usage-limit handover is checked by the daemon's own rule, which waives
+  // only the protections that exist for the held work itself.
+  const settledBlockReason = (session, journal) => journal?.usageLimit
+    ? usageLimitBlockReason(session, journal.taskMaintenance || null)
+    : maintenanceBlockReason(session, journal?.taskMaintenance)
   const authoritative = (session, sid = session?.id) => Boolean(session?.id === sid && session.channel &&
     state.channels?.[session.channel] === sid && state.sessions?.[sid] === session && channelNodeId(state, session.channel) === LOCAL_NODE_ID)
   const assertLaunchAllowed = session => {
@@ -169,18 +188,22 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     serialRead = flight.catch(() => {})
     return flight
   }
-  const switchAccount = async (session, selector, { requestId, expectedSessionId = session?.id, automatic = false, preserveTask = null } = {}) => {
+  const switchAccount = async (session, selector, { requestId, expectedSessionId = session?.id, automatic = false, preserveTask = null, usageLimit = false } = {}) => {
     if (persistenceFailed) fail('account_pool_persistence_failed')
     if (!['manual', 'auto'].includes(mode)) fail('account_pool_read_only')
     if (!requestPattern.test(requestId || '')) fail('invalid_account_request')
     if (!authoritative(session, expectedSessionId)) fail('stale_account_session')
+    // Only the monitor declares a usage limit, for a Claude session it has just
+    // observed on an exhausted account. Owners keep the ordinary safe boundary.
+    if (usageLimit && (!automatic || preserveTask || providerOf(session) !== 'claude')) fail('account_switch_blocked')
     const channelId = session.channel
     if (switching.has(channelId)) fail('account_switch_in_progress')
     const { record, view } = registry()
     const selected = previewPoolAccountSelection(record, { channelId, provider: providerOf(session), account: selector })
     const target = selected.account, source = currentAccount(view, session)
     const key = accountRegistryDigest([channelId, requestId]), digest = accountRegistryDigest(preserveTask
-      ? [expectedSessionId, target.id, automatic, preserveTask] : [expectedSessionId, target.id, automatic])
+      ? [expectedSessionId, target.id, automatic, preserveTask]
+      : usageLimit ? [expectedSessionId, target.id, automatic, 'usage-limit'] : [expectedSessionId, target.id, automatic])
     const previous = poolState().receipts[key]
     if (previous) {
       if (previous.digest !== digest) fail('account_request_conflict')
@@ -194,8 +217,19 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         (ref.kind !== 'claude-profile' || session.accountKind === 'claude-profile')) return { status: 'unchanged', accountId: target.id, requestId }
     if (Object.keys(poolState().receipts).length >= 4096) fail('account_receipt_history_full')
     if (automatic && preserveTask) fail('account_task_maintenance_blocked')
-    const taskMaintenance = preserveTask ? captureTaskMaintenance(state, session, preserveTask) : null
-    const blocked = maintenanceBlockReason(session, taskMaintenance)
+    const taskMaintenance = preserveTask ? captureTaskMaintenance(state, session, preserveTask)
+      : usageLimit && (session.teamActiveTaskId || session.teamStandingTaskId) ? captureUsageLimitTaskMaintenance(state, session) : null
+    if (usageLimit) {
+      // The daemon's proof inspects the pane. Hold the channel while it runs so
+      // no other handover can start, then repeat the synchronous checks.
+      switching.add(channelId)
+      let reason
+      try { reason = await usageLimitBlockReason(session, taskMaintenance) } finally { switching.delete(channelId) }
+      if (reason || !authoritative(session, expectedSessionId) || switching.has(channelId) || poolState().receipts[key] ||
+          currentAccount(registry().view, session)?.id !== source?.id || readRegistry()?.revision !== record.revision) fail('account_switch_blocked')
+      if (taskMaintenance) assertTaskMaintenance(state, session, taskMaintenance)
+    }
+    const blocked = usageLimit ? null : maintenanceBlockReason(session, taskMaintenance)
     const dormant = !session.pid || blocked === 'provider is dormant'
     if (taskMaintenance && dormant) fail('account_task_maintenance_blocked')
     if (blocked && !(dormant && blocked === 'provider is dormant') || (!dormant && (!session.pid || !session.tmux))) fail('account_switch_blocked')
@@ -212,6 +246,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     const beforeResumeArgs = JSON.stringify(resumeArgsFor(session))
     const journal = { requestId, digest, channelId, sessionId: session.id, sourceAccountId: source?.id || null, targetAccountId: target.id,
       registryRevision: record.revision, phase: 'prepared', at: now(), automatic }
+    if (usageLimit) journal.usageLimit = true
     if (taskMaintenance) journal.taskMaintenance = taskMaintenance
     const prior = poolState().switches[channelId]
     if (automatic && prior?.automatic && prior.phase === 'rejected' && prior.sessionId === session.id &&
@@ -240,9 +275,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       // The callback reserves the daemon's input fence synchronously, then
       // repeats authority/idle checks after any awaited notice before teardown.
       journal.phase = 'restarting'; save()
-      await restart(session, alias, { expectedSessionId, account: target, automatic, taskMaintenance,
+      const restarted = await restart(session, alias, { expectedSessionId, account: target, source, automatic, taskMaintenance, usageLimit,
         authorize: () => { if (readRegistry()?.revision !== record.revision) fail('account_registry_changed') },
       })
+      const note = typeof restarted?.note === 'string' ? restarted.note.slice(0, 600) : ''
       if (readRegistry()?.revision !== record.revision || !authoritative(session, before.id) || session.cwd !== before.cwd || providerOf(session) !== before.provider ||
           ['model', 'effort', 'requestedModel', 'requestedEffort'].some(k => session[k] !== before[k]) ||
           JSON.stringify(resumeArgsFor(session)) !== beforeResumeArgs ||
@@ -263,8 +299,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       journal.phase = 'committed'; journal.completedAt = now()
       if (source && source.id !== target.id && !automatic && journal.identityVerified && !taskMaintenance) poolState().proofs[proofKey(source.id, target.id)] = { registryRevision: record.revision, at: now() }
       save()
-      try { onSettled(session) } catch { /* input recovery is separately fenced */ }
-      await notify(channelId, `Account handover complete: ${target.email} (${selected.group.name}).${journal.identityVerified ? '' : ' Legacy token identity is owner-attested only; this does not authorize automatic switching.'}`).catch(() => {})
+      try { onSettled(session, { journal, source, target }) } catch { /* input recovery is separately fenced */ }
+      const limit = usageLimit ? ` ${source?.email || 'The previous account'} had reached its usage limit${taskMaintenance
+        ? `; team task \`${taskMaintenance.taskId}\` continues unchanged` : ''}.` : ''
+      await notify(channelId, `Account handover complete: ${target.email} (${selected.group.name}).${limit}${note ? ` ${note}` : ''}${journal.identityVerified ? '' : ' Legacy token identity is owner-attested only; this does not authorize automatic switching.'}`).catch(() => {})
       return { status: 'committed', accountId: target.id, requestId }
     } catch (error) {
       const rejected = journal.phase === 'prepared' || error.accountPreflightRejected === true
@@ -275,7 +313,8 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       if (!persistenceFailed) save()
       const cause = rejectionCauses[journal.reason] ? `: ${rejectionCauses[journal.reason]}` : ''
       const retry = automatic ? ` If it is still needed, SAB retries automatically in ${retryLabel(automaticRetryDelay(journal))}.` : ''
-      await notify(channelId, rejected ? `Account handover was rejected before teardown${cause}. The existing provider was not stopped.${retry}`
+      if (rejected && journal.usageLimit && journal.attempt > 1) log('usage-limit handover rejected again', channelId, journal.reason || error.message)
+      else await notify(channelId, rejected ? `Account handover was rejected before teardown${cause}. The existing provider was not stopped.${retry}`
         : 'Account handover did not establish a verified resume. No automatic retry will occur; inspect /sab-status.').catch(() => {})
       fail(rejected ? 'account_handover_rejected' : 'account_handover_uncertain')
     } finally { switching.delete(channelId) }
@@ -302,16 +341,17 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     if (journal.phase === 'reconciled') return { status: 'reconciled', requestId }
     if (journal.phase !== 'interrupted' || !session.tmux) fail('account_switch_blocked')
     if (!session.pid) await adoptLostReplacement(session, journal, expectedSessionId)
-    if (!session.pid || maintenanceBlockReason(session, journal.taskMaintenance)) fail('account_switch_blocked')
-    const { record, view } = registry(), account = currentAccount(view, session)
-    if (!account || account.id !== journal.targetAccountId) fail('account_identity_unverified')
-    previewPoolAccountSelection(record, { channelId: session.channel, provider: providerOf(session), account: account.id })
-    const expected = { pid: session.pid, tmux: session.tmux }
+    if (!authoritative(session, expectedSessionId) || switching.has(session.channel) || poolState().switches[session.channel] !== journal) fail('stale_account_session')
     switching.add(session.channel)
     try {
+      if (!session.pid || await settledBlockReason(session, journal)) fail('account_switch_blocked')
+      const { record, view } = registry(), account = currentAccount(view, session)
+      if (!account || account.id !== journal.targetAccountId) fail('account_identity_unverified')
+      previewPoolAccountSelection(record, { channelId: session.channel, provider: providerOf(session), account: account.id })
+      const expected = { pid: session.pid, tmux: session.tmux }
       if (await verifyIdentity(session, account, { stage: 'replacement' }) !== 'verified' || !authoritative(session, expectedSessionId) ||
           session.pid !== expected.pid || session.tmux !== expected.tmux || readRegistry()?.revision !== record.revision ||
-          poolState().switches[session.channel] !== journal || maintenanceBlockReason(session, journal.taskMaintenance)) fail('account_identity_unverified')
+          poolState().switches[session.channel] !== journal || await settledBlockReason(session, journal)) fail('account_identity_unverified')
       journal.phase = 'reconciled'; journal.reconciledAt = now()
       for (const receipt of Object.values(poolState().receipts)) {
         if (receipt.requestId === requestId && receipt.channelId === session.channel && receipt.sessionId === session.id) {
@@ -319,7 +359,8 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         }
       }
       save()
-      try { onSettled(session) } catch { /* input recovery is separately fenced */ }
+      const source = view.accounts.find(a => a.id === journal.sourceAccountId) || null
+      try { onSettled(session, { journal, source, target: account }) } catch { /* input recovery is separately fenced */ }
       return { status: 'reconciled', requestId }
     } finally { switching.delete(session.channel) }
   }
@@ -335,6 +376,30 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     }
     if (changed) save()
   }
+  // Measured capacity only, without the reservation estimate. Used solely when
+  // the current account is exhausted and no account passes that estimate.
+  const measuredCapacityTarget = (session, source) => {
+    const { record, view } = registry(), binding = state.accountPools?.bindings?.[session.channel]
+    return choosePoolAccount(view, { channelId: session.channel, provider: providerOf(session), currentAccountId: source.id,
+      observations: data(record.revision), now: now(), preferredAccountId: binding?.preferredAccountId, reservations: {} }).accountId
+  }
+  // A new session starts where the monitor would move it anyway, so no launch
+  // begins on an exhausted login. Auto mode only; a ready native login stays.
+  const launchSelection = ({ channelId, provider }) => {
+    if (mode !== 'auto' || persistenceFailed || provider !== 'claude' || !/^[CG][A-Z0-9]{1,32}$/.test(channelId || '') ||
+        state.channels?.[channelId]) return null
+    const { record, view } = registry()
+    const native = view.accounts.find(a => a.provider === provider && a.credentials.some(ref => ref.kind === 'native-default'))
+    if (!native) return null
+    const decision = choosePoolAccount(view, { channelId, provider, currentAccountId: native.id,
+      observations: data(record.revision), now: now(), reservations: {} })
+    const target = decision.reason === 'capacity-handover' && decision.accountId !== native.id
+      ? view.accounts.find(a => a.id === decision.accountId) : null
+    const ref = target && accountCredentialReference(target)
+    if (!ref || !['legacy-claude', 'claude-profile'].includes(ref.kind)) return null
+    previewPoolAccountSelection(record, { channelId, provider, account: target.id })
+    return { account: ref.kind === 'legacy-claude' ? ref.alias : ref.profile, accountKind: ref.kind, accountId: target.id, email: target.email }
+  }
   const tick = async () => {
     if (!enabled || tickRunning || persistenceFailed) return
     tickRunning = true
@@ -344,13 +409,35 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       for (const account of view.accounts) await refresh(account.id)
       if (mode !== 'auto') return
       for (const session of Object.values(state.sessions || {})) {
-        if (!authoritative(session) || !session.pid || !session.tmux || blockReason(session) || switching.has(session.channel) || !['claude', 'codex'].includes(providerOf(session))) continue
-        const info = status(session.channel), source = info.currentAccount, target = info.decision.accountId
-        if (!source || !target || source.id === target || !info.group.members.includes(source.id) ||
+        if (!authoritative(session) || !session.pid || !session.tmux || switching.has(session.channel) || !['claude', 'codex'].includes(providerOf(session))) continue
+        const blocked = blockReason(session)
+        const info = status(session.channel), source = info.currentAccount
+        if (!source || !info.group.members.includes(source.id) ||
             (source.allowedChannels !== null && !source.allowedChannels.includes(session.channel))) continue
-        const currentReason = info.decision.candidates.find(c => c.accountId === source.id)?.reason
-        const quotaExhausted = currentReason === 'headroom-exhausted' || currentReason === 'backend-denied' &&
+        const exhausted = reason => reason === 'headroom-exhausted' || reason === 'backend-denied' &&
           poolState().observations[source.id]?.observation?.windows?.some(w => w.usedPercent >= 90)
+        // The estimate includes reservations for other sessions; the measured
+        // reason is the account's own observed usage.
+        const quotaExhausted = exhausted(info.decision.candidates.find(c => c.accountId === source.id)?.reason)
+        const measuredExhausted = exhausted(info.accounts.find(a => a.id === source.id)?.readiness?.reason)
+        // The reservation estimate balances accounts that can all still work. An
+        // account whose own usage is exhausted cannot run the next turn at all,
+        // so measured capacity elsewhere is enough.
+        const target = info.decision.accountId || (measuredExhausted ? measuredCapacityTarget(session, source) : null)
+        if (!target || source.id === target) continue
+        // Only a measured usage limit moves a session whose own work is held:
+        // that turn cannot progress on the exhausted account anyway. A
+        // preference return, a drain or a manual switch waits for a safe boundary.
+        const usageLimit = measuredExhausted && providerOf(session) === 'claude'
+        if (blocked && !usageLimit) continue
+        if (usageLimit) {
+          const halt = usageLimitHalt()
+          if (halt) {
+            if (haltLogged !== halt.requestId) log('usage-limit handovers halted until this channel is reconciled', halt.channelId)
+            haltLogged = halt.requestId
+            continue
+          }
+        }
         const draining = source.lifecycle === 'draining' || info.group.drainingMembers.includes(source.id)
         if (!quotaExhausted && !draining && info.decision.reason !== 'preferred-recovered') continue
         const last = poolState().switches[session.channel]
@@ -359,14 +446,21 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         // attempt, and keep another receipt, on every tick.
         if (last?.automatic && last.phase === 'rejected' && last.sessionId === session.id && now() - last.at < automaticRetryDelay(last)) continue
         const requestId = `automatic-${crypto.randomUUID()}`
-        try { await switchAccount(session, target, { requestId, automatic: true }) }
-        catch (error) {
+        try {
+          await switchAccount(session, target, { requestId, automatic: true, usageLimit })
+          deferred.delete(session.channel)
+        } catch (error) {
           // A journaled outcome was already explained by switchAccount.
-          if (error.message !== 'automatic_handover_unproven' && poolState().switches[session.channel]?.requestId !== requestId)
-            await notify(session.channel, 'Automatic account handover is blocked; inspect /sab-account.').catch(() => {})
+          if (poolState().switches[session.channel]?.requestId === requestId || error.message === 'automatic_handover_unproven') continue
+          // Held work that is not yet at a safe point for usage-limit maintenance
+          // is retried on the next tick, not announced on every one.
+          if (usageLimit) {
+            if (deferred.get(session.channel) !== error.message) log('usage-limit handover deferred', session.channel, error.message)
+            deferred.set(session.channel, error.message)
+          } else await notify(session.channel, 'Automatic account handover is blocked; inspect /sab-account.').catch(() => {})
         }
       }
     } finally { tickRunning = false }
   }
-  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, reconcile, tick, recover, assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed })
+  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, reconcile, tick, recover, assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed, launchSelection })
 }

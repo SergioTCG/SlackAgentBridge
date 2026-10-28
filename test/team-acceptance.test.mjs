@@ -54,7 +54,7 @@ test('acceptance: main → epic coordinator → two executors, with no owner cli
       state,
       resolveCaller: async () => caller,
       requireDispatch: (session, team) => {
-        const authority = { teamId: team.id, allowContinuation: team.continuation?.mode === 'auto-until-blocked', state }
+        const authority = { teamId: team.id, allowContinuation: team.continuation?.mode === 'auto-until-blocked', state, now: clock }
         assertCoordinatorDispatch(session, authority)
         return authority
       },
@@ -121,7 +121,7 @@ test('acceptance: main → epic coordinator → two executors, with no owner cli
   }
   assert.equal(epic.teamTurn.remaining, 18, 'two dispatches from the delegated budget')
   clearTeamTurn(epic) // the epic's turn ends; its authority ends with it
-  assert.throws(() => assertCoordinatorDispatch(epic, { teamId: epicTeam.id, state }), error => error.code === 'owner_turn_required')
+  assert.throws(() => assertCoordinatorDispatch(epic, { teamId: epicTeam.id, state, now: clock }), error => error.code === 'owner_turn_required')
 
   // 3. An executor asks; the epic forwards it up; main answers; it flows down.
   const [first] = executors
@@ -143,7 +143,7 @@ test('acceptance: main → epic coordinator → two executors, with no owner cli
   const mainWake = claimContinuation(main, { now: tick() })
   beginContinuationTeamTurn(state.sessions.main, { teamId: main.id, eventId: mainWake.id }, { now: clock })
   settleContinuation(main, mainWake.id, { now: clock })
-  assertCoordinatorTaskControl(state.sessions.main, { teamId: main.id, allowContinuation: true, state })
+  assertCoordinatorTaskControl(state.sessions.main, { teamId: main.id, allowContinuation: true, state, now: clock })
   const answer = appendCoordinatorTaskMessage(state, epicTask.id, {
     sourceChannel: 'C-MAIN', text: 'Keep v1 until the migration lands.', requestId: 'answer-1', now: tick(),
   }).message
@@ -154,8 +154,8 @@ test('acceptance: main → epic coordinator → two executors, with no owner cli
   beginDelegatedTeamTurn(epic, { teamId: epicTeam.id, sourceTaskId: epicTask.id }, { now: clock })
   completeCoordinatorTaskMessageDelivery(state, epicTask.id, answer.id, { now: tick() })
   assert.equal(teamTaskProviderWorkGeneration(epicTask), 2)
-  assertCoordinatorTaskControl(epic, { teamId: epicTeam.id, allowContinuation: true, state })
-  assert.throws(() => assertCoordinatorTaskControl(epic, { teamId: main.id, allowContinuation: true, state }),
+  assertCoordinatorTaskControl(epic, { teamId: epicTeam.id, allowContinuation: true, state, now: clock })
+  assert.throws(() => assertCoordinatorTaskControl(epic, { teamId: main.id, allowContinuation: true, state, now: clock }),
     error => error.code === 'owner_turn_required', 'delegated authority never reaches the parent team')
   const down = appendCoordinatorTaskMessage(state, first.task.id, {
     sourceChannel: epic.channel, text: 'Main says: keep v1 until the migration lands.', requestId: 'down-1', now: tick(),

@@ -27,8 +27,40 @@ export function captureTaskMaintenance(state, session, taskId) {
   return { taskId, sessionId: session.id, channelId: session.channel, teamId: task.teamId, digest: digest(task) }
 }
 
+// A usage limit ends the very turn a held task is waiting on, so this checkpoint
+// also admits a standing task and a running delegated task. It is still never a
+// lifecycle change: the whole journal must stay unchanged across the restart.
+// Coordinator messages that have not reached the provider stay queued for after
+// it, and a terminally failed one never changes again; anything still being
+// delivered, reported or replied blocks this attempt.
+export function captureUsageLimitTaskMaintenance(state, session) {
+  const activeId = session?.teamActiveTaskId || null, standingId = session?.teamStandingTaskId || null
+  const taskId = activeId || standingId, task = state.teamTasks?.[taskId], team = state.teams?.[task?.teamId]
+  const standing = !activeId && task?.reservation === 'standing'
+  if (!session || (session.provider || 'claude') !== 'claude' || !taskId || (activeId && standingId) ||
+      state.sessions?.[session.id] !== session || state.channels?.[session.channel] !== session.id ||
+      channelNodeId(state, session.channel) !== LOCAL_NODE_ID || nodeIdForSession(session) !== LOCAL_NODE_ID ||
+      !team || team.closedAt || team.members?.[session.channel]?.role !== 'worker' ||
+      task.sourceChannel !== team.coordinatorChannel || task.targetNodeId && task.targetNodeId !== LOCAL_NODE_ID ||
+      task.targetSessionId !== session.id || task.targetChannel !== session.channel || task.targetProvider !== 'claude' ||
+      (activeId ? task.reservation === 'standing' || !['running', 'awaiting_release'].includes(task.status) : !standing || task.status !== 'running') ||
+      task.completionPolicy !== 'coordinator-release' || session.teamProviderTurnPending || session.teamProviderTurnDeferredFinal ||
+      !Number.isSafeInteger(task.workGeneration) || !Number.isSafeInteger(task.providerWorkGeneration) ||
+      task.providerWorkGeneration < 1 || task.providerWorkGeneration > task.workGeneration ||
+      task.reports?.some(report => report.deliveryStatus !== 'delivered') ||
+      task.replies?.some(reply => !teamReplyDeliverySettled(reply)) ||
+      task.messages?.some(message => message.providerDeliveryStatus === 'delivering' ||
+        !['delivered', 'pending', 'failed'].includes(message.deliveryStatus) ||
+        message.deliveryStatus === 'pending' && message.providerDeliveryStatus)) {
+    fail('account_task_maintenance_blocked')
+  }
+  return { kind: 'usage-limit', taskId, sessionId: session.id, channelId: session.channel, teamId: task.teamId, digest: digest(task) }
+}
+
 export function assertTaskMaintenance(state, session, snapshot) {
-  const current = captureTaskMaintenance(state, session, snapshot?.taskId)
+  const current = snapshot?.kind === 'usage-limit'
+    ? captureUsageLimitTaskMaintenance(state, session)
+    : captureTaskMaintenance(state, session, snapshot?.taskId)
   if (JSON.stringify(current) !== JSON.stringify(snapshot)) fail('account_task_maintenance_changed')
 }
 
@@ -41,7 +73,7 @@ export function taskMaintenancePending(state, task) {
 export function taskMaintenanceClaimAllowed(state, { sessionId, tmux, provider }) {
   if (!tmux) return true
   const reserved = Object.values(state.sessions || {}).find(session => session.tmux === tmux &&
-    taskMaintenancePending(state, state.teamTasks?.[session.teamActiveTaskId]))
+    [session.teamActiveTaskId, session.teamStandingTaskId].some(id => id && taskMaintenancePending(state, state.teamTasks?.[id])))
   return !reserved || reserved.id === sessionId && (reserved.provider || 'claude') === provider
 }
 
