@@ -32,6 +32,18 @@ export function bulkUpdateBlockReason(session, {
   return null
 }
 
+export const USAGE_LIMIT_RESUME_INTERVAL_MS = 30 * 60000
+
+// Once a paused turn's own account has capacity again, only held work resumes
+// by itself: a team task or turn, or an automation. An owner's or
+// collaborator's own session waits for their next message, as does a session
+// the owner ended. One attempt per interval survives restarts via the session.
+export function usageLimitResumeWanted(session, { now = Date.now(), automationOwned = false } = {}) {
+  if (!session || session.ownerEndedAt) return false
+  const held = Boolean(session.teamActiveTaskId || session.teamStandingTaskId || session.teamTurn || automationOwned)
+  return held && now - (Number(session.usageLimitResumedAt) || 0) >= USAGE_LIMIT_RESUME_INTERVAL_MS
+}
+
 export function planBulkSessionUpdate(state, { pidAlive, provider = null, ...context }) {
   const eligible = []
   const skipped = []

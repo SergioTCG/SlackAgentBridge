@@ -6,6 +6,7 @@ import {
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
   shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake,
 } from '../daemon/session-update.mjs'
+import { USAGE_LIMIT_RESUME_INTERVAL_MS, usageLimitResumeWanted } from '../daemon/session-update.mjs'
 import {
   artifactDeliveryInstruction, artifactGrantTokensFromPrompts, createArtifactGrantStore,
 } from '../daemon/artifacts.mjs'
@@ -460,4 +461,17 @@ test('the provider option leaves an unscoped bulk plan unchanged', () => {
   const explicitNull = planBulkSessionUpdate(stateFixture(), { ...context, provider: null })
   assert.deepEqual(explicitNull.eligible.map(session => session.id), unscoped.eligible.map(session => session.id))
   assert.deepEqual(explicitNull.skipped.map(item => item.session.id), unscoped.skipped.map(item => item.session.id))
+})
+
+test('only held work resumes by itself after a usage limit, at most once per interval', () => {
+  const now = 10_000_000
+  assert.equal(usageLimitResumeWanted({ id: 'owner' }, { now }), false, "an owner's own session waits for its owner")
+  for (const held of [{ teamActiveTaskId: 'task' }, { teamStandingTaskId: 'standing' }, { teamTurn: { actor: 'delegated' } }]) {
+    assert.equal(usageLimitResumeWanted({ id: 'held', ...held }, { now }), true)
+  }
+  assert.equal(usageLimitResumeWanted({ id: 'auto' }, { now, automationOwned: true }), true)
+  assert.equal(usageLimitResumeWanted({ id: 'ended', teamActiveTaskId: 'task', ownerEndedAt: 1 }, { now }), false)
+  const recent = { id: 'recent', teamActiveTaskId: 'task', usageLimitResumedAt: now - USAGE_LIMIT_RESUME_INTERVAL_MS + 1 }
+  assert.equal(usageLimitResumeWanted(recent, { now }), false)
+  assert.equal(usageLimitResumeWanted(recent, { now: now + 1 }), true)
 })

@@ -40,7 +40,7 @@ import {
 import { handleCodexFinalHttp } from './codex-final-http.mjs'
 import { handleCodexBootstrapHttp } from './codex-bootstrap-http.mjs'
 import {
-  codexTerminalFailure, codexTerminalFailureDecision, recordCodexPromptTurnStart,
+  codexTerminalFailure, codexTerminalFailureDecision, codexUsageLimitSurface, recordCodexPromptTurnStart,
   recordCodexTransportTurnStart, resetCodexPollerEvidence,
 } from './codex-terminal.mjs'
 import { codexFooterSettings, codexSettingsMismatch, shouldPromoteCodexFooter } from './codex-footer.mjs'
@@ -161,7 +161,7 @@ import {
   bulkUpdateBlockReason, createBootSessionInputClaims, createSessionReplacementHookTracker,
   drainSessionInputQueue, planBulkSessionUpdate,
   rebindSessionRuntimeState, recoverSessionInputFence, runBulkSessionUpdate,
-  shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake,
+  shouldRecoverLiveSessionInput, shouldRetryDormantSessionWake, usageLimitResumeWanted,
 } from './session-update.mjs'
 import {
   applyHooklessCodexClaim, codexAppServerProcessPid, hooklessAuthoritativeCodexSessions,
@@ -242,7 +242,7 @@ const accountPools = createAccountPoolRuntime({
         for (let attempt = 0; attempt < 240; attempt++) {
           if (checkpoint) assertTaskMaintenance(state, session, checkpoint)
           const pane = await tmuxCapture(expected.tmux)
-          if (targetStartupState('claude', pane) === 'ready' && !extractSpinner(pane)) { ready = true; break }
+          if (targetStartupState(account.provider, pane) === 'ready' && !(account.provider === 'claude' && extractSpinner(pane))) { ready = true; break }
           await sleep(250)
         }
         if (!ready) return 'credential-unavailable'
@@ -299,6 +299,7 @@ const accountPools = createAccountPoolRuntime({
   notify: (channel, message) => post(channel, message),
   log: (...args) => log(...args),
   usageLimitBlockReason: (session, taskMaintenance) => usageLimitBlockReason(session, taskMaintenance),
+  resumeAfterLimit: session => resumeSessionAfterLimit(session),
   onSettled: (session, settled) => {
     if (settled?.journal?.usageLimit) {
       try { settleUsageLimitHandover(session, settled) }
@@ -1062,6 +1063,18 @@ function startCodexPoller(session) {
       })
       if (!teamProviderPollerObservationCurrent(p, observation)) return
       p.idleObservation = idleDecision.observation
+      if (idleDecision.action === 'release' && accountPools.mode === 'auto' && codexUsageLimitSurface(pane) &&
+          (session.teamActiveTaskId || session.teamStandingTaskId || session.teamTurn)) {
+        // A usage limit ended this turn unfinished. Pause it rather than report
+        // it: the automatic handover, or the limit's reset, resumes it. Only the
+        // native turn ends here; the task, turn authority and reservation stay.
+        p.stopped = true
+        stopPoller(session)
+        saveStateNow(state)
+        await clearStatus(session)
+        log('Codex turn paused at a usage limit', session.id.slice(0, 8))
+        return
+      }
       if (idleDecision.action === 'release' && session.teamActiveTaskId) {
         // A worker can return to the Codex input surface without Stop. Keep the
         // task journal authoritative: stable idle proves only that the injected
@@ -1826,7 +1839,12 @@ async function readoptStatus() {
         stopPoller(s)
         const idleTask = readoptedTeamTaskFingerprint(s)
         await clearStatus(s)
-        if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Codex')
+        if (accountPools.mode === 'auto' && usageLimitSurface('codex', pane) || accountMaintenanceHoldsTask(s)) {
+          // Paused by a usage limit or owned by an account handover: kept, as
+          // for Claude, for the handover or the limit's reset to resume.
+          if (s.teamActiveTaskId) teamTurnProof.add(s.id)
+          if (idleTask) log('re-adopted Codex session paused for its account', s.id.slice(0, 8))
+        } else if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Codex')
         if (ts || hadTurnState) log('cleared stale Codex turn status', s.id.slice(0, 8))
       }
       continue
@@ -4555,6 +4573,14 @@ async function reconcileIdleCodexCoordinator(team, coordinator) {
   if (decision.observation) teamCoordinatorIdleProof.set(team.id, decision.observation)
   else reset()
   if (decision.action !== 'release') return false
+  if (accountPools.mode === 'auto' && codexUsageLimitSurface(pane)) {
+    // A usage limit ended this turn unfinished. Keep its authority for the
+    // handover or the limit's reset to resume, rather than releasing it into a
+    // continuation that the exhausted account would only fail again.
+    if (coordinator.codexTurnStartedAt) { stopPoller(coordinator); saveStateNow(state) }
+    reset()
+    return false
+  }
 
   // No awaits between the final identity check above and this mutation: a new
   // prompt/hook cannot replace the observed turn and then have its fences
@@ -6725,6 +6751,15 @@ function readModel(session) {
   return null
 }
 
+// In auto mode a new session starts on the account the monitor would move it to
+// anyway, so it never begins on an exhausted login. Its channel does not exist
+// yet, so the default group decides.
+function newSessionLaunchAccount(provider) {
+  if (!accountPools.enabled) return null
+  try { return accountPools.launchSelection({ channelId: null, provider }) }
+  catch (error) { log('new session account selection unavailable', String(error?.message || error)); return null }
+}
+
 async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
   const cwd = path.resolve(dir.replace(/^~/, process.env.HOME))
   if (!isPathWithin(process.env.HOME, cwd) || !fs.existsSync(cwd)) return post(channel, `❌ Directory not allowed or missing: \`${cwd}\``)
@@ -6751,10 +6786,11 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
     const pendingTimer = setTimeout(() => pendingSpawnChannels.delete(tmuxName), 10 * 60000)
     pendingTimer.unref?.()
   }
-  await post(channel, `🚀 Spawning \`${providerCommand(provider)} ${flags.join(' ')}\` in \`${cwd}\`${account ? ` under \`${account}\`` : ''}…`)
+  const launch = account ? null : newSessionLaunchAccount(provider)
+  await post(channel, `🚀 Spawning \`${providerCommand(provider)} ${flags.join(' ')}\` in \`${cwd}\`${account ? ` under \`${account}\`` : launch ? ` on ${launch.email}` : ''}…`)
   await executionNodes.spawn(LOCAL_NODE_ID, {
     cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName,
-    autoConsent: provider === 'claude', account, provider,
+    autoConsent: provider === 'claude', account: account || launch?.account || null, accountKind: launch?.accountKind || null, provider,
     accountPool: accountPools.enforcing,
   })
   let up = false
@@ -7092,8 +7128,17 @@ function accountPoolBlockReason(session, reserved = false, taskMaintenance = nul
 // itself: its team task, its automation's ownership and the Claude turn the
 // limit already ended. Questions, permissions, provider switches, other
 // maintenance, private turns and in-flight team deliveries still block.
+// The pane shows a turn a usage limit ended and nothing newer: 'menu' while
+// Claude's chooser is open, otherwise 'ended'. A Codex notice counts only on an
+// idle input surface.
+function usageLimitSurface(provider, pane) {
+  if (provider === 'claude') return claudeUsageLimitSurface(pane)
+  return provider === 'codex' && targetStartupState('codex', pane) === 'ready' && codexUsageLimitSurface(pane) ? 'ended' : null
+}
+
 async function usageLimitBlockReason(session, taskMaintenance = null, { reserved = false } = {}) {
-  if (providerOf(session) !== 'claude' || !session.tmux || !(session.pid && pidAlive(session.pid))) return 'provider is dormant'
+  const provider = providerOf(session)
+  if (!['claude', 'codex'].includes(provider) || !session.tmux || !(session.pid && pidAlive(session.pid))) return 'provider is dormant'
   if (taskMaintenance) assertTaskMaintenance(state, session, taskMaintenance)
   else if (session.teamActiveTaskId || session.teamStandingTaskId) return 'team task checkpoint unavailable'
   const automation = Object.values(state.automations || {}).find(record => automationOwnsSession(record, session))
@@ -7104,9 +7149,12 @@ async function usageLimitBlockReason(session, taskMaintenance = null, { reserved
       (task.messages || []).some(message => teamMessageDeliveries.has(message.id)))) return 'team message delivery in progress'
   const context = bulkUpdateContext()
   if (reserved) context.restartingSessionIds.delete(session.id)
-  // A turn that failed at once leaves a poller that never saw a spinner.
-  if (claudeUsageLimitSurface(await tmuxCapture(session.tmux))) context.busySessionIds.delete(session.id)
-  return bulkUpdateBlockReason({ ...session, teamActiveTaskId: null }, { ...context, automations: {} })
+  // A turn that failed at once leaves a poller that never saw a spinner, and a
+  // Codex turn marker the limit's error never cleared.
+  const ended = usageLimitSurface(provider, await tmuxCapture(session.tmux))
+  if (ended) context.busySessionIds.delete(session.id)
+  return bulkUpdateBlockReason({ ...session, teamActiveTaskId: null, ...(ended ? { codexTurnStartedAt: null } : {}) },
+    { ...context, automations: {} })
 }
 
 // Bash-tool shells Claude is running in the background. The restart ends the
@@ -7133,28 +7181,35 @@ async function claudeBackgroundShells(session) {
 // it is dismissed with one Escape only. The rest is the ordinary idle and
 // authority proof.
 async function prepareUsageLimitRestart(session, taskMaintenance) {
+  const provider = providerOf(session)
   const expected = { id: session.id, pid: session.pid, tmux: session.tmux }
   const authoritative = () => session.id === expected.id && session.pid === expected.pid && session.tmux === expected.tmux
   if (await usageLimitBlockReason(session, taskMaintenance, { reserved: true })) throw new Error('account_switch_blocked')
-  const surface = claudeUsageLimitSurface(await tmuxCapture(expected.tmux))
-  let { pane, dismissed } = await dismissClaudeUsageLimitMenu({
-    capture: () => tmuxCapture(expected.tmux),
-    sendKey: async key => {
-      if (!authoritative()) throw new Error('account_switch_not_proven_idle')
-      await execFile('tmux', ['send-keys', '-t', expected.tmux, key])
-    },
-    sleep,
-  })
-  if (dismissed) { await sleep(500); pane = await tmuxCapture(expected.tmux) }
-  if (targetStartupState('claude', pane) !== 'ready' || extractSpinner(pane)) throw new Error('account_switch_not_proven_idle')
-  const shells = await claudeBackgroundShells(session)
+  const idle = pane => targetStartupState(provider, pane) === 'ready' && !(provider === 'claude' && extractSpinner(pane))
+  let pane = await tmuxCapture(expected.tmux)
+  const surface = usageLimitSurface(provider, pane)
+  if (provider === 'claude') {
+    const result = await dismissClaudeUsageLimitMenu({
+      capture: () => tmuxCapture(expected.tmux),
+      sendKey: async key => {
+        if (!authoritative()) throw new Error('account_switch_not_proven_idle')
+        await execFile('tmux', ['send-keys', '-t', expected.tmux, key])
+      },
+      sleep,
+    })
+    pane = result.pane
+    if (result.dismissed) { await sleep(500); pane = await tmuxCapture(expected.tmux) }
+  }
+  if (!idle(pane)) throw new Error('account_switch_not_proven_idle')
+  const listShells = () => provider === 'claude' ? claudeBackgroundShells(session) : Promise.resolve([])
+  const shells = await listShells()
   await sleep(250)
   const repeated = await tmuxCapture(expected.tmux)
-  if (repeated !== pane || targetStartupState('claude', repeated) !== 'ready' || !authoritative() ||
-      !await validProviderRootClaim(expected.pid, expected.tmux, 'claude') ||
+  if (repeated !== pane || !idle(repeated) || !authoritative() ||
+      !await validProviderRootClaim(expected.pid, expected.tmux, provider) ||
       await usageLimitBlockReason(session, taskMaintenance, { reserved: true })) throw new Error('account_switch_not_proven_idle')
   const signature = list => list.map(shell => `${shell.pid}:${shell.pgid}`).join(',')
-  if (signature(await claudeBackgroundShells(session)) !== signature(shells)) throw new Error('account_background_process_changed')
+  if (signature(await listShells()) !== signature(shells)) throw new Error('account_background_process_changed')
   return { interrupted: Boolean(surface), shells }
 }
 
@@ -7194,6 +7249,56 @@ function queueUsageLimitResume(session, { interrupted, shells }) {
   const { prompt, note } = usageLimitResumeInput({ interrupted, shells, queued: queued.length })
   if (prompt) pendingBySid.set(session.id, [prompt, ...queued])
   return { note }
+}
+
+const USAGE_LIMIT_LIFTED_PROMPT = 'Your usage limit has reset; resume your task where you left off.'
+
+// A turn a usage limit paused waits until something resumes it. Once its own
+// account has measured capacity again, the monitor resumes held work in place,
+// only while the limit notice is still the pane's latest output.
+async function resumeSessionAfterLimit(session) {
+  const provider = providerOf(session)
+  if (!['claude', 'codex'].includes(provider) || !session.channel || !session.tmux ||
+      !(session.pid && pidAlive(session.pid)) || sessionByChannel(session.channel) !== session) return false
+  if (!usageLimitResumeWanted(session, {
+    automationOwned: Object.values(state.automations || {}).some(record => automationOwnsSession(record, session)),
+  }) || accountMaintenanceHoldsTask(session) || pendingBySid.get(session.id)?.length || drainingSessionInput.has(session.id) ||
+      Object.values(state.teamTasks || {}).some(task => task.targetSessionId === session.id &&
+        (task.messages || []).some(message => teamMessageDeliveries.has(message.id)))) return false
+  const expected = { id: session.id, pid: session.pid, tmux: session.tmux }
+  const authoritative = () => session.id === expected.id && session.pid === expected.pid && session.tmux === expected.tmux &&
+    sessionByChannel(session.channel) === session
+  let pane = await tmuxCapture(expected.tmux)
+  if (!usageLimitSurface(provider, pane)) return false
+  // The limit ended that turn: its stale poller and turn marker are not work.
+  // Questions, permissions, switches, maintenance and private turns still wait.
+  const context = bulkUpdateContext()
+  context.busySessionIds.delete(session.id)
+  if (bulkUpdateBlockReason({ ...session, teamActiveTaskId: null, codexTurnStartedAt: null },
+    { ...context, automations: {}, conversationMissing: () => false })) return false
+  if (provider === 'claude') {
+    ({ pane } = await dismissClaudeUsageLimitMenu({
+      capture: () => tmuxCapture(expected.tmux),
+      sendKey: async key => {
+        if (!authoritative()) throw new Error('session changed before its usage-limit chooser was closed')
+        await execFile('tmux', ['send-keys', '-t', expected.tmux, key])
+      },
+      sleep,
+    }))
+  }
+  if (!authoritative() || targetStartupState(provider, pane) !== 'ready' || provider === 'claude' && extractSpinner(pane) ||
+      !usageLimitSurface(provider, pane)) return false
+  session.usageLimitResumedAt = Date.now()
+  saveStateNow(state)
+  if (provider === 'codex') stopPoller(session) // end the turn the limit's error left open
+  try { await injectText(session, USAGE_LIMIT_LIFTED_PROMPT) }
+  catch (error) {
+    log('usage-limit resume not delivered', session.id.slice(0, 8), String(error?.message || error))
+    return false
+  }
+  log('resumed a turn after its usage limit reset', session.id.slice(0, 8))
+  await post(session.channel, '▶️ The usage limit on this account has reset, so SAB resumed the interrupted turn here.').catch(() => {})
+  return true
 }
 
 // The coordinator learns of the move from its own team inbox. The task is
@@ -8435,7 +8540,7 @@ async function launchAutomation(record) {
   // Start on the account the pool would move the session to anyway, so no
   // launch begins on an exhausted login. A ready native login is kept.
   let launchAccount = null
-  try { launchAccount = accountPools.enabled ? accountPools.launchSelection({ channelId: record.channelId, provider: record.provider }) : null }
+  try { launchAccount = accountPools.enabled ? accountPools.launchSelection({ channelId: record.channelId || null, provider: record.provider }) : null }
   catch (error) { log('automation launch account selection unavailable', record.externalKey, String(error?.message || error)) }
   if (launchAccount) log('automation launch account', record.externalKey, launchAccount.accountId)
   await executionNodes.spawn(LOCAL_NODE_ID, {
@@ -9116,12 +9221,13 @@ http.createServer(async (req, res) => {
       if (j.account && !account) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'invalid account name' })) }
       if (accountPools.enforcing && account) { res.writeHead(409); return res.end(JSON.stringify({ ok: false, error: 'Select pooled accounts only after reviewing the exact new channel route.' })) }
       const tmuxName = `sab-new-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`
+      const launch = account ? null : newSessionLaunchAccount(provider)
       await executionNodes.spawn(LOCAL_NODE_ID, {
         cwd, args: flags, title: `sab ${path.basename(cwd)}`, tmuxName,
-        autoConsent: provider === 'claude', account, provider,
+        autoConsent: provider === 'claude', account: account || launch?.account || null, accountKind: launch?.accountKind || null, provider,
         accountPool: accountPools.enforcing,
       })
-      log('spawned via /spawn', provider, cwd, JSON.stringify(flags), account ? `account=${account}` : '')
+      log('spawned via /spawn', provider, cwd, JSON.stringify(flags), account ? `account=${account}` : launch ? `pool account ${launch.accountId}` : '')
       res.end(JSON.stringify({ ok: true, tmux: tmuxName, provider }))
     } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e?.message || e) })) }
     return

@@ -484,10 +484,35 @@ return, a drain or a manual switch waits until the task is idle or reported.
   daemon restart. A handover rejected before teardown retries after 2 minutes,
   doubling up to 15, and is announced once.
 
-In auto mode, a new automation starts on the account the monitor would move it
-to anyway, so no launch begins on an exhausted native login. A native login
-with capacity is kept. Sessions created with `/sab-new` still start on the
-native login, because their channel does not exist yet.
+- **Resume in place.** When no other account had capacity, a paused turn stays
+  paused until its own account has measured capacity again. The monitor then
+  resumes it there, without a restart. It closes Claude's chooser with one
+  Escape and sends "Your usage limit has reset; resume your task where you left
+  off." This applies only to held work: a team task or turn, or an automation.
+  An owner's or collaborator's own session waits for their next message. It
+  happens at most once per 30 minutes per session, and only while the limit
+  notice is still the latest output.
+
+In auto mode, a new session starts on the account the monitor would move it to
+anyway, so no launch begins on an exhausted native login. A native login with
+capacity is kept. An automation uses its prepared channel's route. `/sab-new`
+and `/spawn` sessions, whose channel does not exist yet, choose from the
+default group among accounts without a channel allowlist. Codex launches stay
+on the native login: a Codex hook reports no account, so SAB could not bind a
+profile launch to the login it runs on.
+
+Codex sessions get the same handling:
+- **Notice.** Codex's limit sentences ("You've hit your usage limit…", "Usage
+  limit reached…", "You're out of credits…") count only in the visible tail of
+  an idle input surface.
+- **Pause.** In auto mode, a limit-ended Codex turn is paused instead of being
+  reported as finished, at boot and in the live poller. A Codex coordinator
+  keeps its turn instead of being released into a continuation.
+- **Handover and resume.** Held work moves when the group has another Codex
+  account with capacity, and otherwise resumes in place.
+- **Not needed for Codex.** Codex has no limit chooser and no Bash-tool
+  background shells.
+- **Testing.** Unit tests cover this path; no live Codex canary has run.
 
 ### Additional Codex login profiles
 

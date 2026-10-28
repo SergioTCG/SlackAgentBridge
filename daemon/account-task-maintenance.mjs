@@ -36,13 +36,13 @@ export function captureTaskMaintenance(state, session, taskId) {
 export function captureUsageLimitTaskMaintenance(state, session) {
   const activeId = session?.teamActiveTaskId || null, standingId = session?.teamStandingTaskId || null
   const taskId = activeId || standingId, task = state.teamTasks?.[taskId], team = state.teams?.[task?.teamId]
-  const standing = !activeId && task?.reservation === 'standing'
-  if (!session || (session.provider || 'claude') !== 'claude' || !taskId || (activeId && standingId) ||
+  const standing = !activeId && task?.reservation === 'standing', provider = session?.provider || 'claude'
+  if (!session || !['claude', 'codex'].includes(provider) || !taskId || (activeId && standingId) ||
       state.sessions?.[session.id] !== session || state.channels?.[session.channel] !== session.id ||
       channelNodeId(state, session.channel) !== LOCAL_NODE_ID || nodeIdForSession(session) !== LOCAL_NODE_ID ||
       !team || team.closedAt || team.members?.[session.channel]?.role !== 'worker' ||
       task.sourceChannel !== team.coordinatorChannel || task.targetNodeId && task.targetNodeId !== LOCAL_NODE_ID ||
-      task.targetSessionId !== session.id || task.targetChannel !== session.channel || task.targetProvider !== 'claude' ||
+      task.targetSessionId !== session.id || task.targetChannel !== session.channel || task.targetProvider !== provider ||
       (activeId ? task.reservation === 'standing' || !['running', 'awaiting_release'].includes(task.status) : !standing || task.status !== 'running') ||
       task.completionPolicy !== 'coordinator-release' || session.teamProviderTurnPending || session.teamProviderTurnDeferredFinal ||
       !Number.isSafeInteger(task.workGeneration) || !Number.isSafeInteger(task.providerWorkGeneration) ||

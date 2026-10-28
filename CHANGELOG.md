@@ -6,6 +6,24 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- A turn that a usage limit paused resumes in place once its own account has
+  measured capacity again, when no other account could take it.
+  - Auto mode only, and only for held work: a team task or turn, or an
+    automation.
+  - At most once per 30 minutes per session.
+  - Claude's chooser is closed with one Escape before the resume line is sent.
+- `/sab-new` and `/spawn` start a new Claude session on an account with
+  capacity in auto mode. They choose from the default group, because the
+  channel does not exist yet. An automation without a prepared channel does
+  the same.
+- Codex sessions get the usage-limit handling:
+  - Codex's limit notice is recognized.
+  - A limit-ended turn is paused rather than reported as finished.
+  - Held work is handed over to another Codex account with capacity, or else
+    resumed in place.
+
 ### Fixed
 
 - A session holding a team task now leaves an exhausted account. When a Claude

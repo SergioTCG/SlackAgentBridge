@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import {
   codexTerminalFailure,
   codexTerminalFailureDecision,
+  codexUsageLimitSurface,
   recordCodexPromptTurnStart,
   recordCodexTransportTurnStart,
   resetCodexPollerEvidence,
@@ -122,4 +123,19 @@ test('Codex live and restart paths finalize capacity failures visibly', () => {
   const failure = daemon.indexOf('const failureDecision = codexTerminalFailureDecision(')
   const idle = daemon.indexOf('const idleDecision = observeIdleCodexTurn(')
   assert.ok(failure > 0 && idle > failure, 'capacity failures must win before idle worker recovery')
+})
+
+test('a Codex usage limit is recognised only as a whole provider sentence in the visible tail', () => {
+  const tail = ['', '› Ask Codex to do anything', '', '  gpt-6-sol high · 100% context left · ~/Code/x']
+  for (const notice of [
+    "■ You've hit your usage limit. Upgrade to Pro, or try again at 4:15 PM.",
+    "■ Usage limit reached. You've reached your usage limit. Increase your limits to continue using codex.",
+    "■ You're out of credits. Your workspace is out of credits. Add credits to continue using Codex.",
+  ]) assert.equal(codexUsageLimitSurface(['• Working', notice, ...tail].join('\n')), 'ended', notice)
+  // Codex may wrap the sentence at a narrow width.
+  assert.equal(codexUsageLimitSurface(['■ You\'ve hit your usage', 'limit. Try again later.', ...tail].join('\n')), 'ended')
+  assert.equal(codexUsageLimitSurface(['• I hit a usage limit reached error earlier, then fixed it.', ...tail].join('\n')), null)
+  assert.equal(codexUsageLimitSurface(["■ You've hit your usage limit.", ...Array(14).fill('• newer output'), ...tail].join('\n')), null,
+    'an old notice outside the tail is history')
+  assert.equal(codexTerminalFailure(["■ You've hit your usage limit.", ...tail].join('\n')), null, 'a limit is not a terminal failure')
 })

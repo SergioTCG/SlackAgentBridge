@@ -118,7 +118,7 @@ test('a usage-limit checkpoint refuses dispatches, in-flight deliveries and unse
     f => { f.session.teamStandingTaskId = 'task-other' },
     f => { f.task.targetSessionId = 'someone-else' },
     f => { f.state.teams.team.closedAt = '2026-10-28T07:00:00.000Z' },
-    f => { f.session.provider = 'codex' },
+    f => { f.session.provider = 'pi' },
     f => { f.task.reservation = 'standing' },
   ]) {
     const f = usageLimitFixture(); mutate(f)
@@ -126,4 +126,14 @@ test('a usage-limit checkpoint refuses dispatches, in-flight deliveries and unse
     assert.throws(() => captureUsageLimitTaskMaintenance(f.state, f.session), /blocked/)
     assert.deepEqual(f.state, before)
   }
+})
+
+test('a usage-limit checkpoint covers a Codex worker only for a Codex task', () => {
+  const { state, session, task } = usageLimitFixture()
+  session.provider = 'codex'
+  assert.throws(() => captureUsageLimitTaskMaintenance(state, session), /blocked/, 'the task was assigned to Claude')
+  task.targetProvider = 'codex'
+  assert.equal(captureUsageLimitTaskMaintenance(state, session).taskId, task.id)
+  session.provider = 'pi'; task.targetProvider = 'pi'
+  assert.throws(() => captureUsageLimitTaskMaintenance(state, session), /blocked/)
 })

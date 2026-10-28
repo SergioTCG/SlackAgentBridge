@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { compileAccountRegistry } from '../daemon/account-registry.mjs'
-import { normalizeQuotaObservation } from '../daemon/account-quota.mjs'
+import { compileAccountRegistry, publicAccountRegistry } from '../daemon/account-registry.mjs'
+import { choosePoolAccount, normalizeQuotaObservation } from '../daemon/account-quota.mjs'
 import { createAccountPoolRuntime } from '../daemon/account-pool-runtime.mjs'
 
 const now = 1800000000000
@@ -760,4 +760,80 @@ test('concurrent reconciles of one handover settle it once', async () => {
   const results = await Promise.allSettled([1, 2].map(() => f.runtime.reconcile(f.session, { requestId })))
   assert.deepEqual(results.map(r => r.status).sort(), ['fulfilled', 'rejected'])
   assert.equal(f.settled.length, 1)
+})
+
+test('a paused turn resumes in place when its own account has measured capacity again, without moving it', async () => {
+  const resumed = []
+  const f = await usageLimitFixture({ quota: { primary: 40, secondary: 10 }, resumeAfterLimit: async session => { resumed.push(session.id); return true } })
+  holdTask(f)
+  await f.runtime.tick()
+  assert.deepEqual(resumed, [f.session.id])
+  assert.equal(f.restarts.length, 0, 'an in-place resume restarts nothing')
+  assert.equal(f.session.account, null)
+})
+
+test('an exhausted account is never resumed in place; it is handed over instead', async () => {
+  const resumed = []
+  const f = await usageLimitFixture({ resumeAfterLimit: async session => { resumed.push(session.id); return true } })
+  holdTask(f)
+  await f.runtime.tick()
+  assert.deepEqual(resumed, [])
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.restarts[0].usageLimit, true)
+})
+
+test('a /sab-new launch, whose channel does not exist yet, starts on the default group\'s account with capacity', async () => {
+  const f = await usageLimitFixture()
+  const selection = f.runtime.launchSelection({ channelId: null, provider: 'claude' })
+  assert.equal(selection.account, 'second')
+  assert.equal(selection.email, 'secondary@example.test')
+  assert.equal(f.runtime.launchSelection({ channelId: null, provider: 'codex' }), null, 'Codex reports no account to bind')
+  const healthy = await usageLimitFixture({ quota: { primary: 40, secondary: 10 } })
+  assert.equal(healthy.runtime.launchSelection({ channelId: null, provider: 'claude' }), null)
+})
+
+test('a new channel never starts on an account restricted to other channels', () => {
+  const registry = compileAccountRegistry({ schemaVersion: 1, requestId: 'restricted-fixture', accounts: [
+    { key: 'primary', provider: 'claude', email: 'primary@example.test', identityConfirmed: true, credentials: [{ kind: 'native-default' }] },
+    { key: 'client', provider: 'claude', email: 'client@example.test', identityConfirmed: true, credentials: [{ kind: 'legacy-claude', alias: 'client' }], allowedChannels: ['CCLIENT'] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['primary', 'client'] }], routing: { defaultGroup: 'mine', channels: {} } }, { legacyAccounts: 'client=PRIVATE-CLIENT\n' })
+  const view = publicAccountRegistry(registry)
+  const observed = (key, utilization) => normalizeQuotaObservation({ provider: 'claude', observedAt: now,
+    identity: { email: `${key}@example.test`, principalId: view.accounts.find(a => a.key === key).id },
+    quota: { five_hour: { utilization, resets_at: new Date(now + 3600000).toISOString() } } })
+  const observations = Object.fromEntries(view.accounts.map(a => [a.id, observed(a.key, a.key === 'primary' ? 99 : 10)]))
+  const primary = view.accounts.find(a => a.key === 'primary').id
+  assert.equal(choosePoolAccount(view, { channelId: null, provider: 'claude', currentAccountId: primary, observations, now, newChannel: true }).accountId, null)
+  assert.throws(() => choosePoolAccount(view, { channelId: null, provider: 'claude', observations, now }), /invalid_pool_selection/)
+  assert.throws(() => choosePoolAccount(view, { channelId: 'CNEW', provider: 'claude', observations, now, newChannel: true }), /invalid_pool_selection/)
+})
+
+test('a Codex session holding a task on an exhausted account is handed over like Claude', async () => {
+  const record = compileAccountRegistry({ schemaVersion: 1, requestId: 'codex-limit-fixture', accounts: [
+    { key: 'primary', provider: 'codex', email: 'primary@example.test', identityConfirmed: true, credentials: [{ kind: 'native-default' }] },
+    { key: 'secondary', provider: 'codex', email: 'secondary@example.test', identityConfirmed: true, credentials: [{ kind: 'codex-profile', profile: 'second' }] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['primary', 'secondary'] }], routing: { defaultGroup: 'mine', channels: {} } })
+  const session = { id: 'codex-native', channel: 'CMINE', provider: 'codex', pid: 500, tmux: 'sab-native', cwd: '/codex',
+    model: 'gpt-6-sol', requestedModel: 'gpt-6-sol', effort: 'xhigh', requestedEffort: 'xhigh', launchFlags: '--yolo' }
+  const state = { channels: { CMINE: session.id }, sessions: { [session.id]: session } }
+  const restarts = []
+  let quota = { primary: 10, secondary: 10 }
+  const runtime = createAccountPoolRuntime({ state, mode: 'auto', readRegistry: () => record, persist: () => {}, now: () => now,
+    blockReason: heldWork, usageLimitBlockReason: async () => null, verifyIdentity: async () => 'verified',
+    readQuota: async account => normalizeQuotaObservation({ provider: 'codex', observedAt: now, identity: { email: account.email, principalId: account.id },
+      quota: { ordinaryUsageAllowed: true, rateLimits: { limitId: 'codex', primary: { usedPercent: quota[account.key], resetsAt: Math.floor((now + 3600000) / 1000) } } } }),
+    restart: async (current, profile, options) => { restarts.push(options); current.account = profile; current.pid = 501 } })
+  await runtime.switchAccount(session, 'secondary@example.test', { requestId: 'prove-outward' })
+  await runtime.switchAccount(session, 'primary@example.test', { requestId: 'prove-return' })
+  restarts.length = 0; quota = { primary: 99, secondary: 10 }
+  const f = { state, session }
+  const tasks = holdTask(f)
+  state.teamTasks['task-held'].targetProvider = 'codex'
+  await runtime.tick()
+  assert.equal(restarts.length, 1)
+  assert.equal(restarts[0].usageLimit, true)
+  assert.equal(restarts[0].taskMaintenance.kind, 'usage-limit')
+  assert.equal(session.account, 'second')
+  tasks['task-held'].targetProvider = 'codex'
+  assert.deepEqual(state.teamTasks, tasks)
 })

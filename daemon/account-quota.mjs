@@ -60,16 +60,20 @@ export function quotaReadiness(observation, { now = Date.now(), maxAgeMs = 60000
     : { ready: false, reason: 'headroom-exhausted', headroom }
 }
 
+// A channel created after launch (`newChannel`) has no route of its own yet: it
+// lands in the default group, and only accounts without a channel allowlist
+// can serve it.
 export function choosePoolAccount(registry, { channelId, provider, currentAccountId = null, preferredAccountId = null,
   observations = {}, reservations = {}, now = Date.now(), lastSwitchedAt = 0,
-  resetConfirmedAfter = Infinity, cooldownMs = 900000, minBenefitPercent = 20,
+  resetConfirmedAfter = Infinity, cooldownMs = 900000, minBenefitPercent = 20, newChannel = false,
 } = {}) {
-  if (!/^[CG][A-Z0-9]{1,32}$/.test(channelId || '') || !['claude', 'codex'].includes(provider)) fail('invalid_pool_selection')
-  const groupId = registry.routing.channels[channelId] || registry.routing.defaultGroupId
+  if (!(newChannel ? channelId == null : /^[CG][A-Z0-9]{1,32}$/.test(channelId || '')) ||
+      !['claude', 'codex'].includes(provider)) fail('invalid_pool_selection')
+  const groupId = newChannel ? registry.routing.defaultGroupId : registry.routing.channels[channelId] || registry.routing.defaultGroupId
   const group = registry.groups.find(g => g.id === groupId)
   if (!group) fail('invalid_pool_selection')
   const candidates = registry.accounts.filter(a => group.members.includes(a.id) && a.provider === provider &&
-    (a.allowedChannels === null || a.allowedChannels.includes(channelId)))
+    (a.allowedChannels === null || !newChannel && a.allowedChannels.includes(channelId)))
   const principalReservations = new Map()
   for (const [id, percent] of Object.entries(reservations)) {
     if (!finite(percent) || percent < 0) fail('invalid_pool_reservation')

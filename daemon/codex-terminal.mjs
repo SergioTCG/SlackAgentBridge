@@ -35,6 +35,25 @@ export function codexTerminalFailure(pane) {
   return null
 }
 
+// Codex ends a turn at a usage limit with one of these provider sentences
+// (Codex CLI 0.162): "You've hit your usage limit…", "Usage limit reached.
+// You've reached your usage limit…" or "You're out of credits…". Like the
+// capacity banner, it counts only in the visible tail and only as a whole
+// rendered sentence, never as a quoted substring of model output.
+const usageLimitPattern = /^(?:[■⚠!•]\s*(?:️)?\s*)?(?:You['’]ve (?:hit|reached) your usage limit|Usage limit reached\.|You['’]re out of credits\.)/i
+
+export function codexUsageLimitSurface(pane) {
+  const rendered = stripTerminalControls(pane).split('\n')
+  while (rendered.length && !rendered.at(-1).trim()) rendered.pop()
+  const lines = rendered.slice(-CODEX_FAILURE_TAIL_LINES)
+  for (let start = 0; start < lines.length; start++) {
+    for (let length = 1; length <= 3 && start + length <= lines.length; length++) {
+      if (usageLimitPattern.test(compact(lines.slice(start, start + length).join(' ')))) return 'ended'
+    }
+  }
+  return null
+}
+
 export function codexTerminalFailureDecision({
   pane = '',
   ready = false,
