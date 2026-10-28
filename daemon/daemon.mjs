@@ -287,6 +287,7 @@ const accountPools = createAccountPoolRuntime({
     },
     mutate: current => { current.account = alias; current.accountKind = accountCredentialReference(options.account).kind },
     afterStop: () => usageLimit?.shells.length ? stopClaudeBackgroundShells(usageLimit.shells) : null,
+    resumesTurn: Boolean(options.usageLimit),
     }) } catch (error) {
       // A failed idle/child-process/authority proof never reached mutation or
       // teardown. Do not strand an untouched task behind a recovery fence.
@@ -1853,10 +1854,11 @@ async function readoptStatus() {
       const idleTask = readoptedTeamTaskFingerprint(s)
       try { const sz = fs.statSync(s.transcript).size; if (Number.isFinite(sz) && sz !== s.offset) { s.offset = sz; log('re-anchored idle session', s.id.slice(0, 8), 'offset→EOF') } } catch {}
       if (ts) { try { await web.chat.delete({ channel: s.channel, ts }) } catch {} }
-      if (claudeUsageLimitSurface(pane) || accountMaintenanceHoldsTask(s)) {
+      if (accountPools.mode === 'auto' && claudeUsageLimitSurface(pane) || accountMaintenanceHoldsTask(s)) {
         // A usage limit ended this turn unfinished and the conversation is
-        // intact: it is paused, not lost, as is a turn an account handover owns.
-        // Its task, turn authority and input reservation stay to be resumed.
+        // intact: it is paused, not lost, and the automatic handover resumes
+        // it, as it does a turn an account handover already owns. Its task, turn
+        // authority and input reservation stay.
         if (s.teamActiveTaskId) teamTurnProof.add(s.id)
         if (idleTask) log('re-adopted session paused for its account', s.id.slice(0, 8))
       } else if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Claude Code')
@@ -2364,7 +2366,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     log('ignored hook from superseded pid', ev, pid, 'current', session.pid, String(sid).slice(0, 8))
     return
   }
-  if (session && ev !== 'SessionStart' && stoppedProviderPids.has(Number(pid))) {
+  if (session && ev !== 'SessionStart' && providerStoppedForHandover(pid)) {
     log('ignored hook from a provider SAB stopped', ev, pid, String(sid).slice(0, 8))
     return
   }
@@ -3763,23 +3765,32 @@ function releaseSessionMaintenance(reservation, currentSession = null) {
   }
 }
 
-// Claude sends SessionEnd when SAB closes its tmux for a restart. That hook is
-// not the session ending: it must not fail its task or revoke its turn.
-const stoppedProviderPids = new Map() // pid → stoppedAt, for processes SAB stopped
+// Claude sends SessionEnd when SAB closes its tmux. During a usage-limit
+// handover that hook is not the session ending: the same turn is resumed, so it
+// must not fail its task or revoke its turn. Other restarts keep the old rule.
+const stoppedProviderPids = new Map() // pid → stoppedAt, for processes a usage-limit handover stopped
+const STOPPED_PROVIDER_PID_TTL_MS = 10 * 60000
+function providerStoppedForHandover(pid) {
+  const at = stoppedProviderPids.get(Number(pid))
+  if (at === undefined) return false
+  if (Date.now() - at < STOPPED_PROVIDER_PID_TTL_MS) return true
+  stoppedProviderPids.delete(Number(pid))
+  return false
+}
 function rememberStoppedProviderPid(pid) {
   const now = Date.now()
-  for (const [known, at] of stoppedProviderPids) if (now - at > 10 * 60000) stoppedProviderPids.delete(known)
+  for (const [known, at] of stoppedProviderPids) if (now - at >= STOPPED_PROVIDER_PID_TTL_MS) stoppedProviderPids.delete(known)
   if (Number(pid) > 1) stoppedProviderPids.set(Number(pid), now)
 }
 
-async function stopReservedSession(session, reservation, message = null) {
+async function stopReservedSession(session, reservation, message = null, { resumesTurn = false } = {}) {
   if (message) await post(reservation.channel, message).catch(error =>
     log('maintenance notice failed', reservation.sessionId.slice(0, 8), String(error)))
   if (!maintenanceSessionIsAuthoritative(session, reservation)) {
     throw new Error('the session changed while its maintenance notice was being posted; no provider was stopped')
   }
   const oldPid = session.pid
-  rememberStoppedProviderPid(oldPid)
+  if (resumesTurn) rememberStoppedProviderPid(oldPid)
   if (session.tmux) await tmuxKill(session.tmux)
   if (oldPid && pidAlive(oldPid)) { try { process.kill(oldPid) } catch {} }
   stopPoller(session)
@@ -5998,6 +6009,7 @@ function accountMaintenanceHoldsTask(session) {
 
 async function failTeamTaskForSession(session, reason, { preserveReported = false } = {}) {
   if (accountMaintenanceHoldsTask(session)) {
+    if (clearTeamTurn(session)) saveStateNow(state)
     log('kept team task under account maintenance', session.id.slice(0, 8), String(reason).slice(0, 120))
     return false
   }
@@ -7027,6 +7039,7 @@ async function restartSessionWithMutation(session, {
   mutate,
   beforeMutation,
   afterStop,
+  resumesTurn = false,
 } = {}) {
   if (claudeConversationGone(session)) throw new Error('no conversation to resume yet: send this Claude session a first message, then try again. Nothing was changed.')
   const reservation = reserveSessionMaintenance(session, { expectedSessionId })
@@ -7042,7 +7055,7 @@ async function restartSessionWithMutation(session, {
     // Journal operator intent before teardown. A daemon crash in the restart
     // window must resume with the newly selected setting, account, or flags.
     saveStateNow(state)
-    await stopReservedSession(session, reservation)
+    await stopReservedSession(session, reservation, null, { resumesTurn })
     if (afterStop) await afterStop()
     await resurrect(session)
     if (!session.tmux || !(await tmuxAlive(session.tmux))) {
@@ -9638,7 +9651,7 @@ setInterval(async () => {
   for (const s of Object.values(state.sessions)) {
     if (s.pid && !pidAlive(s.pid)) {
       // A SAB restart stopped this process itself and is resuming the session.
-      if (restarting.has(s.id) || stoppedProviderPids.has(Number(s.pid))) continue
+      if (restarting.has(s.id) || providerStoppedForHandover(s.pid)) continue
       log('sweep: pid dead', s.pid, s.id.slice(0, 8))
       const switching = transitionForSession(state, s.id)
       stopPoller(s)

@@ -447,12 +447,13 @@ return, a drain or a manual switch waits until the task is idle or reported.
   "usage-limit"`) and stays byte-for-byte unchanged: same ID and status, and no
   failure, completion or release. Team controls are fenced until the handover
   settles, as for reported-task maintenance. Claude sends SessionEnd when SAB
-  closes its tmux; hooks from a process SAB stopped are ignored, so they cannot
-  fail the task or revoke the interrupted turn's authority. Nothing else fails
-  a task while its handover is pending.
-- **Daemon restart.** A daemon restart keeps a turn a usage limit paused, with
-  its task, turn authority and input reservation, instead of failing it as an
-  unproven idle turn.
+  closes its tmux. For ten minutes, hooks from the process the handover stopped
+  are ignored, so they cannot fail the task or revoke the turn it resumes. While
+  the handover is pending, no other path fails the task; local input still
+  revokes the turn.
+- **Daemon restart.** In auto mode, a daemon restart keeps a turn a usage limit
+  paused, with its task, turn authority and input reservation, instead of
+  failing it as an unproven idle turn.
 - **Chooser.** Claude's limit chooser ends with "Switch to usage credits", which
   is paid usage on the exhausted account. SAB sends it one Escape, which cancels
   it and cannot select any option, and refuses the handover if it stays open.
