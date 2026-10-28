@@ -484,10 +484,48 @@ return, a drain or a manual switch waits until the task is idle or reported.
   daemon restart. A handover rejected before teardown retries after 2 minutes,
   doubling up to 15, and is announced once.
 
-In auto mode, a new automation starts on the account the monitor would move it
-to anyway, so no launch begins on an exhausted native login. A native login
-with capacity is kept. Sessions created with `/sab-new` still start on the
-native login, because their channel does not exist yet.
+- **Resume in place.** When no other account had capacity, a paused turn stays
+  paused until its own account has measured capacity again. The monitor then
+  resumes it there, without a restart. It closes Claude's chooser with one
+  Escape and sends "Your usage limit has reset; resume your task where you left
+  off."
+  - **Held work only:** a team task or turn, or an automation. An owner's or
+    collaborator's own session waits for their next message.
+  - **Pane text alone never triggers it.** The monitor records a pause only
+    while it measures that session's own account exhausted and the pane shows
+    the limit as its latest output. A boot that keeps a paused turn records one
+    too. Any new prompt or a handover clears it.
+  - **The resume needs a newer reading** of that account showing capacity.
+  - **One attempt per 30 minutes.** It is recorded before any key is sent.
+  - **Re-checked before the line goes in:** queued input, maintenance, a
+    question, a permission and a switch. For Codex, any live turn as well.
+
+In auto mode, a new session starts on the account the monitor would move it to
+anyway, so no launch begins on an exhausted native login. A native login with
+capacity is kept. An automation uses its prepared channel's route. `/sab-new`
+and `/spawn` sessions, whose channel does not exist yet, choose from the
+default group among accounts without a channel allowlist. Codex launches stay
+on the native login: a Codex hook reports no account, so SAB could not bind a
+profile launch to the login it runs on.
+
+Codex sessions get the same handling:
+- **Notice.** Codex's limit sentences ("You've hit your usage limit…", "Usage
+  limit reached…", "You're out of credits…") count only in the visible tail of
+  an idle input surface.
+- **Pause.** A limit-ended Codex turn is paused instead of being reported as
+  finished, at boot and in the live poller. A Codex coordinator keeps its turn
+  instead of being released into a continuation.
+  - The live poller pauses only when the pool can act: in auto mode, with the
+    session's own account measured exhausted.
+  - It never pauses a task that is still being dispatched.
+  - It posts a notice in the channel.
+- **Halt.** A Codex handover that ends uncertain halts only Codex handovers.
+- **Handover and resume.** Held work moves when the group has another Codex
+  account with capacity, and otherwise resumes in place.
+- **Not done for Codex.** Codex has no limit chooser. SAB does not inspect a
+  Codex session's child processes before the restart, as it does for Claude's
+  Bash-tool shells.
+- **Testing.** Unit tests cover this path; no live Codex canary has run.
 
 ### Additional Codex login profiles
 

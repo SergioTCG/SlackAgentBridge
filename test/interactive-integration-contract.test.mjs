@@ -87,6 +87,42 @@ test('a SAB restart never ends the held work it is resuming', () => {
   assert.match(fail, /^async function failTeamTaskForSession\([^\n]*\n\s+if \(accountMaintenanceHoldsTask\(session\)\) \{\n\s+if \(clearTeamTurn\(session\)\) saveStateNow\(state\)\n[^\n]*\n\s+return false/)
 })
 
+test('a turn a usage limit paused is resumed, never reported, failed or released', () => {
+  // Codex: the live poller pauses the limit-ended turn before its idle report,
+  // boot keeps it, and an idle coordinator keeps its authority.
+  const poller = daemon.indexOf("log('Codex turn paused at a usage limit'")
+  assert.ok(poller > 0 && poller < daemon.indexOf("'Codex returned to idle without its lifecycle completion hook. The accepted worker turn completed"))
+  assert.match(daemon, /if \(accountPools\.mode === 'auto' && usageLimitSurface\('codex', pane\) \|\| accountMaintenanceHoldsTask\(s\)\) \{[\s\S]*?\} else if \(idleTask\) await releaseIdleReadoptedTeamTaskIfStillIdle\(s, idleTask, 'Codex'\)/)
+  const coordinator = /async function reconcileIdleCodexCoordinator\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.ok(coordinator.indexOf('codexUsageLimitSurface(pane) && accountPools.measuredExhaustion(coordinator)') > 0 &&
+    coordinator.indexOf('codexUsageLimitSurface(pane)') < coordinator.indexOf('clearTeamTurn(coordinator)'))
+  // The in-place resume: held work only, rate-limited, the chooser closed with
+  // the one-Escape helper, then one bridge-injected line.
+  const resume = /async function resumeSessionAfterLimit\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.match(resume, /!session\.usageLimitPause/)
+  assert.ok(resume.indexOf('accountPools.assertInputAllowed(session)') < resume.indexOf('tmuxCapture('),
+    'policy and handover state are checked before the terminal is touched')
+  assert.ok(resume.indexOf('session.usageLimitResumedAt = Date.now()') < resume.indexOf('dismissClaudeUsageLimitMenu('),
+    'the attempt is recorded before any key')
+  assert.ok(resume.lastIndexOf('busy()') < resume.indexOf('injectText(session, USAGE_LIMIT_LIFTED_PROMPT)'))
+  assert.match(resume, /repeated !== pane/)
+  assert.match(resume, /provider === 'codex' && \(session\.codexTurnStartedAt \|\| codexPollers\.has\(session\.id\)\)/)
+  assert.doesNotMatch(resume, /send-keys', '-t', expected\.tmux, '(?:[0-9]|Enter)'/)
+  assert.match(daemon, /resumeAfterLimit: session => resumeSessionAfterLimit\(session\),/)
+  // Pause markers come only from measured exhaustion (or boot), and any new
+  // prompt or a handover clears them.
+  assert.match(daemon, /markLimitPause: \(session, accountId\) => markSessionLimitPause\(session, accountId\),/)
+  const prompts = fs.readFileSync(new URL('../daemon/prompt-submit.mjs', import.meta.url), 'utf8')
+  assert.match(prompts, /if \(session\.usageLimitPause\) \{\n\s+delete session\.usageLimitPause/)
+  assert.match(/function settleUsageLimitHandover\([\s\S]*?\n\}/.exec(daemon)?.[0] || '', /delete session\.usageLimitPause/)
+  // The Codex pause acts only where the pool can, never on a dispatch, and says so.
+  const pause = daemon.slice(daemon.indexOf('const exhaustion = idleDecision.action'), daemon.indexOf("log('Codex turn paused at a usage limit'"))
+  assert.match(pause, /accountPools\.measuredExhaustion\(session\)/)
+  assert.match(pause, /!session\.teamProviderTurnPending && heldTask\?\.status !== 'dispatching'/)
+  // New sessions start on an account with capacity.
+  assert.equal((daemon.match(/const launch = account \? null : newSessionLaunchAccount\(provider\)/g) || []).length, 2)
+})
+
 test('interactive actions are owner-only and revalidate exact authoritative bindings', () => {
   const handler = /async function handleSocketInteractive\(\{ body \}\) \{([\s\S]*?)\n\}\n\nconst socketCoordinator/.exec(daemon)?.[1] || ''
   assert.match(handler, /body\?\.user\?\.id !== USER/)

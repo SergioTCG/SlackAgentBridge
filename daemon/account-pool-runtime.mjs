@@ -40,6 +40,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   onSettled = () => {}, notify = async () => {}, now = Date.now, log = () => {},
   isDormant = async session => !session.pid && !session.tmux, adoptReplacement = async () => null,
   usageLimitBlockReason = async () => 'usage-limit maintenance unavailable',
+  resumeAfterLimit = async () => false, markLimitPause = async () => false,
 }) {
   mode = accountPoolMode(mode)
   const enabled = mode !== 'off', enforcing = ['manual', 'auto'].includes(mode), flights = new Map(), switching = new Set()
@@ -48,8 +49,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   // A usage-limit handover that ends uncertain halts the others until that
   // channel is reconciled, so a systematic failure strands one session, not all.
   // The journal is the record, so the halt also survives a daemon restart.
-  const usageLimitHalt = () => Object.values(poolState().switches).find(journal => journal?.usageLimit &&
-    journal.phase === 'interrupted' && authoritative(state.sessions?.[journal.sessionId])) || null
+  // Scoped by provider: a Codex path that ends uncertain never halts Claude's.
+  const usageLimitHalt = provider => Object.values(poolState().switches).find(journal => journal?.usageLimit &&
+    journal.phase === 'interrupted' && authoritative(state.sessions?.[journal.sessionId]) &&
+    providerOf(state.sessions[journal.sessionId]) === provider) || null
   let haltLogged = null
   const save = () => {
     try { persist() }
@@ -193,9 +196,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     if (!['manual', 'auto'].includes(mode)) fail('account_pool_read_only')
     if (!requestPattern.test(requestId || '')) fail('invalid_account_request')
     if (!authoritative(session, expectedSessionId)) fail('stale_account_session')
-    // Only the monitor declares a usage limit, for a Claude session it has just
-    // observed on an exhausted account. Owners keep the ordinary safe boundary.
-    if (usageLimit && (!automatic || preserveTask || providerOf(session) !== 'claude')) fail('account_switch_blocked')
+    // Only the monitor declares a usage limit, for a Claude or Codex session it
+    // has just observed on an exhausted account. Owners keep the ordinary safe
+    // boundary.
+    if (usageLimit && (!automatic || preserveTask || !['claude', 'codex'].includes(providerOf(session)))) fail('account_switch_blocked')
     const channelId = session.channel
     if (switching.has(channelId)) fail('account_switch_in_progress')
     const { record, view } = registry()
@@ -385,20 +389,37 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   }
   // A new session starts where the monitor would move it anyway, so no launch
   // begins on an exhausted login. Auto mode only; a ready native login stays.
-  const launchSelection = ({ channelId, provider }) => {
-    if (mode !== 'auto' || persistenceFailed || provider !== 'claude' || !/^[CG][A-Z0-9]{1,32}$/.test(channelId || '') ||
-        state.channels?.[channelId]) return null
+  // `channelId: null` is a channel created only after launch (`/sab-new`).
+  // Claude only: a Codex hook reports no account, so a profile launch could
+  // not be bound to the login it actually runs on.
+  const launchSelection = ({ channelId = null, provider }) => {
+    const newChannel = channelId == null
+    if (mode !== 'auto' || persistenceFailed || provider !== 'claude' ||
+        !newChannel && (!/^[CG][A-Z0-9]{1,32}$/.test(channelId) || state.channels?.[channelId])) return null
     const { record, view } = registry()
     const native = view.accounts.find(a => a.provider === provider && a.credentials.some(ref => ref.kind === 'native-default'))
     if (!native) return null
     const decision = choosePoolAccount(view, { channelId, provider, currentAccountId: native.id,
-      observations: data(record.revision), now: now(), reservations: {} })
+      observations: data(record.revision), now: now(), reservations: {}, newChannel })
     const target = decision.reason === 'capacity-handover' && decision.accountId !== native.id
       ? view.accounts.find(a => a.id === decision.accountId) : null
     const ref = target && accountCredentialReference(target)
-    if (!ref || !['legacy-claude', 'claude-profile'].includes(ref.kind)) return null
-    previewPoolAccountSelection(record, { channelId, provider, account: target.id })
+    if (!ref || !['legacy-claude', 'claude-profile'].includes(ref.kind) || target.lifecycle !== 'active') return null
+    if (!newChannel) previewPoolAccountSelection(record, { channelId, provider, account: target.id })
     return { account: ref.kind === 'legacy-claude' ? ref.alias : ref.profile, accountKind: ref.kind, accountId: target.id, email: target.email }
+  }
+  // The daemon's Codex poller pauses a limit-ended turn only when the pool can
+  // act on it: auto mode and the session's own account measured exhausted.
+  const measuredExhaustion = session => {
+    if (mode !== 'auto' || persistenceFailed || !authoritative(session)) return null
+    try {
+      const info = status(session.channel), source = info.currentAccount
+      const reading = source && info.accounts.find(a => a.id === source.id)
+      const reason = reading?.readiness?.reason
+      const exhausted = reason === 'headroom-exhausted' || reason === 'backend-denied' &&
+        reading.observation?.windows?.some(w => w.usedPercent >= 90)
+      return exhausted ? { accountId: source.id, email: source.email } : null
+    } catch { return null }
   }
   const tick = async () => {
     if (!enabled || tickRunning || persistenceFailed) return
@@ -420,6 +441,23 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         // reason is the account's own observed usage.
         const quotaExhausted = exhausted(info.decision.candidates.find(c => c.accountId === source.id)?.reason)
         const measuredExhausted = exhausted(info.accounts.find(a => a.id === source.id)?.readiness?.reason)
+        // Pane text alone never resumes anything: the daemon marks a held turn
+        // paused only while its account is measured exhausted. It resumes in
+        // place once a newer reading of that same account shows capacity again;
+        // nothing is restarted or moved.
+        const own = info.accounts.find(a => a.id === source.id)
+        if (measuredExhausted) {
+          try { await markLimitPause(session, source.id) }
+          catch (error) { log('usage-limit pause not recorded', session.channel, String(error?.message || error)) }
+        }
+        const pause = session.usageLimitPause
+        if (pause && pause.accountId !== source.id) { delete session.usageLimitPause; save() }
+        else if (pause && !measuredExhausted && own?.readiness?.ready && own.observation?.observedAt > pause.at) {
+          let resumed = false
+          try { resumed = await resumeAfterLimit(session) }
+          catch (error) { log('usage-limit resume deferred', session.channel, String(error?.message || error)) }
+          if (resumed) continue
+        }
         // The reservation estimate balances accounts that can all still work. An
         // account whose own usage is exhausted cannot run the next turn at all,
         // so measured capacity elsewhere is enough.
@@ -428,10 +466,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         // Only a measured usage limit moves a session whose own work is held:
         // that turn cannot progress on the exhausted account anyway. A
         // preference return, a drain or a manual switch waits for a safe boundary.
-        const usageLimit = measuredExhausted && providerOf(session) === 'claude'
+        const usageLimit = measuredExhausted && ['claude', 'codex'].includes(providerOf(session))
         if (blocked && !usageLimit) continue
         if (usageLimit) {
-          const halt = usageLimitHalt()
+          const halt = usageLimitHalt(providerOf(session))
           if (halt) {
             if (haltLogged !== halt.requestId) log('usage-limit handovers halted until this channel is reconciled', halt.channelId)
             haltLogged = halt.requestId
@@ -462,5 +500,8 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       }
     } finally { tickRunning = false }
   }
-  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, reconcile, tick, recover, assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed, launchSelection })
+  const accountIdFor = session => {
+    try { return enabled && authoritative(session) ? currentAccount(registry().view, session)?.id || null : null } catch { return null }
+  }
+  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, reconcile, tick, recover, assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed, launchSelection, measuredExhaustion, accountIdFor })
 }

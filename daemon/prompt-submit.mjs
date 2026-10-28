@@ -62,6 +62,11 @@ export function createPromptSubmitHandler({
 }) {
   return async function handlePromptSubmit({ session, sid, provider, body, targetClaim = null }) {
     const p = (body.prompt || '').trim()
+    // Any new prompt supersedes a turn a usage limit paused.
+    if (session.usageLimitPause) {
+      delete session.usageLimitPause
+      saveStateNow(state)
+    }
     const automationEcho = automationLifecycle.consumeInitialPromptEcho(sid, p)
     if (targetClaim || internalTurns.has(session.id)) {
       consumeInjected(sid, p)
