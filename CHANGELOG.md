@@ -46,6 +46,10 @@ Notable changes to this project. Format based on
   uncertain when that report arrived during its verification.
 - Two team tests read the real clock against a fixed one and began failing on
   2026-10-26 at 21:00Z.
+- A daemon restart no longer fails an active automation whose agent works in a
+  subfolder of its launch directory. Recovery re-checked the launch folder
+  against the session's current folder, which follows the agent. A record
+  failed this way is restored at the next recovery.
 
 ## [2.4.0] — 2026-10-26
 
