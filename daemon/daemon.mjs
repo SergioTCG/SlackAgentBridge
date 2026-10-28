@@ -1853,7 +1853,13 @@ async function readoptStatus() {
       const idleTask = readoptedTeamTaskFingerprint(s)
       try { const sz = fs.statSync(s.transcript).size; if (Number.isFinite(sz) && sz !== s.offset) { s.offset = sz; log('re-anchored idle session', s.id.slice(0, 8), 'offset→EOF') } } catch {}
       if (ts) { try { await web.chat.delete({ channel: s.channel, ts }) } catch {} }
-      if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Claude Code')
+      if (claudeUsageLimitSurface(pane) || accountMaintenanceHoldsTask(s)) {
+        // A usage limit ended this turn unfinished and the conversation is
+        // intact: it is paused, not lost, as is a turn an account handover owns.
+        // Its task, turn authority and input reservation stay to be resumed.
+        if (s.teamActiveTaskId) teamTurnProof.add(s.id)
+        if (idleTask) log('re-adopted session paused for its account', s.id.slice(0, 8))
+      } else if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Claude Code')
     }
   }
   saveState(state)
@@ -2356,6 +2362,10 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
   }
   if (session && isSupersededHook(ev, session.pid, pid)) {
     log('ignored hook from superseded pid', ev, pid, 'current', session.pid, String(sid).slice(0, 8))
+    return
+  }
+  if (session && ev !== 'SessionStart' && stoppedProviderPids.has(Number(pid))) {
+    log('ignored hook from a provider SAB stopped', ev, pid, String(sid).slice(0, 8))
     return
   }
   if (session && providerOf(session) !== provider) {
@@ -3753,6 +3763,15 @@ function releaseSessionMaintenance(reservation, currentSession = null) {
   }
 }
 
+// Claude sends SessionEnd when SAB closes its tmux for a restart. That hook is
+// not the session ending: it must not fail its task or revoke its turn.
+const stoppedProviderPids = new Map() // pid → stoppedAt, for processes SAB stopped
+function rememberStoppedProviderPid(pid) {
+  const now = Date.now()
+  for (const [known, at] of stoppedProviderPids) if (now - at > 10 * 60000) stoppedProviderPids.delete(known)
+  if (Number(pid) > 1) stoppedProviderPids.set(Number(pid), now)
+}
+
 async function stopReservedSession(session, reservation, message = null) {
   if (message) await post(reservation.channel, message).catch(error =>
     log('maintenance notice failed', reservation.sessionId.slice(0, 8), String(error)))
@@ -3760,6 +3779,7 @@ async function stopReservedSession(session, reservation, message = null) {
     throw new Error('the session changed while its maintenance notice was being posted; no provider was stopped')
   }
   const oldPid = session.pid
+  rememberStoppedProviderPid(oldPid)
   if (session.tmux) await tmuxKill(session.tmux)
   if (oldPid && pidAlive(oldPid)) { try { process.kill(oldPid) } catch {} }
   stopPoller(session)
@@ -5969,7 +5989,18 @@ async function releaseIdleReadoptedTeamTaskIfStillIdle(session, expected, label,
   return true
 }
 
+// An account handover owns its exact task until it settles: a provider stop or
+// idle surface during it is that maintenance, not the worker giving up.
+function accountMaintenanceHoldsTask(session) {
+  const task = state.teamTasks?.[session?.teamActiveTaskId || session?.teamStandingTaskId]
+  return Boolean(task && task.targetSessionId === session.id && taskMaintenancePending(state, task))
+}
+
 async function failTeamTaskForSession(session, reason, { preserveReported = false } = {}) {
+  if (accountMaintenanceHoldsTask(session)) {
+    log('kept team task under account maintenance', session.id.slice(0, 8), String(reason).slice(0, 120))
+    return false
+  }
   const taskId = session?.teamActiveTaskId
   const revokedTurn = clearTeamTurn(session)
   if (!taskId) {
@@ -7071,13 +7102,16 @@ async function usageLimitBlockReason(session, taskMaintenance = null, { reserved
 async function claudeBackgroundShells(session) {
   const panes = (await execFile('tmux', ['list-panes', '-s', '-t', session.tmux, '-F', '#{pane_id}'], { timeout: 5000 })).stdout.trim().split('\n')
   if (panes.length !== 1 || !panes[0]) throw new Error('account_background_panes')
-  const output = (await execFile('ps', ['-axww', '-o', 'pid=,ppid=,pgid=,command='], { timeout: 5000, maxBuffer: 16 << 20 })).stdout
+  const output = (await execFile('ps', ['-axo', 'pid=,ppid=,pgid='], { timeout: 5000, maxBuffer: 2 << 20 })).stdout
   const shells = []
   for (const line of output.split('\n')) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line)
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line)
     if (!match || Number(match[2]) !== session.pid) continue
-    const command = claudeBackgroundShellCommand(match[4])
-    if (command) shells.push({ pid: Number(match[1]), pgid: Number(match[3]), argv: match[4], command })
+    // Read each child's argv on its own: a command may span several lines.
+    let argv = ''
+    try { argv = (await execFile('ps', ['-ww', '-o', 'command=', '-p', match[1]], { timeout: 5000, maxBuffer: 1 << 20 })).stdout.replace(/\n$/, '') } catch { continue }
+    const command = claudeBackgroundShellCommand(argv)
+    if (command) shells.push({ pid: Number(match[1]), pgid: Number(match[3]), argv, command })
   }
   return shells
 }
@@ -7113,23 +7147,30 @@ async function prepareUsageLimitRestart(session, taskMaintenance) {
 
 // Stop exactly the shells named to the agent: same pid, group and argv as when
 // listed. A Bash-tool shell leads its own process group, so its jobs end too.
+// A group ID is not reused while any member lives, so a group that outlives
+// its leader is still that shell's group.
 async function stopClaudeBackgroundShells(shells) {
   const unchanged = async shell => {
     try {
-      const row = (await execFile('ps', ['-ww', '-o', 'pgid=,command=', '-p', String(shell.pid)], { timeout: 5000, maxBuffer: 1 << 20 })).stdout
-      const match = /^\s*(\d+)\s+(.+?)\s*$/s.exec(row)
-      return Boolean(match && Number(match[1]) === shell.pgid && match[2] === shell.argv)
+      const pgid = Number((await execFile('ps', ['-o', 'pgid=', '-p', String(shell.pid)], { timeout: 5000 })).stdout.trim())
+      const argv = (await execFile('ps', ['-ww', '-o', 'command=', '-p', String(shell.pid)], { timeout: 5000, maxBuffer: 1 << 20 })).stdout.replace(/\n$/, '')
+      return pgid === shell.pgid && argv === shell.argv
     } catch { return false }
   }
-  for (const signal of ['SIGTERM', 'SIGKILL']) {
-    let signalled = false
-    for (const shell of shells) {
-      if (!await unchanged(shell)) continue
-      try { process.kill(shell.pgid === shell.pid ? -shell.pgid : shell.pid, signal); signalled = true }
-      catch (error) { log('background shell stop failed', shell.pid, error?.code || String(error)) }
-    }
-    if (!signalled) return
-    await sleep(1000)
+  const target = shell => shell.pgid === shell.pid ? -shell.pgid : shell.pid
+  const signalled = []
+  for (const shell of shells) {
+    if (!await unchanged(shell)) continue
+    try { process.kill(target(shell), 'SIGTERM'); signalled.push(shell) }
+    catch (error) { log('background shell stop failed', shell.pid, error?.code || String(error)) }
+  }
+  if (!signalled.length) return
+  await sleep(1000)
+  for (const shell of signalled) {
+    try { process.kill(target(shell), 0) } catch { continue }
+    if (shell.pgid !== shell.pid && !await unchanged(shell)) continue
+    try { process.kill(target(shell), 'SIGKILL') }
+    catch (error) { log('background shell stop failed', shell.pid, error?.code || String(error)) }
   }
 }
 
@@ -9596,6 +9637,8 @@ setInterval(() => selfUpdate('interval').catch(e => log('self-update error', Str
 setInterval(async () => {
   for (const s of Object.values(state.sessions)) {
     if (s.pid && !pidAlive(s.pid)) {
+      // A SAB restart stopped this process itself and is resuming the session.
+      if (restarting.has(s.id) || stoppedProviderPids.has(Number(s.pid))) continue
       log('sweep: pid dead', s.pid, s.id.slice(0, 8))
       const switching = transitionForSession(state, s.id)
       stopPoller(s)

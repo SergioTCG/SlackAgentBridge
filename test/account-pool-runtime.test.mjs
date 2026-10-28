@@ -153,9 +153,11 @@ test('credential mismatch is rejected before teardown and does not poison the cu
 
 test('a rejected automatic handover names its cause once and backs off instead of retrying every tick', async () => {
   let time = now, idle = true, restarts = 0
+  // 89% leaves 11% measured headroom, which the reservation estimate exhausts:
+  // the ordinary path, not a usage limit.
   const { runtime, session, other, notices, state } = setup({ mode: 'auto', now: () => time,
     readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: time, identity: { email: account.email, principalId: account.id },
-      quota: { five_hour: { utilization: account.key === 'primary' ? 99 : 10, resets_at: new Date(time + 3600000).toISOString() } } }),
+      quota: { five_hour: { utilization: account.key === 'primary' ? 89 : 10, resets_at: new Date(time + 3600000).toISOString() } } }),
     restart: async (current, alias) => {
       if (!idle) throw Object.assign(new Error('account_switch_not_proven_idle'), { accountPreflightRejected: true })
       restarts++; current.account = alias; current.pid = 200
@@ -689,4 +691,73 @@ test('an uncertain usage-limit handover halts the others until it is reconciled'
   await f.runtime.reconcile(f.session, { requestId: f.state.accountPools.switches.CMINE.requestId })
   await f.runtime.tick()
   assert.equal(f.state.accountPools.switches.CTWO.phase, 'committed')
+})
+
+test('a usage limit, not the reservation estimate, decides whether held work moves', async () => {
+  const f = await usageLimitFixture({ quota: { primary: 89, secondary: 10 } })
+  holdTask(f)
+  assert.equal(f.runtime.status('CMINE').decision.candidates.find(c => c.reason === 'headroom-exhausted') !== undefined, true,
+    'the estimate calls the account exhausted')
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 0, 'held work stays while the account itself still has headroom')
+})
+
+test('a rejected usage-limit handover retries after 2 min and is announced once', async () => {
+  let time = now, idle = false
+  const logs = []
+  const f = await usageLimitFixture({ now: () => time, log: (...args) => logs.push(args),
+    readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: time, identity: { email: account.email, principalId: account.id },
+      quota: { five_hour: { utilization: account.key === 'primary' ? 99 : 10, resets_at: new Date(time + 3600000).toISOString() } } }),
+    restart: async (current, alias, options) => {
+      if (options.usageLimit && !idle) throw Object.assign(new Error('account_limit_menu_not_dismissed'), { accountPreflightRejected: true })
+      current.account = alias; current.pid = 200
+    } })
+  holdTask(f)
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'rejected')
+  assert.deepEqual(f.notices.map(n => n.notice), ["Account handover was rejected before teardown: Claude's usage-limit chooser did not close. " +
+    'The existing provider was not stopped. If it is still needed, SAB retries automatically in 2 min.'])
+  time += 60000; await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CMINE.attempt, undefined, 'no attempt inside the window')
+  time += 2 * 60000; await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CMINE.attempt, 2)
+  assert.equal(f.notices.length, 1, 'a repeated usage-limit rejection is logged, not announced')
+  assert.ok(logs.some(args => /rejected again/.test(args[0])))
+  idle = true; time += 5 * 60000; await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'committed')
+})
+
+test('the usage-limit halt is durable across a daemon restart and ends when the channel is reconciled', async () => {
+  const f = await usageLimitFixture({ restart: async (current, alias, options) => {
+    current.account = alias; current.pid = 200
+    if (options.usageLimit && current.channel === 'CMINE') throw new Error('resume never became ready')
+  } })
+  holdTask(f)
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted')
+  const disk = structuredClone(f.state)
+  const second = { id: 'native-two', channel: 'CTWO', pid: 102, tmux: 'sab-two', cwd: '/two', model: 'opus', effort: 'max', launchFlags: '--dsp' }
+  disk.sessions[second.id] = second; disk.channels.CTWO = second.id
+  const restarted = setup({ mode: 'auto', initialState: disk, readRegistry: () => f.registry, blockReason: heldWork, usageLimitBlockReason: async () => null,
+    readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: now, identity: { email: account.email, principalId: account.id },
+      quota: { five_hour: { utilization: account.key === 'primary' ? 99 : 10, resets_at: new Date(now + 3600000).toISOString() } } }) })
+  await restarted.runtime.tick()
+  assert.equal(restarted.state.accountPools.switches.CTWO, undefined, 'the halt survived the restart')
+  await restarted.runtime.reconcile(restarted.session, { requestId: restarted.state.accountPools.switches.CMINE.requestId })
+  await restarted.runtime.tick()
+  assert.equal(restarted.state.accountPools.switches.CTWO.phase, 'committed')
+})
+
+test('concurrent reconciles of one handover settle it once', async () => {
+  const f = await usageLimitFixture({ restart: async (current, alias, options) => {
+    current.account = alias; current.pid = 200
+    if (options.usageLimit) throw new Error('resume never became ready')
+  } })
+  holdTask(f)
+  await f.runtime.tick()
+  const requestId = f.state.accountPools.switches.CMINE.requestId
+  f.settled.length = 0
+  const results = await Promise.allSettled([1, 2].map(() => f.runtime.reconcile(f.session, { requestId })))
+  assert.deepEqual(results.map(r => r.status).sort(), ['fulfilled', 'rejected'])
+  assert.equal(f.settled.length, 1)
 })

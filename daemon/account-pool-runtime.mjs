@@ -22,8 +22,12 @@ const rejectionCauses = {
   account_limit_menu_not_dismissed: "Claude's usage-limit chooser did not close",
 }
 // A rejected automatic handover is retried after 15 min, doubling per
-// consecutive rejection up to 4 h, never on every monitor tick.
-const automaticRetryDelay = journal => Math.min(4 * 3600000, 900000 * 2 ** Math.min(4, (journal.attempt || 1) - 1))
+// consecutive rejection up to 4 h, never on every monitor tick. Held work on an
+// exhausted account cannot progress meanwhile, so it retries after 2 min,
+// doubling up to 15 min.
+const automaticRetryDelay = journal => journal.usageLimit
+  ? Math.min(900000, 120000 * 2 ** Math.min(3, (journal.attempt || 1) - 1))
+  : Math.min(4 * 3600000, 900000 * 2 ** Math.min(4, (journal.attempt || 1) - 1))
 const retryLabel = ms => ms < 3600000 ? `${Math.round(ms / 60000)} min` : `${Math.round(ms / 3600000)} h`
 export function accountPoolMode(value) {
   const mode = value || 'off'
@@ -43,7 +47,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   const deferred = new Map() // channel → last usage-limit refusal, logged once per change
   // A usage-limit handover that ends uncertain halts the others until that
   // channel is reconciled, so a systematic failure strands one session, not all.
-  let usageLimitHalt = null
+  // The journal is the record, so the halt also survives a daemon restart.
+  const usageLimitHalt = () => Object.values(poolState().switches).find(journal => journal?.usageLimit &&
+    journal.phase === 'interrupted' && authoritative(state.sessions?.[journal.sessionId])) || null
+  let haltLogged = null
   const save = () => {
     try { persist() }
     catch { persistenceFailed = true; fail('account_pool_persistence_failed') }
@@ -306,7 +313,8 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       if (!persistenceFailed) save()
       const cause = rejectionCauses[journal.reason] ? `: ${rejectionCauses[journal.reason]}` : ''
       const retry = automatic ? ` If it is still needed, SAB retries automatically in ${retryLabel(automaticRetryDelay(journal))}.` : ''
-      await notify(channelId, rejected ? `Account handover was rejected before teardown${cause}. The existing provider was not stopped.${retry}`
+      if (rejected && journal.usageLimit && journal.attempt > 1) log('usage-limit handover rejected again', channelId, journal.reason || error.message)
+      else await notify(channelId, rejected ? `Account handover was rejected before teardown${cause}. The existing provider was not stopped.${retry}`
         : 'Account handover did not establish a verified resume. No automatic retry will occur; inspect /sab-status.').catch(() => {})
       fail(rejected ? 'account_handover_rejected' : 'account_handover_uncertain')
     } finally { switching.delete(channelId) }
@@ -333,13 +341,14 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     if (journal.phase === 'reconciled') return { status: 'reconciled', requestId }
     if (journal.phase !== 'interrupted' || !session.tmux) fail('account_switch_blocked')
     if (!session.pid) await adoptLostReplacement(session, journal, expectedSessionId)
-    if (!session.pid || switching.has(session.channel) || await settledBlockReason(session, journal)) fail('account_switch_blocked')
-    const { record, view } = registry(), account = currentAccount(view, session)
-    if (!account || account.id !== journal.targetAccountId) fail('account_identity_unverified')
-    previewPoolAccountSelection(record, { channelId: session.channel, provider: providerOf(session), account: account.id })
-    const expected = { pid: session.pid, tmux: session.tmux }
+    if (!authoritative(session, expectedSessionId) || switching.has(session.channel) || poolState().switches[session.channel] !== journal) fail('stale_account_session')
     switching.add(session.channel)
     try {
+      if (!session.pid || await settledBlockReason(session, journal)) fail('account_switch_blocked')
+      const { record, view } = registry(), account = currentAccount(view, session)
+      if (!account || account.id !== journal.targetAccountId) fail('account_identity_unverified')
+      previewPoolAccountSelection(record, { channelId: session.channel, provider: providerOf(session), account: account.id })
+      const expected = { pid: session.pid, tmux: session.tmux }
       if (await verifyIdentity(session, account, { stage: 'replacement' }) !== 'verified' || !authoritative(session, expectedSessionId) ||
           session.pid !== expected.pid || session.tmux !== expected.tmux || readRegistry()?.revision !== record.revision ||
           poolState().switches[session.channel] !== journal || await settledBlockReason(session, journal)) fail('account_identity_unverified')
@@ -405,22 +414,29 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         const info = status(session.channel), source = info.currentAccount
         if (!source || !info.group.members.includes(source.id) ||
             (source.allowedChannels !== null && !source.allowedChannels.includes(session.channel))) continue
-        const currentReason = info.decision.candidates.find(c => c.accountId === source.id)?.reason
-        const quotaExhausted = currentReason === 'headroom-exhausted' || currentReason === 'backend-denied' &&
+        const exhausted = reason => reason === 'headroom-exhausted' || reason === 'backend-denied' &&
           poolState().observations[source.id]?.observation?.windows?.some(w => w.usedPercent >= 90)
+        // The estimate includes reservations for other sessions; the measured
+        // reason is the account's own observed usage.
+        const quotaExhausted = exhausted(info.decision.candidates.find(c => c.accountId === source.id)?.reason)
+        const measuredExhausted = exhausted(info.accounts.find(a => a.id === source.id)?.readiness?.reason)
         // The reservation estimate balances accounts that can all still work. An
-        // exhausted account cannot run the next turn at all, so measured
-        // capacity elsewhere is enough.
-        const target = info.decision.accountId || (quotaExhausted ? measuredCapacityTarget(session, source) : null)
+        // account whose own usage is exhausted cannot run the next turn at all,
+        // so measured capacity elsewhere is enough.
+        const target = info.decision.accountId || (measuredExhausted ? measuredCapacityTarget(session, source) : null)
         if (!target || source.id === target) continue
-        // Only a usage limit moves a session whose own work is held: that turn
-        // cannot progress on the exhausted account anyway. A preference return,
-        // a drain or a manual switch still waits for a safe boundary.
-        const usageLimit = quotaExhausted && providerOf(session) === 'claude'
+        // Only a measured usage limit moves a session whose own work is held:
+        // that turn cannot progress on the exhausted account anyway. A
+        // preference return, a drain or a manual switch waits for a safe boundary.
+        const usageLimit = measuredExhausted && providerOf(session) === 'claude'
         if (blocked && !usageLimit) continue
-        if (usageLimit && usageLimitHalt) {
-          if (poolState().switches[usageLimitHalt]?.phase === 'interrupted') continue
-          usageLimitHalt = null
+        if (usageLimit) {
+          const halt = usageLimitHalt()
+          if (halt) {
+            if (haltLogged !== halt.requestId) log('usage-limit handovers halted until this channel is reconciled', halt.channelId)
+            haltLogged = halt.requestId
+            continue
+          }
         }
         const draining = source.lifecycle === 'draining' || info.group.drainingMembers.includes(source.id)
         if (!quotaExhausted && !draining && info.decision.reason !== 'preferred-recovered') continue
@@ -435,12 +451,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
           deferred.delete(session.channel)
         } catch (error) {
           // A journaled outcome was already explained by switchAccount.
-          const journal = poolState().switches[session.channel]
-          if (usageLimit && journal?.requestId === requestId && journal.phase === 'interrupted') {
-            usageLimitHalt = session.channel
-            log('usage-limit handovers halted until this channel is reconciled', session.channel)
-          }
-          if (journal?.requestId === requestId || error.message === 'automatic_handover_unproven') continue
+          if (poolState().switches[session.channel]?.requestId === requestId || error.message === 'automatic_handover_unproven') continue
           // Held work that is not yet at a safe point for usage-limit maintenance
           // is retried on the next tick, not announced on every one.
           if (usageLimit) {

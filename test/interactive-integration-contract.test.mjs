@@ -63,6 +63,27 @@ test('a Claude session with no conversation yet is refused by every restart path
   }
 })
 
+test('a SAB restart never ends the held work it is resuming', () => {
+  // Claude sends SessionEnd when SAB closes its tmux. The stopped pid is
+  // remembered before teardown and every later hook from it is ignored, so it
+  // cannot fail a running task or revoke the interrupted turn's authority.
+  const stop = /async function stopReservedSession\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.ok(stop.indexOf('rememberStoppedProviderPid(oldPid)') >= 0 && stop.indexOf('rememberStoppedProviderPid(oldPid)') < stop.indexOf('tmuxKill('))
+  assert.match(daemon, /if \(session && ev !== 'SessionStart' && stoppedProviderPids\.has\(Number\(pid\)\)\) \{\n\s+log\('ignored hook from a provider SAB stopped'/)
+  assert.ok(daemon.indexOf("stoppedProviderPids.has(Number(pid))") < daemon.indexOf("if (ev === 'SessionEnd') {"))
+  // The liveness sweep leaves a restart's own stop to the restart.
+  assert.match(daemon, /if \(s\.pid && !pidAlive\(s\.pid\)\) \{\n\s+\/\/ [^\n]+\n\s+if \(restarting\.has\(s\.id\) \|\| stoppedProviderPids\.has\(Number\(s\.pid\)\)\) continue/)
+  // Daemon re-adoption keeps a turn a usage limit paused, with live-turn proof
+  // for its running task, instead of failing it as an unproven idle turn.
+  const idle = /if \(claudeUsageLimitSurface\(pane\) \|\| accountMaintenanceHoldsTask\(s\)\) \{[\s\S]*?\} else if \(idleTask\) await releaseIdleReadoptedTeamTaskIfStillIdle\(s, idleTask, 'Claude Code'\)/.exec(daemon)?.[0] || ''
+  assert.match(idle, /if \(s\.teamActiveTaskId\) teamTurnProof\.add\(s\.id\)/)
+  // Every path that fails a worker's task first yields to pending account
+  // maintenance, before it can revoke the session's turn.
+  const fail = /async function failTeamTaskForSession\([\s\S]*?\n\}/.exec(daemon)?.[0] || ''
+  assert.ok(fail.indexOf('if (accountMaintenanceHoldsTask(session))') >= 0 &&
+    fail.indexOf('if (accountMaintenanceHoldsTask(session))') < fail.indexOf('clearTeamTurn(session)'))
+})
+
 test('interactive actions are owner-only and revalidate exact authoritative bindings', () => {
   const handler = /async function handleSocketInteractive\(\{ body \}\) \{([\s\S]*?)\n\}\n\nconst socketCoordinator/.exec(daemon)?.[1] || ''
   assert.match(handler, /body\?\.user\?\.id !== USER/)

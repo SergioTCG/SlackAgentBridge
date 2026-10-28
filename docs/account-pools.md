@@ -434,7 +434,9 @@ the protections that exist for the held work itself:
 - the turn the limit ended. Claude can leave a poller that never saw a spinner,
   but the pane shows the limit notice as its latest output.
 
-It hands the session over to a ready account in its group. Questions,
+The account must be exhausted by its own measured usage. The reservation
+estimate for other sessions never moves held work. It hands the session over
+to a ready account in its group. Questions,
 permissions, provider switches, other maintenance, private turns, a dispatch,
 and a coordinator message or report that is still being delivered keep
 blocking it. Those are retried on the next tick and logged, not announced.
@@ -444,7 +446,13 @@ return, a drain or a manual switch waits until the task is idle or reported.
 - **Task.** The task is journaled as account maintenance (`taskMaintenance.kind:
   "usage-limit"`) and stays byte-for-byte unchanged: same ID and status, and no
   failure, completion or release. Team controls are fenced until the handover
-  settles, as for reported-task maintenance.
+  settles, as for reported-task maintenance. Claude sends SessionEnd when SAB
+  closes its tmux; hooks from a process SAB stopped are ignored, so they cannot
+  fail the task or revoke the interrupted turn's authority. Nothing else fails
+  a task while its handover is pending.
+- **Daemon restart.** A daemon restart keeps a turn a usage limit paused, with
+  its task, turn authority and input reservation, instead of failing it as an
+  unproven idle turn.
 - **Chooser.** Claude's limit chooser ends with "Switch to usage credits", which
   is paid usage on the exhausted account. SAB sends it one Escape, which cancels
   it and cannot select any option, and refuses the handover if it stays open.
@@ -471,7 +479,9 @@ return, a drain or a manual switch waits until the task is idle or reported.
   an exhausted account.
 - **Uncertain outcome.** A handover that ends uncertain halts further usage-limit
   handovers until that channel is reconciled, so a systematic failure strands
-  one session, not all.
+  one session, not all. The halt is read from the journal, so it survives a
+  daemon restart. A handover rejected before teardown retries after 2 minutes,
+  doubling up to 15, and is announced once.
 
 In auto mode, a new automation starts on the account the monitor would move it
 to anyway, so no launch begins on an exhausted native login. A native login

@@ -25,6 +25,15 @@ Notable changes to this project. Format based on
     boundary.
   - An uncertain outcome halts further usage-limit handovers until it is
     reconciled.
+  - Only the account's own measured usage counts, never the reservation
+    estimate.
+- A SAB restart no longer ends the work it resumes. The SessionEnd that
+  Claude sends when SAB closes its tmux used to fail a running delegated task
+  and revoke the interrupted turn's authority. Hooks from a process SAB stopped
+  are now ignored, the liveness sweep leaves a restart's own stop alone, and no
+  path fails a task while its account handover is pending. A daemon restart
+  keeps a turn a usage limit paused instead of failing it as an unproven idle
+  turn.
 - A session that leaves an exhausted account can use measured capacity
   elsewhere even when the reservation estimate is spent. Before, the last
   sessions of a large group stayed on the exhausted account.

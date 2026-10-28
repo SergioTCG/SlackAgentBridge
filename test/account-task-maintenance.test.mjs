@@ -102,8 +102,9 @@ test('a usage-limit checkpoint admits running delegated and standing tasks witho
 test('a usage-limit checkpoint keeps undelivered coordinator messages queued for after the restart', () => {
   const { state, session, task } = usageLimitFixture()
   task.workGeneration = 4
-  task.messages = [{ id: 'message_queued', workGeneration: 4, deliveryStatus: 'pending', providerDeliveryStatus: null }]
-  assert.equal(captureUsageLimitTaskMaintenance(state, session).taskId, task.id)
+  task.messages = [{ id: 'message_queued', workGeneration: 4, deliveryStatus: 'pending', providerDeliveryStatus: null },
+    { id: 'message_failed', workGeneration: 3, deliveryStatus: 'failed', providerDeliveryStatus: 'uncertain' }]
+  assert.equal(captureUsageLimitTaskMaintenance(state, session).taskId, task.id, 'a terminally failed message never changes again')
 })
 
 test('a usage-limit checkpoint refuses dispatches, in-flight deliveries and unsettled journals', () => {

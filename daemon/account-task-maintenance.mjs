@@ -31,7 +31,8 @@ export function captureTaskMaintenance(state, session, taskId) {
 // also admits a standing task and a running delegated task. It is still never a
 // lifecycle change: the whole journal must stay unchanged across the restart.
 // Coordinator messages that have not reached the provider stay queued for after
-// it; anything already being delivered, reported or replied blocks this attempt.
+// it, and a terminally failed one never changes again; anything still being
+// delivered, reported or replied blocks this attempt.
 export function captureUsageLimitTaskMaintenance(state, session) {
   const activeId = session?.teamActiveTaskId || null, standingId = session?.teamStandingTaskId || null
   const taskId = activeId || standingId, task = state.teamTasks?.[taskId], team = state.teams?.[task?.teamId]
@@ -48,8 +49,9 @@ export function captureUsageLimitTaskMaintenance(state, session) {
       task.providerWorkGeneration < 1 || task.providerWorkGeneration > task.workGeneration ||
       task.reports?.some(report => report.deliveryStatus !== 'delivered') ||
       task.replies?.some(reply => !teamReplyDeliverySettled(reply)) ||
-      task.messages?.some(message => message.deliveryStatus !== 'delivered' &&
-        (message.deliveryStatus !== 'pending' || message.providerDeliveryStatus))) {
+      task.messages?.some(message => message.providerDeliveryStatus === 'delivering' ||
+        !['delivered', 'pending', 'failed'].includes(message.deliveryStatus) ||
+        message.deliveryStatus === 'pending' && message.providerDeliveryStatus)) {
     fail('account_task_maintenance_blocked')
   }
   return { kind: 'usage-limit', taskId, sessionId: session.id, channelId: session.channel, teamId: task.teamId, digest: digest(task) }
