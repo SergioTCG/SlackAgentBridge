@@ -194,8 +194,9 @@ and echoed by its lifecycle hook. Native Claude alone exchanges a profile refres
 token through its documented non-browser `auth login` provisioning path. SAB
 performs that operation only after two inactivity checks under a launch-fencing
 lease; default machine credentials and live profile credentials are never
-refreshed by SAB. An uncertain refresh retains its lease and requires operator
-recovery/new-profile enrollment, rather than replaying a rotating token.
+refreshed by SAB. An uncertain refresh retains its lease and reads
+`needs-login`. Only the owner's verified sign-in (`sab account login-claude`)
+lifts it; a rotating token is never replayed.
 
 Owner edits use `account-management.mjs` and the existing immutable revision CAS.
 Request retries derive the original candidate from its immutable base revision,

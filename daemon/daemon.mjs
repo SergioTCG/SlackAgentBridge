@@ -297,6 +297,10 @@ const accountPools = createAccountPoolRuntime({
     return usageLimit ? queueUsageLimitResume(session, usageLimit) : null
   },
   notify: (channel, message) => post(channel, message),
+  notifyOwner: message => {
+    if (!state.control) throw new Error('no_control_channel') // tried again at the next reading
+    return post(state.control, message)
+  },
   log: (...args) => log(...args),
   usageLimitBlockReason: (session, taskMaintenance) => usageLimitBlockReason(session, taskMaintenance),
   resumeAfterLimit: session => resumeSessionAfterLimit(session),

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { compileAccountRegistry, publicAccountRegistry } from '../daemon/account-registry.mjs'
 import { choosePoolAccount, normalizeQuotaObservation } from '../daemon/account-quota.mjs'
-import { createAccountPoolRuntime } from '../daemon/account-pool-runtime.mjs'
+import { createAccountPoolRuntime, signInNotice } from '../daemon/account-pool-runtime.mjs'
 
 const now = 1800000000000
 const enrollment = () => ({ schemaVersion: 1, requestId: 'runtime-fixture', accounts: [
@@ -876,4 +876,54 @@ test('an uncertain Codex usage-limit handover never halts Claude handovers', asy
     phase: 'interrupted', at: now - 1, automatic: true }
   await f.runtime.tick()
   assert.equal(f.state.accountPools.switches.CMINE.phase, 'committed', 'the Claude session still moved')
+})
+
+test('an account that needs a new sign-in tells the owner once per episode, and retries a notice it could not post', async () => {
+  let clock = now, status = 'needs-login', posting = 'fail'
+  const owner = [], logged = []
+  const { runtime, state } = setup({ mode: 'shadow', now: () => clock, log: (...args) => logged.push(args.join(' ')),
+    notifyOwner: async message => { if (posting === 'fail') throw new Error('slack down'); owner.push(message) },
+    readQuota: async account => status === 'observed'
+      ? normalizeQuotaObservation({ provider: 'claude', observedAt: clock, identity: { email: account.email, principalId: account.id },
+        quota: { five_hour: { utilization: 10, resets_at: new Date(clock + 3600000).toISOString() } } })
+      : { provider: 'claude', observedAt: clock, status, windows: [], ...(status === 'needs-login' && { reason: 'timeout' }) } })
+  const read = async next => { status = next; clock += 4 * 3600001; await runtime.refresh('secondary'); await new Promise(resolve => setImmediate(resolve)) }
+  await read('needs-login')
+  assert.equal(owner.length, 0)
+  posting = 'ok'
+  await read('needs-login')
+  assert.equal(owner.length, 1, 'a notice that could not be posted is tried again')
+  await read('provider-unavailable'); await read('needs-login'); await read('throttled'); await read('needs-login')
+  assert.equal(owner.length, 1, 'other failed readings do not re-arm it')
+  assert.match(owner[0], /secondary@example\.test\* needs a new sign-in\. SAB's automatic renewal of its sign-in did not finish in time\./)
+  assert.doesNotMatch(owner[0], /sab account login/, 'a legacy credential has no profile to sign in to')
+  assert.equal(logged.filter(line => line === 'account sign-in needs renewing secondary timeout').length, 3, 'logged once per entry into needs-login')
+  await read('observed'); await read('needs-login')
+  assert.equal(owner.length, 2, 'a good reading re-arms it')
+  await read('scope-unavailable'); await read('needs-login')
+  assert.equal(owner.length, 3, 'so does any reading the provider accepted the credential for')
+  assert.ok(Object.values(state.accountPools.observations).every(o => o.observation.status !== 'needs-login' || o.nextPollAt <= clock + 300000),
+    'a needs-login account is read again within minutes')
+  const record = Object.values(state.accountPools.observations).find(o => o.observation.status === 'needs-login')
+  assert.equal(record.observation.reason, 'timeout')
+  assert.equal(record.ownerNotifiedAt, clock)
+
+  // A notice still being posted is not sent a second time.
+  let deliver
+  posting = 'slow'
+  const slow = setup({ mode: 'shadow', now: () => clock, notifyOwner: async message => { await new Promise(resolve => { deliver = resolve }); owner.push(message) },
+    readQuota: async () => ({ provider: 'claude', observedAt: clock, status: 'needs-login', windows: [], reason: 'failed' }) })
+  const before = owner.length
+  clock += 4 * 3600001; await slow.runtime.refresh('secondary'); await new Promise(resolve => setImmediate(resolve))
+  clock += 4 * 3600001; await slow.runtime.refresh('secondary'); await new Promise(resolve => setImmediate(resolve))
+  deliver(); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(owner.length, before + 1)
+
+  const profile = { email: 'profile@example.test', provider: 'claude', credentials: [{ kind: 'native-default' }, { kind: 'claude-profile', profile: 'work' }] }
+  assert.match(signInNotice(profile, { reason: 'rejected' }), /rejected SAB's automatic renewal.*Run `sab account login-claude work` on this Mac/)
+  assert.match(signInNotice(profile, { reason: 'wrong-account' }), /Its last sign-in was a different account\./)
+  assert.match(signInNotice({ ...profile, credentials: [{ kind: 'native-default' }] }, {}), /no longer accepts its saved sign-in\. Until then/)
+  const inUse = signInNotice(profile, { reason: 'failed' }, { inUse: true })
+  assert.match(inUse, /Sessions still use profile work, so sign in under a new profile name/)
+  assert.doesNotMatch(inUse, /sab account login-claude/)
 })

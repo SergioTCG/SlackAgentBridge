@@ -14,6 +14,8 @@
 #   sab account capabilities [--probe] [--json]
 #   sab account registry <plan|stage|status|check> ...
 set -euo pipefail
+# The native installer puts claude in ~/.local/bin, which a login shell may lack.
+command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$PATH"
 
 # Pool tooling must bypass the legacy registry's mkdir/chmod/create steps.
 # Explicit staging writes only its own inactive metadata, never credentials or
@@ -50,7 +52,6 @@ esac
 
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
 ACCOUNTS="$CONFIG_DIR/accounts"
-command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$PATH"
 
 mkdir -p "$CONFIG_DIR"
 [ -f "$ACCOUNTS" ] || { umask 177; : > "$ACCOUNTS"; }

@@ -6,6 +6,35 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- An account whose sign-in only its owner can renew now says so. Before, an
+  idle Claude profile whose automatic renewal failed read
+  `credential-unavailable` for good: SAB kept the profile locked, because the
+  attempt may have spent its rotating refresh token, but logged nothing and
+  told no one. `sab account login-claude` refused that lock too.
+  - The account reads `needs-login` with a reason code. So does a renewal
+    abandoned by a daemon restart, a managed Codex probe that failed, and a 401
+    from Claude's API.
+  - The control channel gets one notice per episode, naming the command to run,
+    or the new-profile route when sessions that refuse the sign-in still use
+    the profile. A notice that could not be posted is retried, and the account
+    is read again within five minutes.
+  - `sab account login-claude PROFILE` continues the lock and lifts it only once
+    the new sign-in is verified. The credential must be fresh and, if the
+    profile is registered to an account, belong to it. A cancelled or
+    wrong-account sign-in leaves the profile fenced. Dormant sessions on a
+    registered profile no longer block it.
+  - A renewal that fails before the token exchange, or a `claude` or Codex
+    that never started, releases its lock, since nothing was spent. The renewal closes its input and may take 30 seconds
+    instead of 20. One that Claude saved before it was stopped counts as
+    renewed.
+  - `sab account` finds the native installer's `~/.local/bin/claude` for every
+    subcommand, including `login-claude`.
+- A Claude profile also inherits the owner's answer to Claude's "Claude in
+  Chrome extension detected" dialog (`claudeInChromeDefaultEnabled`).
+  Unanswered, that dialog stopped a detached launch before SessionStart.
+
 ## [2.5.0] — 2026-10-28
 
 ### Added
