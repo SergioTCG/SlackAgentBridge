@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { readPrivateAccountFile } from './account-registry-store.mjs'
 import { normalizeQuotaObservation } from './account-quota.mjs'
 import { readLegacyClaudeToken } from './account-credentials.mjs'
-import { codexProfileHome, claudeProfileHome, accountCredentialReference, withAccountProfileLease } from './account-profiles.mjs'
+import { codexProfileHome, claudeProfileHome, accountCredentialReference, withAccountProfileLease, recordProfileLeaseFailure, profileNeedsLogin } from './account-profiles.mjs'
 import { readClaudeOAuth, refreshInactiveClaudeProfile } from './account-claude-auth.mjs'
 
 const execute = promisify(execFile)
@@ -85,7 +85,7 @@ async function readJson(url, credential, fetchImpl) {
 export async function probeCodexAccount(credential, { spawnChild = spawn, env = process.env, timeoutMs = 20000, managedHome = null } = {}) {
   if (!managedHome && (!secretString(credential.accessToken) || !secretString(credential.principalId))) safeCode('credential-unavailable')
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-account-quota-'))
-  let child, timer, killTimer, nextId = 0, bytes = 0, tail = '', exited = false
+  let child, timer, killTimer, nextId = 0, bytes = 0, tail = '', exited = false, spawned = false, readSettled = false
   const pending = new Map()
   const rejectPending = () => { for (const { reject } of pending.values()) reject(new Error('provider-unavailable')); pending.clear() }
   let resolveExit
@@ -98,6 +98,7 @@ export async function probeCodexAccount(credential, { spawnChild = spawn, env = 
       cwd: root, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'],
     })
     const terminate = () => { rejectPending(); child.kill('SIGTERM') }
+    child.once('spawn', () => { spawned = true })
     child.once('error', () => { exited = true; rejectPending(); resolveExit() })
     child.once('exit', () => { exited = true; rejectPending(); resolveExit() })
     child.stderr.resume() // Native diagnostics may contain secrets: discard all.
@@ -134,9 +135,14 @@ export async function probeCodexAccount(credential, { spawnChild = spawn, env = 
     send({ method: 'initialized', params: {} })
     if (!managedHome) await rpc('account/login/start', { type: 'chatgptAuthTokens', accessToken: credential.accessToken, chatgptAccountId: credential.principalId })
     const account = await rpc('account/read', { refreshToken: Boolean(managedHome) })
+    readSettled = true
     const limits = await rpc('account/rateLimits/read', {})
     return { account: account?.account, limits }
-  } catch { safeCode('provider-unavailable') }
+  } catch {
+    // A managed Codex may refresh its own token on any authenticated call, so
+    // only a child that never started, or a refresh that finished, spent nothing.
+    throw Object.assign(new Error('provider-unavailable'), { refreshRequested: Boolean(managedHome) && spawned && !readSettled })
+  }
   finally {
     clearTimeout(timer)
     if (child && !exited) {
@@ -156,7 +162,11 @@ export async function readAccountQuota(account, { configDir = path.join(os.homed
   const failed = status => ({ provider: account.provider, observedAt: now(), status, windows: [] })
   let credential
   try { credential = await (resolveCredential ? resolveCredential(account) : readCredential(account, { configDir, env, execCredential, now, isProfileInactive })) }
-  catch { return failed('credential-unavailable') }
+  catch (error) {
+    // A failed automatic renewal is not transient: only a new sign-in fixes it.
+    if (error?.message === 'account_needs_login') return { ...failed('needs-login'), reason: error.renewalFailure }
+    return failed('credential-unavailable')
+  }
   try {
     let identity, quota
     if (account.provider === 'claude') {
@@ -170,10 +180,16 @@ export async function readAccountQuota(account, { configDir = path.join(os.homed
       let result
       if (ref.kind === 'codex-profile' && isProfileInactive && await isProfileInactive('codex', ref.profile)) {
         const directory = codexProfileHome(configDir, ref.profile)
-        result = await withAccountProfileLease(directory, async () => {
+        result = await withAccountProfileLease(directory, async lease => {
           if (!await isProfileInactive('codex', ref.profile)) safeCode('credential-unavailable')
-          return codexProbe(null, { env, managedHome: directory })
-        }, { retainOnFailure: true })
+          // The probe lets Codex rotate its own refresh token, so once it asked
+          // to, a failure keeps the lease and only the owner's next sign-in continues.
+          try { return await codexProbe(null, { env, managedHome: directory }) }
+          catch (error) {
+            if (!error?.refreshRequested) throw error // stopped before the refresh, so nothing was spent
+            recordProfileLeaseFailure(lease, 'failed'); throw profileNeedsLogin('failed')
+          }
+        }, { purpose: 'renewal', retainOnFailure: error => error?.message === 'account_needs_login' })
       } else result = await codexProbe(credential, { env })
       if (result.account?.type !== 'chatgpt') return failed('identity-mismatch')
       identity = { email: result.account.email, principalId: credential.principalId }
@@ -182,6 +198,7 @@ export async function readAccountQuota(account, { configDir = path.join(os.homed
     } else return failed('provider-not-managed')
     return normalizeQuotaObservation({ provider: account.provider, identity, quota, observedAt: now() })
   } catch (error) {
+    if (error?.message === 'account_needs_login') return { ...failed('needs-login'), reason: error.renewalFailure }
     const known = ['needs-login', 'scope-unavailable', 'throttled', 'provider-unavailable', 'invalid-response']
     return failed(known.includes(error.message) ? error.message : error.message === 'quota_identity_mismatch' ? 'identity-mismatch' : 'invalid-response')
   }

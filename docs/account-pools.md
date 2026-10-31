@@ -559,15 +559,19 @@ allowlisted shared resources. Authentication and global account metadata are
 not linked. This preserves native project memory access, not a cross-provider
 memory consolidation. Login refuses profiles referenced by durable sessions;
 use a new profile name for re-enrollment while old sessions remain available.
+The one exception is a Claude profile that needs a new sign-in, described below.
 
 Claude records first-run completion in each profile's own `.claude.json`. A
 fresh profile would otherwise open the theme picker, the security notes and,
 with `--chrome`, the Claude in Chrome intro, which a detached launch can never
 answer. After a successful login, and on every profile launch, SAB copies only
 `hasCompletedOnboarding`, `lastOnboardingVersion`,
-`hasCompletedClaudeInChromeOnboarding` and `theme` from the native config, and
-only once the native login has completed onboarding. It fills missing keys and
-never overwrites one. Folder trust stays with the launch-time consent helper.
+`hasCompletedClaudeInChromeOnboarding`, `theme` and
+`claudeInChromeDefaultEnabled` from the native config, and only once the native
+login has completed onboarding. The last one is the owner's answer to the
+"Claude in Chrome extension detected" dialog, which would also stop a detached
+launch. It fills missing keys and never overwrites one. Folder trust stays with
+the launch-time consent helper.
 
 Claude in Chrome pairs with the claude.ai account the Chrome extension is
 signed in to. A session switched to another subscription keeps working, but its
@@ -583,13 +587,60 @@ when their profile/usage scope is unavailable.
 
 For an expired inactive Claude profile, SAB privately reads its exact refresh
 credential and invokes the documented native `claude auth login` provisioning
-path, with refresh/scopes in environment rather than argv. Codex's isolated
-profile probe uses native `account/read` with `refreshToken: true` and its file
-store. Neither starts a turn. A private lease excludes login/refresh/launch
-races; live/dormant PID and tmux checks precede refresh. Native running providers
-own their own refresh lifecycle. A failed/uncertain refresh or process death
-leaves `.sab-auth-operation` fenced: inspect the account and enroll a fresh
-profile rather than deleting the lease and blindly reusing a rotating token.
+path, with refresh/scopes in environment rather than argv. Its input is closed
+and it may run for 30 seconds. Codex's isolated profile probe uses native
+`account/read` with `refreshToken: true` and its file store. Neither starts a
+turn. A private lease excludes login/refresh/launch races; live/dormant PID and
+tmux checks precede refresh. Native running providers own their own refresh
+lifecycle. A run that Claude finished saving before it stopped counts as
+renewed.
+
+The exchange rotates the refresh token, so once it has run, SAB never repeats
+it with the old token:
+- **Before the exchange.** A failure spends nothing and releases the lease.
+  Examples: the profile came into use, the credential store did not answer, the
+  stored scopes were unusable, or `claude` could not start.
+- **From the exchange on.** A failure, timeout or run that saved no new token
+  keeps `.sab-auth-operation`. Next to the owner's PID and purpose it records
+  only a reason code: `timeout`, `rejected`, `failed` or `not-renewed`. A
+  managed Codex probe that fails is kept the same way, as `failed`. The only
+  exceptions are a `codex` process that could not be started at all, or a
+  refresh that had already finished. A running Codex may refresh on any
+  authenticated call, and its npm launcher counts as started.
+- **Abandoned.** A lease whose process is gone, for example after a daemon
+  restart, counts as `abandoned`. So does an older lease without these
+  records, after ten minutes.
+
+Any of these makes the account read `needs-login`, and launches on the
+profile refuse. So does a 401 from Claude's API, for any kind of Claude credential.
+- The control channel gets one notice per episode, naming
+  `sab account login-claude PROFILE` or `sab account login-codex PROFILE` when
+  the credential is a profile. When sessions that refuse that sign-in still use
+  the profile, the notice names the new-profile route instead. That means any
+  session for Codex, and a running one for Claude.
+- Only a reading the provider accepted the credential for re-arms the notice: a
+  good one, a 403, or another account's profile. A notice that could not be
+  posted is tried again at the next reading, and never sent twice at once.
+- A needs-login account is read again within five minutes, so a new sign-in
+  shows promptly.
+
+`sab account login-claude PROFILE` continues such a lease rather than removing
+it:
+- The lease stays until the new sign-in is verified. For Claude, `claude`
+  exits cleanly and a fresh credential reads back. If the profile is registered
+  to an account, the credential must belong to it.
+- A cancelled or failed sign-in leaves the profile fenced. A sign-in to another
+  account reads `needs-login` (`wrong-account`).
+- It never continues a lease whose sign-in or renewal may still be running,
+  except a renewal ten minutes overdue or a sign-in fifteen minutes old.
+- Sessions still using the profile refuse the sign-in as above. The exception
+  is a registered Claude profile that needs a new sign-in while every session
+  using it is dormant, with no live process or tmux. The account needs one if
+  it has a kept lease or SAB last read it as needs-login. Those sessions are
+  waiting for exactly this sign-in. A session whose tmux cannot be checked
+  counts as running.
+- A sign-in that fails hands the lease back as a plain fence, so the next
+  attempt can continue it.
 
 Native refresh support is not a claim that every current credential has been
 upgraded. Browser authentication for a new account is an owner action.

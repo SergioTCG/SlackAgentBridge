@@ -29,6 +29,30 @@ const automaticRetryDelay = journal => journal.usageLimit
   ? Math.min(900000, 120000 * 2 ** Math.min(3, (journal.attempt || 1) - 1))
   : Math.min(4 * 3600000, 900000 * 2 ** Math.min(4, (journal.attempt || 1) - 1))
 const retryLabel = ms => ms < 3600000 ? `${Math.round(ms / 60000)} min` : `${Math.round(ms / 3600000)} h`
+const renewalFailures = {
+  timeout: "SAB's automatic renewal of its sign-in did not finish in time.",
+  rejected: "The provider rejected SAB's automatic renewal of its sign-in.",
+  failed: "SAB's automatic renewal of its sign-in failed.",
+  'not-renewed': "SAB's automatic renewal saved no new sign-in.",
+  abandoned: "A renewal or sign-in of it stopped before it finished.",
+  'wrong-account': 'Its last sign-in was a different account.',
+}
+// `inUse`: sessions that refuse a new sign-in of this profile (any for Codex,
+// a running one for Claude), so the owner needs a newly named profile.
+export function signInNotice(account, observation, { inUse = false } = {}) {
+  const ref = accountCredentialReference(account)
+  const command = ref?.kind === 'claude-profile' ? `sab account login-claude ${ref.profile}`
+    : ref?.kind === 'codex-profile' ? `sab account login-codex ${ref.profile}` : null
+  const next = !command ? '' : inUse
+    ? ` Sessions still use profile ${ref.profile}, so sign in under a new profile name and attach it to this account (docs/account-pools.md).`
+    : ` Run \`${command}\` on this Mac and open the link it prints.`
+  return `🔑 *${account.email}* needs a new sign-in. ${renewalFailures[observation.reason] || 'The provider no longer accepts its saved sign-in.'} ` +
+    `Until then SAB cannot read its usage or move sessions to it.${next}`
+}
+// Readings that show the provider accepted the credential end a needs-login
+// episode: a 403 or another account's profile still needed a valid token.
+const CREDENTIAL_ACCEPTED = ['observed', 'scope-unavailable', 'identity-mismatch']
+
 export function accountPoolMode(value) {
   const mode = value || 'off'
   if (!['off', 'shadow', 'manual', 'auto'].includes(mode)) fail('invalid_account_pool_mode')
@@ -37,7 +61,7 @@ export function accountPoolMode(value) {
 
 export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, persist, readQuota,
   blockReason = () => null, restart, writeRegistry, verifyIdentity = async () => 'credential-unavailable',
-  onSettled = () => {}, notify = async () => {}, now = Date.now, log = () => {},
+  onSettled = () => {}, notify = async () => {}, notifyOwner = async () => {}, now = Date.now, log = () => {},
   isDormant = async session => !session.pid && !session.tmux, adoptReplacement = async () => null,
   usageLimitBlockReason = async () => 'usage-limit maintenance unavailable',
   resumeAfterLimit = async () => false, markLimitPause = async () => false,
@@ -46,6 +70,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   const enabled = mode !== 'off', enforcing = ['manual', 'auto'].includes(mode), flights = new Map(), switching = new Set()
   let tickRunning = false, serialRead = Promise.resolve(), persistenceFailed = false
   const deferred = new Map() // channel → last usage-limit refusal, logged once per change
+  const noticesPosting = new Set() // accounts whose sign-in notice is still being posted
   // A usage-limit handover that ends uncertain halts the others until that
   // channel is reconciled, so a systematic failure strands one session, not all.
   // The journal is the record, so the halt also survives a daemon restart.
@@ -182,9 +207,31 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       const failures = observation.status === 'observed' ? 0 : Math.min(10, (latest?.failures || 0) + 1)
       const lastSuccessful = observation.status === 'observed' ? observation : latest?.registryRevision === record.revision
         ? latest.lastSuccessful || (latest.observation?.status === 'observed' ? latest.observation : null) : null
+      // Polling cannot recover a sign-in, so the owner hears about it once per
+      // episode; only a good reading re-arms the notice. One that could not be
+      // posted is tried again at the next reading.
+      const ownerNotifiedAt = CREDENTIAL_ACCEPTED.includes(observation.status) ? null : latest?.ownerNotifiedAt || null
+      // A new sign-in shows within minutes, whatever the failure backoff says.
+      const scheduled = nextQuotaPollAt(observation.status === 'observed' ? observation : lastSuccessful, { now: now(), failures })
       poolState().observations[account.id] = { observation, lastSuccessful, registryRevision: record.revision, failures,
-        nextPollAt: nextQuotaPollAt(observation.status === 'observed' ? observation : lastSuccessful, { now: now(), failures }) }
+        nextPollAt: observation.status === 'needs-login' ? Math.min(scheduled, now() + 300000) : scheduled,
+        ...(ownerNotifiedAt && { ownerNotifiedAt }) }
       save()
+      if (observation.status === 'needs-login' && latest?.observation?.status !== 'needs-login') {
+        log('account sign-in needs renewing', account.key, observation.reason || 'provider')
+      }
+      if (observation.status === 'needs-login' && !ownerNotifiedAt && !noticesPosting.has(account.id)) {
+        noticesPosting.add(account.id)
+        Promise.resolve().then(async () => {
+          const ref = accountCredentialReference(account)
+          const users = ref?.profile ? Object.values(state.sessions || {}).filter(s => providerOf(s) === account.provider &&
+            s.account === ref.profile && (account.provider === 'codex' || s.accountKind === 'claude-profile')) : []
+          const inUse = users.length > 0 && (account.provider !== 'claude' || (await Promise.all(users.map(isDormant))).some(dormant => !dormant))
+          await notifyOwner(signInNotice(account, observation, { inUse }))
+          const current = poolState().observations[account.id]
+          if (current?.observation?.status === 'needs-login' && !current.ownerNotifiedAt) { current.ownerNotifiedAt = now(); save() }
+        }).catch(() => {}).finally(() => noticesPosting.delete(account.id))
+      }
       return observation
     }).finally(() => flights.delete(account.id))
     flights.set(account.id, flight)
