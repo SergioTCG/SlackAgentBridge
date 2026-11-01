@@ -191,12 +191,15 @@ Explicit `login-claude`/`login-codex` create private native credential homes and
 share only allowlisted native conversation/settings resources, never auth files.
 Claude profile identity is persisted separately from legacy setup-token aliases
 and echoed by its lifecycle hook. Native Claude alone exchanges a profile refresh
-token through its documented non-browser `auth login` provisioning path. SAB
-performs that operation only after two inactivity checks under a launch-fencing
-lease; default machine credentials and live profile credentials are never
-refreshed by SAB. An uncertain refresh retains its lease and reads
-`needs-login`. Only the owner's verified sign-in (`sab account login-claude`)
-lifts it; a rotating token is never replayed.
+token, through the startup refresh every running session uses. SAB only starts
+`claude -p --input-format stream-json` in the profile with an open, empty input and no token in its
+environment, after two inactivity checks under a launch-fencing lease. It
+watches the stored login, then closes the input. Default machine credentials
+and live profile credentials are never refreshed by SAB. A login the provider
+refused, which Claude then empties, keeps the lease and reads `needs-login`. Only
+the owner's verified sign-in (`sab account login-claude`) lifts it. An
+unconfirmed renewal releases the lease and is tried again. (The `auth login`
+refresh-token path is not used: the login it saves cannot be renewed again.)
 
 Owner edits use `account-management.mjs` and the existing immutable revision CAS.
 Request retries derive the original candidate from its immutable base revision,

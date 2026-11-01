@@ -585,31 +585,52 @@ Both providers need a controlled native-history resume proof. Additional Claude
 setup tokens may remain for manual use, but cannot establish quota eligibility
 when their profile/usage scope is unavailable.
 
-For an expired inactive Claude profile, SAB privately reads its exact refresh
-credential and invokes the documented native `claude auth login` provisioning
-path, with refresh/scopes in environment rather than argv. Its input is closed
-and it may run for 30 seconds. Codex's isolated profile probe uses native
-`account/read` with `refreshToken: true` and its file store. Neither starts a
-turn. A private lease excludes login/refresh/launch races; live/dormant PID and
-tmux checks precede refresh. Native running providers own their own refresh
-lifecycle. A run that Claude finished saving before it stopped counts as
-renewed.
+An expired inactive Claude profile is renewed by Claude itself. SAB starts
+`claude -p --input-format stream-json` (with `--output-format stream-json
+--verbose --strict-mcp-config --no-session-persistence`) in the profile, with
+an open, empty input. Plain `-p` would give up on an empty input after three
+seconds. Claude refreshes an expired login when it starts, through
+the same path every running session uses: it rotates the refresh token and
+saves the new pair under its own lock. The child's environment holds the
+profile directory and no token or bridge identity, so the bridge's hooks ignore
+it. No prompt is sent, so nothing reaches the model. SAB watches the stored
+login for up to a minute, then closes Claude's input. A login Claude saved
+while it was stopping still counts as renewed.
 
-The exchange rotates the refresh token, so once it has run, SAB never repeats
-it with the old token:
-- **Before the exchange.** A failure spends nothing and releases the lease.
-  Examples: the profile came into use, the credential store did not answer, the
-  stored scopes were unusable, or `claude` could not start.
-- **From the exchange on.** A failure, timeout or run that saved no new token
-  keeps `.sab-auth-operation`. Next to the owner's PID and purpose it records
-  only a reason code: `timeout`, `rejected`, `failed` or `not-renewed`. A
-  managed Codex probe that fails is kept the same way, as `failed`. The only
-  exceptions are a `codex` process that could not be started at all, or a
+SAB no longer renews through `claude auth login` with
+`CLAUDE_CODE_OAUTH_REFRESH_TOKEN`. That path asks for a long-lived token, and the
+login it saves cannot be renewed again, so it renewed a profile exactly once. The
+next renewal, eight hours later, was always refused.
+
+Codex's isolated profile probe uses native `account/read` with
+`refreshToken: true` and its file store. Neither provider starts a turn. A
+private lease excludes login/refresh/launch races; live/dormant PID and tmux
+checks precede refresh. Native running providers own their own refresh
+lifecycle.
+
+How a renewal ends:
+- **Renewed.** The lease is released.
+- **Refused.** The provider refused the refresh, and Claude emptied the stored
+  login. Only the owner's sign-in can fix that, so `.sab-auth-operation` is
+  kept. Next to the owner's PID and purpose it records only the reason code
+  `rejected`.
+- **Unconfirmed.** Claude neither renewed nor emptied the login within the
+  minute, or it exited first. The lease is released and the account reads
+  `credential-unavailable` (`not-renewed`). The daemon logs
+  `account sign-in renewal unconfirmed`, and the next reading tries again. If
+  the provider had spent the token without Claude saving it, the next attempt is
+  refused, and so reported.
+- **Never started.** The profile came into use, the credential store did not
+  answer, no refresh token was stored, or `claude` could not start. Nothing was
+  spent, and the lease is released.
+- **Codex.** A managed Codex probe that fails keeps its lease as `failed`. The
+  only exceptions are a `codex` process that could not be started at all, or a
   refresh that had already finished. A running Codex may refresh on any
   authenticated call, and its npm launcher counts as started.
 - **Abandoned.** A lease whose process is gone, for example after a daemon
   restart, counts as `abandoned`. So does an older lease without these
-  records, after ten minutes.
+  records, after ten minutes. Leases from earlier versions may also carry
+  `timeout`, `failed` or `not-renewed`.
 
 Any of these makes the account read `needs-login`, and launches on the
 profile refuse. So does a 401 from Claude's API, for any kind of Claude credential.

@@ -920,10 +920,21 @@ test('an account that needs a new sign-in tells the owner once per episode, and 
   assert.equal(owner.length, before + 1)
 
   const profile = { email: 'profile@example.test', provider: 'claude', credentials: [{ kind: 'native-default' }, { kind: 'claude-profile', profile: 'work' }] }
-  assert.match(signInNotice(profile, { reason: 'rejected' }), /rejected SAB's automatic renewal.*Run `sab account login-claude work` on this Mac/)
+  assert.match(signInNotice(profile, { reason: 'rejected' }), /refused to renew its saved sign-in.*Run `sab account login-claude work` on this Mac/)
   assert.match(signInNotice(profile, { reason: 'wrong-account' }), /Its last sign-in was a different account\./)
   assert.match(signInNotice({ ...profile, credentials: [{ kind: 'native-default' }] }, {}), /no longer accepts its saved sign-in\. Until then/)
   const inUse = signInNotice(profile, { reason: 'failed' }, { inUse: true })
   assert.match(inUse, /Sessions still use profile work, so sign in under a new profile name/)
   assert.doesNotMatch(inUse, /sab account login-claude/)
+})
+
+test('a renewal Claude did not confirm is logged but not announced, since the next reading tries again', async () => {
+  const owner = [], logged = []
+  const { runtime, state } = setup({ mode: 'shadow', now: () => now, log: (...args) => logged.push(args.join(' ')),
+    notifyOwner: async message => { owner.push(message) },
+    readQuota: async () => ({ provider: 'claude', observedAt: now, status: 'credential-unavailable', windows: [], reason: 'not-renewed' }) })
+  await runtime.refresh('secondary'); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(owner, [])
+  assert.ok(logged.includes('account sign-in renewal unconfirmed secondary'))
+  assert.ok(Object.values(state.accountPools.observations).some(o => o.observation.reason === 'not-renewed'))
 })

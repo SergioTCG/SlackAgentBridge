@@ -165,6 +165,8 @@ export async function readAccountQuota(account, { configDir = path.join(os.homed
   catch (error) {
     // A failed automatic renewal is not transient: only a new sign-in fixes it.
     if (error?.message === 'account_needs_login') return { ...failed('needs-login'), reason: error.renewalFailure }
+    // Nothing was refused, so the next reading renews again.
+    if (error?.message === 'account_renewal_unconfirmed') return { ...failed('credential-unavailable'), reason: 'not-renewed' }
     return failed('credential-unavailable')
   }
   try {

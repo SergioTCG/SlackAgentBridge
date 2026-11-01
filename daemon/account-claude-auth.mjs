@@ -3,15 +3,25 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readPrivateAccountFile } from './account-registry-store.mjs'
 import { claudeKeychainService, claudeProfileHome, withAccountProfileLease, recordProfileLeaseFailure, profileNeedsLogin } from './account-profiles.mjs'
 const execute = promisify(execFile)
 const secret = s => typeof s === 'string' && s.length > 0 && s.length <= 65536 && !/[\r\n\0]/.test(s)
 const fail = () => { throw new Error('credential_unavailable') }
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+// Longer than Claude's own 30-second token request plus its refresh-lock retries.
+const RENEWAL_WAIT_MS = 60000
+const RENEWAL_POLL_MS = 500
+const RENEWAL_EXIT_MS = 15000
+export const RENEWAL_ARGS = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+  '--strict-mcp-config', '--no-session-persistence']
 
-export async function readClaudeOAuth({ directory = null, env = process.env, platform = process.platform, execCredential = execute } = {}) {
+// `requireToken: false` also returns a record Claude emptied after the provider
+// refused its refresh, so a renewal can tell that apart from a slow one.
+export async function readClaudeOAuth({ directory = null, env = process.env, platform = process.platform, execCredential = execute,
+  requireToken = true } = {}) {
   const home = directory || path.join(env.HOME || os.homedir(), '.claude')
   let value
   if (platform === 'darwin') {
@@ -25,12 +35,20 @@ export async function readClaudeOAuth({ directory = null, env = process.env, pla
   }
   if (!value) value = readPrivateAccountFile(path.join(home, '.credentials.json'), { json: true })
   const oauth = value?.claudeAiOauth
+  if (!requireToken && oauth && typeof oauth === 'object') return oauth
   if (!secret(oauth?.accessToken)) fail()
   return oauth
 }
 
+// Claude renews a profile itself: an expired login is refreshed when Claude
+// starts, through the path every running session uses. That path rotates the
+// refresh token and saves the new pair under Claude's own lock. SAB only starts
+// Claude with no prompt, so nothing reaches the model, watches the stored
+// login, and then closes Claude's input. (`claude auth login` with a refresh
+// token asks for a long-lived token instead, and the login it saves cannot be
+// renewed again: that path renewed a profile exactly once.)
 export async function refreshInactiveClaudeProfile({ configDir, profile, isInactive, env = process.env,
-  execCredential = execute, now = Date.now, readOAuth = readClaudeOAuth } = {}) {
+  execCredential = execute, now = Date.now, readOAuth = readClaudeOAuth, spawnClaude = spawn, wait = sleep } = {}) {
   const directory = claudeProfileHome(configDir, profile)
   const read = () => readOAuth({ directory, env, execCredential })
   const existing = await read()
@@ -39,37 +57,78 @@ export async function refreshInactiveClaudeProfile({ configDir, profile, isInact
   // No primary/default credential refresh and no live profile refresh. Native
   // running processes own their own rotating tokens; SAB never races them.
   if (!await isInactive(profile)) fail()
-  // Nothing is spent before the exchange, so a failure up to there releases
-  // the lease. From the exchange on, a failure keeps it and records why.
+  // Only a login that Claude emptied after the provider refused it keeps the
+  // lease. Anything else releases it, and the next reading tries again: Claude
+  // saves a rotated token before it gives up its own lock, and a token spent
+  // without being saved is refused, and so reported, next time.
   return withAccountProfileLease(directory, async lease => {
     if (!await isInactive(profile)) fail()
-    const oauth = await read()
-    if (oauth.expiresAt > now() + 60000) return oauth
-    if (!secret(oauth.refreshToken) || !Array.isArray(oauth.scopes) || !oauth.scopes.length ||
-        oauth.scopes.some(s => typeof s !== 'string' || !/^[A-Za-z0-9_:.-]{1,128}$/.test(s))) fail()
-    const childEnv = Object.fromEntries(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG'].filter(k => env[k]).map(k => [k, env[k]]))
-    Object.assign(childEnv, { CLAUDE_CONFIG_DIR: directory, CLAUDE_CODE_OAUTH_REFRESH_TOKEN: oauth.refreshToken,
-      CLAUDE_CODE_OAUTH_SCOPES: oauth.scopes.join(' '), DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
-    let reason = null
-    try {
-      // Documented non-browser provisioning path; no prompt, inference, bridge
-      // identity, shell evaluation, token argv, or diagnostic forwarding. Its
-      // input is closed, so a prompt fails at once instead of waiting.
-      const run = execCredential('claude', ['auth', 'login'], { cwd: directory, env: childEnv, timeout: 30000, maxBuffer: 65536, encoding: 'utf8' })
-      run?.child?.stdin?.end()
-      await run
-    } catch (error) {
-      if (error?.code === 'ENOENT') fail() // never started, so nothing was spent
-      // Only a reason code is kept; the CLI's own output never leaves here.
-      reason = error?.killed || error?.signal ? 'timeout' : /status code 4\d\d/.test(String(error?.stderr || '')) ? 'rejected' : 'failed'
+    const before = await read()
+    if (before.expiresAt > now() + 60000) return before
+    const result = await renewClaudeLogin({ directory, before, env, execCredential, now, readOAuth, spawnClaude, wait })
+    if (result.outcome === 'renewed') return result.login
+    if (result.outcome === 'refused') {
+      recordProfileLeaseFailure(lease, 'rejected')
+      throw profileNeedsLogin('rejected')
     }
-    // A run stopped after Claude saved the new token still renewed it.
-    let refreshed = null
-    try { refreshed = await read() } catch {}
-    if (Number.isFinite(refreshed?.expiresAt) && refreshed.expiresAt > now() + 60000) return refreshed
-    recordProfileLeaseFailure(lease, reason || 'not-renewed')
-    throw profileNeedsLogin(reason || 'not-renewed')
+    throw new Error('account_renewal_unconfirmed')
   }, { purpose: 'renewal', retainOnFailure: error => error?.message === 'account_needs_login' })
+}
+
+// One renewal by Claude itself. The caller holds the profile's lease, and
+// `before` is the expired login it read under it. The outcome is `renewed`
+// (with the new login), `refused` (Claude emptied the login after the provider
+// refused it), or `unconfirmed`.
+export async function renewClaudeLogin({ directory, before, env = process.env, execCredential = execute, now = Date.now,
+  readOAuth = readClaudeOAuth, spawnClaude = spawn, wait = sleep }) {
+  if (!secret(before?.refreshToken)) fail()
+  const childEnv = Object.fromEntries(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG'].filter(k => env[k]).map(k => [k, env[k]]))
+  Object.assign(childEnv, { CLAUDE_CONFIG_DIR: directory, DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
+  const outcome = async () => {
+    let record
+    try { record = await readOAuth({ directory, env, execCredential, requireToken: false }) } catch { return 'unchanged' }
+    if (!secret(record?.accessToken) || !secret(record?.refreshToken)) return 'refused'
+    return Number.isFinite(record.expiresAt) && record.expiresAt > now() + 60000 ? 'renewed' : 'unchanged'
+  }
+  // Print mode with an open, empty stream-json input: Claude starts, renews,
+  // and waits for a message that never comes. (Plain `-p` gives up on an empty
+  // input after three seconds.) No MCP servers, no saved session, and none of
+  // the bridge's identity, so its hooks stay silent.
+  const run = await startClaude(spawnClaude, { cwd: directory, env: childEnv })
+  let result = 'unchanged'
+  try {
+    const deadline = now() + RENEWAL_WAIT_MS
+    do {
+      await wait(RENEWAL_POLL_MS)
+      result = await outcome()
+    } while (result === 'unchanged' && !run.exited && now() < deadline)
+  } finally { await stopClaude(run, wait) }
+  // Claude may have saved its renewal while it was stopping.
+  if (result === 'unchanged') result = await outcome()
+  if (result === 'renewed') return { outcome: 'renewed', login: await readOAuth({ directory, env, execCredential }) }
+  return { outcome: result === 'refused' ? 'refused' : 'unconfirmed' }
+}
+
+async function startClaude(spawnClaude, { cwd, env }) {
+  const child = spawnClaude('claude', RENEWAL_ARGS, { cwd, env, stdio: ['pipe', 'ignore', 'ignore'] })
+  const run = { child, exited: false }
+  run.exit = new Promise(resolve => child.once('exit', () => { run.exited = true; resolve() }))
+  // A `claude` that never started spent nothing.
+  try { await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) }) } catch { fail() }
+  child.on('error', () => {})
+  child.stdin?.on?.('error', () => {}) // an early exit must not turn into an EPIPE
+  return run
+}
+
+// Closing its input ends Claude, which first waits for a renewal in flight.
+async function stopClaude(run, wait) {
+  const ended = ms => run.exited || Promise.race([run.exit.then(() => true), wait(ms).then(() => run.exited)])
+  run.child.stdin?.end?.()
+  if (await ended(RENEWAL_EXIT_MS)) return
+  run.child.kill('SIGTERM')
+  if (await ended(5000)) return
+  run.child.kill('SIGKILL')
+  await ended(5000)
 }
 
 // After the owner's sign-in: a fresh credential for the expected account.
