@@ -19,13 +19,14 @@ Notable changes to this project. Format based on
     sign-in, ends this way.
   - When SAB reads an account through a profile, it also watches that
     account's Mac login, with one notice per sign-out.
-  - A renewal that stays unconfirmed twice in a row sends one notice too. The
-    first is only logged and retried.
-  - `sab account login-claude PROFILE` now also works while sessions run on the
-    profile, if its login is useless to them anyway: emptied by Claude, or
-    signed in as another account. The sign-in must still prove the registered
-    account, and the sessions pick it up. So the notice for a busy profile names
-    that command instead of the new-profile route.
+  - A renewal that stays unconfirmed twice in a row sends one warning, without
+    a command, since the saved sign-in may still be fine. The first is only
+    logged and retried. A sign-in that becomes necessary later still gets its
+    own notice.
+  - For `sab account login-claude PROFILE`, a login Claude emptied also counts
+    as needing a sign-in, so dormant sessions on the profile no longer block
+    it. Running sessions still do: they would pick up whatever account signs
+    in.
 - An idle Claude profile stays signed in. SAB renewed it through
   `claude auth login` with the stored refresh token. That path asks for a
   long-lived token, and the login it saves cannot be renewed again. So each

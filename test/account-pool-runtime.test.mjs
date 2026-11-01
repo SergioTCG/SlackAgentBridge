@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { compileAccountRegistry, publicAccountRegistry } from '../daemon/account-registry.mjs'
 import { choosePoolAccount, normalizeQuotaObservation } from '../daemon/account-quota.mjs'
-import { createAccountPoolRuntime, signInNotice } from '../daemon/account-pool-runtime.mjs'
+import { createAccountPoolRuntime, signInNotice, renewalStuckNotice } from '../daemon/account-pool-runtime.mjs'
 
 const now = 1800000000000
 const enrollment = () => ({ schemaVersion: 1, requestId: 'runtime-fixture', accounts: [
@@ -924,6 +924,10 @@ test('an account that needs a new sign-in tells the owner once per episode, and 
   assert.match(signInNotice(profile, { reason: 'wrong-account' }), /Its last sign-in was a different account\./)
   assert.match(signInNotice({ ...profile, credentials: [{ kind: 'native-default' }] }, {}), /no longer accepts its saved sign-in\. Until then/)
   assert.match(signInNotice({ ...profile, credentials: [{ kind: 'native-default' }] }, {}), /Run `claude auth login` on this Mac/)
+  // A lease an older version kept as not-renewed still needs a sign-in, and says so.
+  assert.match(signInNotice(profile, { status: 'needs-login', reason: 'not-renewed' }),
+    /needs a new sign-in\. SAB's automatic renewal saved no new sign-in\..*Run `sab account login-claude work`/)
+  assert.doesNotMatch(renewalStuckNotice(profile), /sab account login|claude auth login/, 'a renewal warning names no command')
   const inUse = signInNotice(profile, { reason: 'failed' }, { inUse: true })
   assert.match(inUse, /Sessions still use profile work, so sign in under a new profile name/)
   assert.doesNotMatch(inUse, /sab account login-claude/)
@@ -940,24 +944,30 @@ test('a renewal Claude did not confirm is logged but not announced, since the ne
   assert.ok(Object.values(state.accountPools.observations).some(o => o.observation.reason === 'not-renewed'))
 })
 
-test('a renewal that failed twice in a row without a refusal tells the owner once; a good reading re-arms it', async () => {
+test('a renewal that failed twice in a row without a refusal warns once; a later refusal still gets its sign-in notice', async () => {
   let clock = now, reading = 'not-renewed'
   const owner = []
   const { runtime } = setup({ mode: 'shadow', now: () => clock, notifyOwner: async message => { owner.push(message) },
     readQuota: async account => reading === 'observed'
       ? normalizeQuotaObservation({ provider: 'claude', observedAt: clock, identity: { email: account.email, principalId: account.id },
         quota: { five_hour: { utilization: 10, resets_at: new Date(clock + 3600000).toISOString() } } })
-      : { provider: 'claude', observedAt: clock, status: 'credential-unavailable', windows: [], reason: 'not-renewed' } })
+      : reading === 'needs-login' ? { provider: 'claude', observedAt: clock, status: 'needs-login', windows: [], reason: 'rejected' }
+        : { provider: 'claude', observedAt: clock, status: 'credential-unavailable', windows: [], reason: 'not-renewed' } })
   const read = async next => { reading = next; clock += 4 * 3600001; await runtime.refresh('secondary'); await new Promise(resolve => setImmediate(resolve)) }
   await read('not-renewed')
   assert.deepEqual(owner, [], 'one unconfirmed renewal is retried quietly')
   await read('not-renewed')
   assert.equal(owner.length, 1)
-  assert.match(owner[0], /secondary@example\.test\* may need a new sign-in\. SAB could not renew its sign-in twice in a row\./)
+  assert.match(owner[0], /SAB could not renew \*secondary@example\.test\*'s sign-in twice in a row\. It keeps trying/)
   await read('not-renewed')
   assert.equal(owner.length, 1, 'once per episode')
+  await read('needs-login')
+  assert.equal(owner.length, 2, 'the refusal that follows still asks for a sign-in')
+  assert.match(owner[1], /secondary@example\.test\* needs a new sign-in\. The provider refused to renew its saved sign-in\./)
+  await read('not-renewed'); await read('needs-login')
+  assert.equal(owner.length, 2, 'a sign-in notice covers the rest of its episode')
   await read('observed'); await read('not-renewed'); await read('not-renewed')
-  assert.equal(owner.length, 2, 'a good reading re-arms it')
+  assert.equal(owner.length, 3, 'a good reading re-arms it')
 })
 
 test("the Mac's own login, read through a profile, tells the owner once each time Claude signs it out", async () => {
@@ -965,11 +975,11 @@ test("the Mac's own login, read through a profile, tells the owner once each tim
     { key: 'mac', provider: 'claude', email: 'mac@example.test', identityConfirmed: true,
       credentials: [{ kind: 'native-default' }, { kind: 'claude-profile', profile: 'mac' }] },
   ], groups: [{ key: 'mine', name: 'Mine', members: ['mac'] }], routing: { defaultGroup: 'mine', channels: {} } })
-  let signedOut = true, clock = now
+  let login = 'signed-out', clock = now
   const owner = [], logged = [], state = { channels: {}, sessions: {} }
   const runtime = createAccountPoolRuntime({ state, mode: 'shadow', readRegistry: () => record, persist: () => {}, now: () => clock,
     log: (...args) => logged.push(args.join(' ')), notifyOwner: async message => { owner.push(message) },
-    nativeLoginSignedOut: async () => signedOut,
+    nativeLoginState: async () => login,
     readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: clock, identity: { email: account.email, principalId: account.id },
       quota: { five_hour: { utilization: 10, resets_at: new Date(clock + 3600000).toISOString() } } }) })
   const tick = async () => { clock += 600000; await runtime.tick(); await new Promise(resolve => setImmediate(resolve)) }
@@ -977,38 +987,41 @@ test("the Mac's own login, read through a profile, tells the owner once each tim
   assert.equal(owner.length, 1, 'one notice per sign-out')
   assert.match(owner[0], /This Mac's own Claude login \(\*mac@example\.test\*\) needs a new sign-in\. .*Run `claude auth login` on this Mac/)
   assert.ok(logged.includes('native Claude login signed out mac'))
-  signedOut = false; await tick()
+  // A read that fails changes nothing: the episode neither ends nor restarts.
+  login = 'unknown'; await tick()
+  login = 'signed-out'; await tick()
+  assert.equal(owner.length, 1)
+  assert.ok(state.accountPools.nativeLogin.ownerNotifiedAt)
+  login = 'signed-in'; await tick()
   assert.equal(state.accountPools.nativeLogin, undefined, 'a new sign-in ends the episode')
   assert.ok(logged.includes('native Claude login signed in again'))
-  signedOut = true; await tick()
+  login = 'signed-out'; await tick()
   assert.equal(owner.length, 2)
 
   // An account read through the Mac's own login gets its own needs-login notice instead.
   let asked = 0
-  const own = setup({ mode: 'shadow', nativeLoginSignedOut: async () => { asked++; return true } })
+  const own = setup({ mode: 'shadow', nativeLoginState: async () => { asked++; return 'signed-out' } })
   await own.runtime.tick()
   assert.equal(asked, 0)
 })
 
-test('a refused or wrong-account Claude login is signed in again under its running sessions; a 401 still asks for a new profile', async () => {
+test('a Claude profile that needs a sign-in under running sessions is still sent the new-profile route; dormant ones are not', async () => {
   const record = compileAccountRegistry({ schemaVersion: 1, requestId: 'busy-profile-fixture', accounts: [
     { key: 'busy', provider: 'claude', email: 'busy@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'work' }] },
   ], groups: [{ key: 'mine', name: 'Mine', members: ['busy'] }], routing: { defaultGroup: 'mine', channels: {} } })
-  const noticeFor = async reason => {
-    let clock = now
+  const noticeFor = async (reason, { dormant }) => {
     const owner = []
     const state = { channels: { CBUSY: 'busy-one' }, sessions: { 'busy-one': { id: 'busy-one', channel: 'CBUSY', account: 'work',
       accountKind: 'claude-profile', pid: 300, tmux: 'sab-busy' } } }
-    const runtime = createAccountPoolRuntime({ state, mode: 'shadow', readRegistry: () => record, persist: () => {}, now: () => clock,
-      isDormant: async () => false, notifyOwner: async message => { owner.push(message) },
-      readQuota: async () => ({ provider: 'claude', observedAt: clock, status: 'needs-login', windows: [], ...(reason && { reason }) }) })
+    const runtime = createAccountPoolRuntime({ state, mode: 'shadow', readRegistry: () => record, persist: () => {}, now: () => now,
+      isDormant: async () => dormant, notifyOwner: async message => { owner.push(message) },
+      readQuota: async () => ({ provider: 'claude', observedAt: now, status: 'needs-login', windows: [], ...(reason && { reason }) }) })
     await runtime.refresh('busy'); await new Promise(resolve => setImmediate(resolve))
     return owner[0]
   }
-  for (const reason of ['rejected', 'wrong-account']) {
-    const notice = await noticeFor(reason)
-    assert.match(notice, /Run `sab account login-claude work` on this Mac/, reason)
-    assert.doesNotMatch(notice, /new profile name/, reason)
+  // Running sessions would pick up whatever account signs in, so they always refuse it.
+  for (const reason of ['rejected', 'wrong-account', null]) {
+    assert.match(await noticeFor(reason, { dormant: false }), /Sessions still use profile work, so sign in under a new profile name/, String(reason))
+    assert.match(await noticeFor(reason, { dormant: true }), /Run `sab account login-claude work` on this Mac/, String(reason))
   }
-  assert.match(await noticeFor(null), /Sessions still use profile work, so sign in under a new profile name/)
 })

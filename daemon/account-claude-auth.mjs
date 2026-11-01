@@ -41,14 +41,14 @@ export async function readClaudeOAuth({ directory = null, env = process.env, pla
 }
 
 // Claude empties a stored login once the provider refuses to renew it, whether
-// SAB or a running session asked. Only a new sign-in brings it back. A login
-// that cannot be read at all, or one without a refresh token, is not this.
-export async function claudeLoginSignedOut({ directory = null, env = process.env, platform = process.platform,
+// SAB or a running session asked. Only a new sign-in brings it back. The state
+// is `signed-out` for such a record and `signed-in` for one holding a token.
+// It is `unknown` when nothing could be read, which nobody may act on.
+export async function claudeLoginState({ directory = null, env = process.env, platform = process.platform,
   execCredential = execute } = {}) {
-  try {
-    const record = await readClaudeOAuth({ directory, env, platform, execCredential, requireToken: false })
-    return !secret(record?.accessToken) && !secret(record?.refreshToken)
-  } catch { return false }
+  let record
+  try { record = await readClaudeOAuth({ directory, env, platform, execCredential, requireToken: false }) } catch { return 'unknown' }
+  return !secret(record?.accessToken) && !secret(record?.refreshToken) ? 'signed-out' : 'signed-in'
 }
 
 // Claude renews a profile itself: an expired login is refreshed when Claude

@@ -645,13 +645,16 @@ about a month after its sign-in, ends this way.
   When sessions that refuse that sign-in still use the profile, the notice
   names the new-profile route instead. That means any session for Codex, and a
   running one for Claude.
-- A renewal that stays unconfirmed (`not-renewed`) twice in a row also sends
-  one notice per episode. It says the account may need a new sign-in, while SAB
-  keeps trying. The first unconfirmed renewal is only logged.
+- A renewal that stays unconfirmed (`not-renewed`) twice in a row sends one
+  warning per episode. It names no command, because the saved sign-in may still
+  be fine and SAB keeps trying. The first unconfirmed renewal is only logged. A
+  sign-in that becomes necessary later still gets its own notice: only a
+  sign-in notice covers the rest of an episode.
 - When the account that lists the Mac's own login (`native-default`) is read
   through a profile, nothing else would notice Claude emptying the Mac's login.
   So each pool tick also checks that login's stored record, without network
-  I/O. Once Claude empties it, the daemon logs
+  I/O. A read that fails changes nothing. Once Claude empties the login, the
+  daemon logs
   `native Claude login signed out` and the control channel gets one notice
   naming `claude auth login`. A new sign-in ends that episode, and the daemon
   logs `native Claude login signed in again`.
@@ -673,15 +676,10 @@ it:
 - Sessions still using the profile refuse the sign-in as above. The exception
   is a registered Claude profile that needs a new sign-in while every session
   using it is dormant, with no live process or tmux. The account needs one if
-  it has a kept lease or SAB last read it as needs-login. Those sessions are
+  it has a kept lease, if SAB last read it as needs-login, or if Claude emptied
+  its login. Those sessions are
   waiting for exactly this sign-in. A session whose tmux cannot be checked
   counts as running.
-- Running sessions don't block it either when the profile's login is useless
-  to them as it is: emptied by Claude after a refused renewal, or signed in as
-  another account (`wrong-account`). That is how a busy profile's monthly
-  sign-in works. The sign-in must still prove the registered account, and the
-  sessions pick it up on their next request. A login that still works is never
-  replaced under running sessions.
 - A sign-in that fails hands the lease back as a plain fence, so the next
   attempt can continue it.
 

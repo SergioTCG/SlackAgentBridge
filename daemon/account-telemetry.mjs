@@ -9,7 +9,7 @@ import { readPrivateAccountFile } from './account-registry-store.mjs'
 import { normalizeQuotaObservation } from './account-quota.mjs'
 import { readLegacyClaudeToken } from './account-credentials.mjs'
 import { codexProfileHome, claudeProfileHome, accountCredentialReference, withAccountProfileLease, recordProfileLeaseFailure, profileNeedsLogin } from './account-profiles.mjs'
-import { readClaudeOAuth, refreshInactiveClaudeProfile, claudeLoginSignedOut } from './account-claude-auth.mjs'
+import { readClaudeOAuth, refreshInactiveClaudeProfile, claudeLoginState } from './account-claude-auth.mjs'
 
 const execute = promisify(execFile)
 const safeCode = code => { throw new Error(code) }
@@ -20,7 +20,7 @@ const secretString = value => typeof value === 'string' && value.length > 0 && v
 async function readClaudeLogin(read, { directory = null, env, execCredential }) {
   try { return await read() }
   catch (error) {
-    if (error?.message === 'credential_unavailable' && await claudeLoginSignedOut({ directory, env, execCredential })) throw profileNeedsLogin('rejected')
+    if (error?.message === 'credential_unavailable' && await claudeLoginState({ directory, env, execCredential }) === 'signed-out') throw profileNeedsLogin('rejected')
     throw error
   }
 }

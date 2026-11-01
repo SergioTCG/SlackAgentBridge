@@ -94,7 +94,7 @@ import { handleTerminalHttp } from './terminal-http.mjs'
 import { createAccountPoolRuntime } from './account-pool-runtime.mjs'
 import { handleAccountPoolHttp } from './account-pool-http.mjs'
 import { readAccountIdentity, readAccountQuota, verifyClaudeLaunchIdentity } from './account-telemetry.mjs'
-import { claudeLoginSignedOut } from './account-claude-auth.mjs'
+import { claudeLoginState } from './account-claude-auth.mjs'
 import { accountRegistryDigest } from './account-registry.mjs'
 import { readAccountRegistry, readPrivateAccountFile, manageAccountRegistry } from './account-registry-store.mjs'
 import { accountCredentialReference } from './account-profiles.mjs'
@@ -307,7 +307,7 @@ const accountPools = createAccountPoolRuntime({
   resumeAfterLimit: session => resumeSessionAfterLimit(session),
   markLimitPause: (session, accountId) => markSessionLimitPause(session, accountId),
   // The Mac's own Claude login: its keychain item and private file only, never a profile.
-  nativeLoginSignedOut: () => claudeLoginSignedOut({ env: process.env }),
+  nativeLoginState: () => claudeLoginState({ env: process.env }),
   onSettled: (session, settled) => {
     if (settled?.journal?.usageLimit) {
       try { settleUsageLimitHandover(session, settled) }
