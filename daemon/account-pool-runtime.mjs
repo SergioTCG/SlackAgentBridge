@@ -33,7 +33,7 @@ const renewalFailures = {
   timeout: "SAB's automatic renewal of its sign-in did not finish in time.",
   rejected: 'The provider refused to renew its saved sign-in.',
   failed: "SAB's automatic renewal of its sign-in failed.",
-  'not-renewed': "SAB's automatic renewal saved no new sign-in.",
+  'not-renewed': "SAB could not renew its sign-in twice in a row. It keeps trying, but if that goes on, only a new sign-in helps.",
   abandoned: "A renewal or sign-in of it stopped before it finished.",
   'wrong-account': 'Its last sign-in was a different account.',
 }
@@ -42,16 +42,29 @@ const renewalFailures = {
 export function signInNotice(account, observation, { inUse = false } = {}) {
   const ref = accountCredentialReference(account)
   const command = ref?.kind === 'claude-profile' ? `sab account login-claude ${ref.profile}`
-    : ref?.kind === 'codex-profile' ? `sab account login-codex ${ref.profile}` : null
+    : ref?.kind === 'codex-profile' ? `sab account login-codex ${ref.profile}`
+      : ref?.kind === 'native-default' && account.provider === 'claude' ? 'claude auth login' : null
   const next = !command ? '' : inUse
     ? ` Sessions still use profile ${ref.profile}, so sign in under a new profile name and attach it to this account (docs/account-pools.md).`
     : ` Run \`${command}\` on this Mac and open the link it prints.`
-  return `🔑 *${account.email}* needs a new sign-in. ${renewalFailures[observation.reason] || 'The provider no longer accepts its saved sign-in.'} ` +
+  const lead = observation.reason === 'not-renewed' ? 'may need a new sign-in' : 'needs a new sign-in'
+  return `🔑 *${account.email}* ${lead}. ${renewalFailures[observation.reason] || 'The provider no longer accepts its saved sign-in.'} ` +
     `Until then SAB cannot read its usage or move sessions to it.${next}`
+}
+// The Mac's own Claude login, when SAB reads its account through a profile.
+export function nativeSignInNotice(account) {
+  return `🔑 This Mac's own Claude login (*${account.email}*) needs a new sign-in. The provider refused to renew it, so ` +
+    'Claude sessions that use no profile cannot run. Run `claude auth login` on this Mac, sign in as that account, ' +
+    'and open the link it prints.'
 }
 // Readings that show the provider accepted the credential end a needs-login
 // episode: a 403 or another account's profile still needed a valid token.
 const CREDENTIAL_ACCEPTED = ['observed', 'scope-unavailable', 'identity-mismatch']
+// The owner hears about a sign-in that needs them, and about a renewal that
+// failed twice in a row without the provider refusing it.
+const needsOwner = (observation, previous) => observation?.status === 'needs-login' ||
+  observation?.reason === 'not-renewed' && previous?.reason === 'not-renewed'
+const ownerEpisode = observation => observation?.status === 'needs-login' || observation?.reason === 'not-renewed'
 
 export function accountPoolMode(value) {
   const mode = value || 'off'
@@ -64,7 +77,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   onSettled = () => {}, notify = async () => {}, notifyOwner = async () => {}, now = Date.now, log = () => {},
   isDormant = async session => !session.pid && !session.tmux, adoptReplacement = async () => null,
   usageLimitBlockReason = async () => 'usage-limit maintenance unavailable',
-  resumeAfterLimit = async () => false, markLimitPause = async () => false,
+  resumeAfterLimit = async () => false, markLimitPause = async () => false, nativeLoginSignedOut = async () => false,
 }) {
   mode = accountPoolMode(mode)
   const enabled = mode !== 'off', enforcing = ['manual', 'auto'].includes(mode), flights = new Map(), switching = new Set()
@@ -221,16 +234,22 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         log('account sign-in needs renewing', account.key, observation.reason || 'provider')
       }
       if (observation.reason === 'not-renewed' && observation.status !== 'needs-login') log('account sign-in renewal unconfirmed', account.key)
-      if (observation.status === 'needs-login' && !ownerNotifiedAt && !noticesPosting.has(account.id)) {
+      const previous = latest?.registryRevision === record.revision ? latest.observation : null
+      if (needsOwner(observation, previous) && !ownerNotifiedAt && !noticesPosting.has(account.id)) {
         noticesPosting.add(account.id)
         Promise.resolve().then(async () => {
           const ref = accountCredentialReference(account)
           const users = ref?.profile ? Object.values(state.sessions || {}).filter(s => providerOf(s) === account.provider &&
             s.account === ref.profile && (account.provider === 'codex' || s.accountKind === 'claude-profile')) : []
-          const inUse = users.length > 0 && (account.provider !== 'claude' || (await Promise.all(users.map(isDormant))).some(dormant => !dormant))
+          // A Claude login the provider refused is empty, and one signed in as
+          // another account is wrong for them, so running sessions don't stop
+          // the same profile's sign-in: they wait for it.
+          const unusable = account.provider === 'claude' && ['rejected', 'wrong-account'].includes(observation.reason)
+          const inUse = users.length > 0 && (account.provider !== 'claude' ||
+            !unusable && (await Promise.all(users.map(isDormant))).some(dormant => !dormant))
           await notifyOwner(signInNotice(account, observation, { inUse }))
           const current = poolState().observations[account.id]
-          if (current?.observation?.status === 'needs-login' && !current.ownerNotifiedAt) { current.ownerNotifiedAt = now(); save() }
+          if (ownerEpisode(current?.observation) && !current.ownerNotifiedAt) { current.ownerNotifiedAt = now(); save() }
         }).catch(() => {}).finally(() => noticesPosting.delete(account.id))
       }
       return observation
@@ -469,6 +488,30 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       return exhausted ? { accountId: source.id, email: source.email } : null
     } catch { return null }
   }
+  // When SAB reads an account through a profile, nothing else would notice
+  // Claude signing out the Mac's own login of that account. One notice per
+  // episode; a new sign-in ends it.
+  const watchNativeLogin = async view => {
+    const pools = poolState()
+    const account = view.accounts.find(a => a.provider === 'claude' && a.credentials?.some(ref => ref.kind === 'native-default') &&
+      accountCredentialReference(a)?.kind !== 'native-default')
+    let signedOut = false
+    if (account) {
+      try { signedOut = await nativeLoginSignedOut() } catch { return }
+    }
+    if (!signedOut) {
+      if (pools.nativeLogin) { delete pools.nativeLogin; save(); if (account) log('native Claude login signed in again') }
+      return
+    }
+    if (!pools.nativeLogin) { pools.nativeLogin = { signedOutAt: now() }; save(); log('native Claude login signed out', account.key) }
+    if (pools.nativeLogin.ownerNotifiedAt || noticesPosting.has('native-login')) return
+    noticesPosting.add('native-login')
+    Promise.resolve().then(async () => {
+      await notifyOwner(nativeSignInNotice(account))
+      const current = poolState().nativeLogin
+      if (current && !current.ownerNotifiedAt) { current.ownerNotifiedAt = now(); save() }
+    }).catch(() => {}).finally(() => noticesPosting.delete('native-login'))
+  }
   const tick = async () => {
     if (!enabled || tickRunning || persistenceFailed) return
     tickRunning = true
@@ -476,6 +519,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       const { view } = registry()
       await recover()
       for (const account of view.accounts) await refresh(account.id)
+      await watchNativeLogin(view)
       if (mode !== 'auto') return
       for (const session of Object.values(state.sessions || {})) {
         if (!authoritative(session) || !session.pid || !session.tmux || switching.has(session.channel) || !['claude', 'codex'].includes(providerOf(session))) continue

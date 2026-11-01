@@ -923,6 +923,7 @@ test('an account that needs a new sign-in tells the owner once per episode, and 
   assert.match(signInNotice(profile, { reason: 'rejected' }), /refused to renew its saved sign-in.*Run `sab account login-claude work` on this Mac/)
   assert.match(signInNotice(profile, { reason: 'wrong-account' }), /Its last sign-in was a different account\./)
   assert.match(signInNotice({ ...profile, credentials: [{ kind: 'native-default' }] }, {}), /no longer accepts its saved sign-in\. Until then/)
+  assert.match(signInNotice({ ...profile, credentials: [{ kind: 'native-default' }] }, {}), /Run `claude auth login` on this Mac/)
   const inUse = signInNotice(profile, { reason: 'failed' }, { inUse: true })
   assert.match(inUse, /Sessions still use profile work, so sign in under a new profile name/)
   assert.doesNotMatch(inUse, /sab account login-claude/)
@@ -937,4 +938,77 @@ test('a renewal Claude did not confirm is logged but not announced, since the ne
   assert.deepEqual(owner, [])
   assert.ok(logged.includes('account sign-in renewal unconfirmed secondary'))
   assert.ok(Object.values(state.accountPools.observations).some(o => o.observation.reason === 'not-renewed'))
+})
+
+test('a renewal that failed twice in a row without a refusal tells the owner once; a good reading re-arms it', async () => {
+  let clock = now, reading = 'not-renewed'
+  const owner = []
+  const { runtime } = setup({ mode: 'shadow', now: () => clock, notifyOwner: async message => { owner.push(message) },
+    readQuota: async account => reading === 'observed'
+      ? normalizeQuotaObservation({ provider: 'claude', observedAt: clock, identity: { email: account.email, principalId: account.id },
+        quota: { five_hour: { utilization: 10, resets_at: new Date(clock + 3600000).toISOString() } } })
+      : { provider: 'claude', observedAt: clock, status: 'credential-unavailable', windows: [], reason: 'not-renewed' } })
+  const read = async next => { reading = next; clock += 4 * 3600001; await runtime.refresh('secondary'); await new Promise(resolve => setImmediate(resolve)) }
+  await read('not-renewed')
+  assert.deepEqual(owner, [], 'one unconfirmed renewal is retried quietly')
+  await read('not-renewed')
+  assert.equal(owner.length, 1)
+  assert.match(owner[0], /secondary@example\.test\* may need a new sign-in\. SAB could not renew its sign-in twice in a row\./)
+  await read('not-renewed')
+  assert.equal(owner.length, 1, 'once per episode')
+  await read('observed'); await read('not-renewed'); await read('not-renewed')
+  assert.equal(owner.length, 2, 'a good reading re-arms it')
+})
+
+test("the Mac's own login, read through a profile, tells the owner once each time Claude signs it out", async () => {
+  const record = compileAccountRegistry({ schemaVersion: 1, requestId: 'native-watch-fixture', accounts: [
+    { key: 'mac', provider: 'claude', email: 'mac@example.test', identityConfirmed: true,
+      credentials: [{ kind: 'native-default' }, { kind: 'claude-profile', profile: 'mac' }] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['mac'] }], routing: { defaultGroup: 'mine', channels: {} } })
+  let signedOut = true, clock = now
+  const owner = [], logged = [], state = { channels: {}, sessions: {} }
+  const runtime = createAccountPoolRuntime({ state, mode: 'shadow', readRegistry: () => record, persist: () => {}, now: () => clock,
+    log: (...args) => logged.push(args.join(' ')), notifyOwner: async message => { owner.push(message) },
+    nativeLoginSignedOut: async () => signedOut,
+    readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: clock, identity: { email: account.email, principalId: account.id },
+      quota: { five_hour: { utilization: 10, resets_at: new Date(clock + 3600000).toISOString() } } }) })
+  const tick = async () => { clock += 600000; await runtime.tick(); await new Promise(resolve => setImmediate(resolve)) }
+  await tick(); await tick()
+  assert.equal(owner.length, 1, 'one notice per sign-out')
+  assert.match(owner[0], /This Mac's own Claude login \(\*mac@example\.test\*\) needs a new sign-in\. .*Run `claude auth login` on this Mac/)
+  assert.ok(logged.includes('native Claude login signed out mac'))
+  signedOut = false; await tick()
+  assert.equal(state.accountPools.nativeLogin, undefined, 'a new sign-in ends the episode')
+  assert.ok(logged.includes('native Claude login signed in again'))
+  signedOut = true; await tick()
+  assert.equal(owner.length, 2)
+
+  // An account read through the Mac's own login gets its own needs-login notice instead.
+  let asked = 0
+  const own = setup({ mode: 'shadow', nativeLoginSignedOut: async () => { asked++; return true } })
+  await own.runtime.tick()
+  assert.equal(asked, 0)
+})
+
+test('a refused or wrong-account Claude login is signed in again under its running sessions; a 401 still asks for a new profile', async () => {
+  const record = compileAccountRegistry({ schemaVersion: 1, requestId: 'busy-profile-fixture', accounts: [
+    { key: 'busy', provider: 'claude', email: 'busy@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'work' }] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['busy'] }], routing: { defaultGroup: 'mine', channels: {} } })
+  const noticeFor = async reason => {
+    let clock = now
+    const owner = []
+    const state = { channels: { CBUSY: 'busy-one' }, sessions: { 'busy-one': { id: 'busy-one', channel: 'CBUSY', account: 'work',
+      accountKind: 'claude-profile', pid: 300, tmux: 'sab-busy' } } }
+    const runtime = createAccountPoolRuntime({ state, mode: 'shadow', readRegistry: () => record, persist: () => {}, now: () => clock,
+      isDormant: async () => false, notifyOwner: async message => { owner.push(message) },
+      readQuota: async () => ({ provider: 'claude', observedAt: clock, status: 'needs-login', windows: [], ...(reason && { reason }) }) })
+    await runtime.refresh('busy'); await new Promise(resolve => setImmediate(resolve))
+    return owner[0]
+  }
+  for (const reason of ['rejected', 'wrong-account']) {
+    const notice = await noticeFor(reason)
+    assert.match(notice, /Run `sab account login-claude work` on this Mac/, reason)
+    assert.doesNotMatch(notice, /new profile name/, reason)
+  }
+  assert.match(await noticeFor(null), /Sessions still use profile work, so sign in under a new profile name/)
 })

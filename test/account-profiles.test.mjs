@@ -350,3 +350,51 @@ test('signing in again continues a failed renewal only once verified, and only a
     assert.equal(fs.existsSync(path.join(lease, 'owner.json')), true)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
+
+test('a Claude login that is useless to its running sessions can be signed in again under them, as its own account only', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-profile-signed-out-'))
+  try {
+    const home = path.join(root, 'home'), configDir = path.join(root, 'bridge'), bin = path.join(root, 'bin')
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); fs.mkdirSync(configDir, { mode: 0o700 }); fs.mkdirSync(bin)
+    // A fake native sign-in that saves a credential for $HOME/email.
+    fs.writeFileSync(path.join(bin, 'claude'), [
+      '#!/bin/sh', '[ "$1 $2" = "auth login" ] || exit 2', 'umask 077',
+      'printf \'{"claudeAiOauth":{"accessToken":"FAKE","refreshToken":"FAKE-R","expiresAt":4102444800000}}\' > "$CLAUDE_CONFIG_DIR/.credentials.json"',
+      'printf \'{"oauthAccount":{"emailAddress":"%s"}}\' "$(cat "$HOME/email")" > "$CLAUDE_CONFIG_DIR/.claude.json"', '',
+    ].join('\n'), { mode: 0o755 })
+    fs.writeFileSync(path.join(home, 'email'), 'owner@example.test')
+    const directory = prepareClaudeProfile(configDir, 'extra', { nativeHome: path.join(home, '.claude') })
+    const credentials = path.join(directory, '.credentials.json')
+    const store = oauth => fs.writeFileSync(credentials, JSON.stringify({ claudeAiOauth: oauth }), { mode: 0o600 })
+    const script = fileURLToPath(new URL('../scripts/sab-account-profile.mjs', import.meta.url))
+    const run = () => spawnSync(process.execPath, [script, 'login', 'extra', 'claude'], {
+      env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, CCS_CONFIG_DIR: configDir, CCS_TMUX_BIN: '/usr/bin/false' }, encoding: 'utf8' })
+    const live = { id: 'live', provider: 'claude', account: 'extra', accountKind: 'claude-profile', pid: process.pid, tmux: 'sab-live' }
+    fs.writeFileSync(path.join(configDir, 'state.json'), JSON.stringify({ sessions: { live } }), { mode: 0o600 })
+    const inUse = /running or standby sessions still use this profile/
+
+    // Claude emptied the login, but no registered account says whose it is.
+    store({ accessToken: '', refreshToken: '', expiresAt: 0 })
+    assert.match(run().stderr, inUse)
+    stageAccountRegistry(configDir, compileAccountRegistry({ schemaVersion: 1, requestId: 'enroll', accounts: [
+      { key: 'extra-claude', provider: 'claude', email: 'owner@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'extra' }] },
+    ], groups: [{ key: 'mine', name: 'Mine', members: ['extra-claude'], preferred: { claude: 'extra-claude' } }],
+    routing: { defaultGroup: 'mine', channels: {} } }).spec, { expectedRevision: 0 })
+    // A login that still works is never replaced under running sessions.
+    store({ accessToken: 'WORKING', refreshToken: 'WORKING-R', expiresAt: 4102444800000 })
+    assert.match(run().stderr, inUse)
+
+    // Emptied: the sign-in goes ahead, and a wrong account is caught and fenced.
+    store({ accessToken: '', refreshToken: '', expiresAt: 0 })
+    fs.writeFileSync(path.join(home, 'email'), 'someone-else@example.test')
+    const wrong = run()
+    assert.equal(wrong.status, 1)
+    assert.match(wrong.stderr, /not the account this profile belongs to/)
+    // Signed in as another account, it is still useless to them, so the owner can fix it under them.
+    fs.writeFileSync(path.join(home, 'email'), 'owner@example.test')
+    const fixed = run()
+    assert.equal(fixed.status, 0, fixed.stderr)
+    assert.equal(fs.existsSync(path.join(directory, '.sab-auth-operation')), false)
+    assert.equal(JSON.parse(fs.readFileSync(credentials, 'utf8')).claudeAiOauth.accessToken, 'FAKE')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

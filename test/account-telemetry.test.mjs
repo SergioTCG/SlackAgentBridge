@@ -248,3 +248,25 @@ test('the Codex probe says whether a refresh may have been spent when it failed'
   await assert.rejects(probeCodexAccount({ accessToken: token, principalId: 'acct' }, { spawnChild: fixture({ failing: 'account/read' }) }),
     tagged(false), 'an unmanaged probe never refreshes')
 })
+
+test("a login Claude emptied after a refused renewal reads needs-login: a profile in use or idle, and the Mac's own login", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-telemetry-signed-out-'))
+  try {
+    const nativeHome = path.join(root, '.claude'); fs.mkdirSync(nativeHome)
+    const directory = prepareClaudeProfile(root, 'second', { nativeHome })
+    const emptied = JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } })
+    fs.writeFileSync(path.join(directory, '.credentials.json'), emptied, { mode: 0o600 })
+    fs.writeFileSync(path.join(nativeHome, '.credentials.json'), emptied, { mode: 0o600 })
+    const options = { configDir: root, now: () => now, env: { HOME: root, USER: 'fixture' },
+      execCredential: async () => { throw new Error('no keychain item') },
+      fetchImpl: async () => { throw new Error('must not call the provider') } }
+    const needsLogin = { provider: 'claude', observedAt: now, status: 'needs-login', windows: [], reason: 'rejected' }
+    const profile = { ...claude, credentials: [{ kind: 'claude-profile', profile: 'second' }] }
+    assert.deepEqual(await readAccountQuota(profile, options), needsLogin, 'a profile in use')
+    assert.deepEqual(await readAccountQuota(profile, { ...options, isProfileInactive: async () => true }), needsLogin, 'an idle profile')
+    assert.deepEqual(await readAccountQuota(claude, options), needsLogin, "the Mac's own login")
+    // A login that cannot be read at all stays credential-unavailable.
+    fs.rmSync(path.join(nativeHome, '.credentials.json'))
+    assert.equal((await readAccountQuota(claude, options)).status, 'credential-unavailable')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

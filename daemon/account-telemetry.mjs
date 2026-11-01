@@ -9,11 +9,21 @@ import { readPrivateAccountFile } from './account-registry-store.mjs'
 import { normalizeQuotaObservation } from './account-quota.mjs'
 import { readLegacyClaudeToken } from './account-credentials.mjs'
 import { codexProfileHome, claudeProfileHome, accountCredentialReference, withAccountProfileLease, recordProfileLeaseFailure, profileNeedsLogin } from './account-profiles.mjs'
-import { readClaudeOAuth, refreshInactiveClaudeProfile } from './account-claude-auth.mjs'
+import { readClaudeOAuth, refreshInactiveClaudeProfile, claudeLoginSignedOut } from './account-claude-auth.mjs'
 
 const execute = promisify(execFile)
 const safeCode = code => { throw new Error(code) }
 const secretString = value => typeof value === 'string' && value.length > 0 && value.length <= 65536 && !/[\r\n\0]/.test(value)
+
+// Whoever's renewal the provider refused, SAB's or a running session's, Claude
+// then empties the login: that needs its owner, not another reading.
+async function readClaudeLogin(read, { directory = null, env, execCredential }) {
+  try { return await read() }
+  catch (error) {
+    if (error?.message === 'credential_unavailable' && await claudeLoginSignedOut({ directory, env, execCredential })) throw profileNeedsLogin('rejected')
+    throw error
+  }
+}
 
 export function quotaProbeEnvironment(root, env = process.env) {
   return {
@@ -43,16 +53,16 @@ async function readCredential(account, { configDir, env, execCredential, now, is
   if (account.provider !== 'claude') safeCode('credential_unavailable')
   if (ref.kind === 'claude-profile') {
     const directory = claudeProfileHome(configDir, ref.profile)
-    const oauth = isProfileInactive
-      ? await refreshInactiveClaudeProfile({ configDir, profile: ref.profile, isInactive: profile => isProfileInactive('claude', profile), env, execCredential, now })
-      : await readClaudeOAuth({ directory, env, execCredential })
+    const oauth = await readClaudeLogin(() => isProfileInactive
+      ? refreshInactiveClaudeProfile({ configDir, profile: ref.profile, isInactive: profile => isProfileInactive('claude', profile), env, execCredential, now })
+      : readClaudeOAuth({ directory, env, execCredential }), { directory, env, execCredential })
     if (Number.isFinite(oauth.expiresAt) && oauth.expiresAt <= now()) safeCode('credential_unavailable')
     return { accessToken: oauth.accessToken }
   }
   if (env.CLAUDE_CONFIG_DIR || env.CLAUDE_SECURESTORAGE_CONFIG_DIR ||
       ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_PROFILE',
         'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'].some(key => env[key])) safeCode('credential_unavailable')
-  const oauth = await readClaudeOAuth({ env, execCredential })
+  const oauth = await readClaudeLogin(() => readClaudeOAuth({ env, execCredential }), { env, execCredential })
   if (!secretString(oauth?.accessToken) || (Number.isFinite(oauth.expiresAt) && oauth.expiresAt <= now())) safeCode('credential_unavailable')
   return { accessToken: oauth.accessToken }
 }

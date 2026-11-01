@@ -6,7 +6,7 @@ import {
   codexProfileHome, prepareCodexProfile, claudeProfileHome, prepareClaudeProfile, withProfileSignIn, profileLeaseState,
   seedClaudeFirstRunState, claudeNativeConfigFile,
 } from '../daemon/account-profiles.mjs'
-import { verifyClaudeProfileSignIn } from '../daemon/account-claude-auth.mjs'
+import { verifyClaudeProfileSignIn, claudeLoginSignedOut } from '../daemon/account-claude-auth.mjs'
 
 // A session counts as running while its process or its exact tmux session
 // lives, and also when tmux cannot say.
@@ -54,12 +54,19 @@ try {
       } catch { /* unreadable registry: no exception below, plain enrollment still works */ }
     }
     const expectedEmail = registered?.email || null
-    // Needs-login as SAB last read it: a kept lease, or the provider's 401.
-    const needsLogin = Boolean(profileLeaseState(directory)?.needsLogin) ||
+    // A login Claude emptied after the provider refused to renew it.
+    const signedOut = provider === 'claude' && await claudeLoginSignedOut({ directory })
+    const leased = profileLeaseState(directory)?.needsLogin
+    // Needs-login as SAB last read it: a kept lease, the provider's 401, or an emptied login.
+    const needsLogin = signedOut || Boolean(leased) ||
       state.accountPools?.observations?.[registered?.id]?.observation?.status === 'needs-login'
     const users = Object.values(state.sessions || {}).filter(s => (s.provider || 'claude') === provider && s.account === profile &&
       (provider === 'codex' || s.accountKind === 'claude-profile'))
-    if (users.length && (provider !== 'claude' || !expectedEmail || !needsLogin || users.some(sessionRunning))) throw new Error('profile_in_use')
+    // Running sessions may stay only when the profile's login is useless to
+    // them as it is: emptied, or another account's. This sign-in, proven to be
+    // the registered account, is what they wait for, and they pick it up.
+    const unusable = signedOut || leased === 'wrong-account'
+    if (users.length && (provider !== 'claude' || !expectedEmail || !needsLogin || (!unusable && users.some(sessionRunning)))) throw new Error('profile_in_use')
     const verify = provider === 'claude'
       ? () => verifyClaudeProfileSignIn({ directory, expectedEmail })
       : async () => readPrivateAccountFile(path.join(directory, 'auth.json'), { json: true })?.tokens?.access_token ? 'ok' : 'not-signed-in'
