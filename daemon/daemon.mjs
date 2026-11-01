@@ -7387,7 +7387,8 @@ async function postAccountPoolStatus(channel) {
     const known = sample?.status === 'observed' ? sample : account.lastKnownQuota
     const windows = known?.windows?.map(w => `${Math.round(w.usedPercent)}% (${w.inactive ? 'unused window; reset not started' : `resets ${new Date(w.resetsAt).toISOString()}`})`).join(' · ') || 'unknown'
     const age = sample ? `${Math.max(0, Math.floor((Date.now() - sample.observedAt) / 1000))}s old` : 'not sampled'
-    return `• ${account.email}: ${sample?.status || 'unknown'} · ${known && known !== sample ? 'last known (not eligible): ' : ''}${windows} · ${age}`.slice(0, 2900)
+    const reason = /^[a-z-]{1,20}$/.test(sample?.reason || '') ? ` (${sample.reason})` : ''
+    return `• ${account.email}: ${sample?.status || 'unknown'}${reason} · ${known && known !== sample ? 'last known (not eligible): ' : ''}${windows} · ${age}`.slice(0, 2900)
   })
   const text = `*Account group: ${info.group.name}* · mode: ${info.mode}\n` +
     `Current: ${info.currentAccount?.email || 'unresolved legacy binding'}\n${rows.join('\n')}\n` +

@@ -8,6 +8,23 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- An idle Claude profile stays signed in. SAB renewed it through
+  `claude auth login` with the stored refresh token. That path asks for a
+  long-lived token, and the login it saves cannot be renewed again. So each
+  sign-in got exactly one renewal, and the next one, eight hours later, was
+  always refused. That took two accounts out on 30 and 31 October and one
+  again on 1 November.
+  - SAB now starts `claude -p --input-format stream-json` in the profile with
+    an open, empty input and lets Claude renew the login itself, through the
+    same startup refresh every running session uses. No prompt is sent, and no
+    token is in its environment. SAB watches the stored login for up to a
+    minute, then closes Claude's input.
+  - A login the provider refused, which Claude then empties, reads
+    `needs-login` (`rejected`) and keeps the profile locked until the owner
+    signs in again. A renewal Claude did not confirm releases the lock and
+    reads `credential-unavailable` (`not-renewed`). It is logged and tried
+    again at the next reading.
+  - `/sab-account` shows an account's reason code next to its status.
 - An account whose sign-in only its owner can renew now says so. Before, an
   idle Claude profile whose automatic renewal failed read
   `credential-unavailable` for good: SAB kept the profile locked, because the

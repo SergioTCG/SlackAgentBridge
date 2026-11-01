@@ -191,6 +191,13 @@ test('a profile whose renewal failed reads needs-login with its reason; one stil
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
+test('a renewal Claude did not confirm reads credential-unavailable with its reason, not needs-login', async () => {
+  const result = await readAccountQuota(claude, { now: () => now,
+    resolveCredential: async () => { throw new Error('account_renewal_unconfirmed') },
+    fetchImpl: async () => { throw new Error('must not call the provider') } })
+  assert.deepEqual(result, { provider: 'claude', observedAt: now, status: 'credential-unavailable', windows: [], reason: 'not-renewed' })
+})
+
 test('a managed Codex probe that ran and failed keeps its lease as needs-login; one stopped before it releases the lease', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-telemetry-codex-lease-'))
   try {

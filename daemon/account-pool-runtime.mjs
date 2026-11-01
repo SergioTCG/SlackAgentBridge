@@ -31,7 +31,7 @@ const automaticRetryDelay = journal => journal.usageLimit
 const retryLabel = ms => ms < 3600000 ? `${Math.round(ms / 60000)} min` : `${Math.round(ms / 3600000)} h`
 const renewalFailures = {
   timeout: "SAB's automatic renewal of its sign-in did not finish in time.",
-  rejected: "The provider rejected SAB's automatic renewal of its sign-in.",
+  rejected: 'The provider refused to renew its saved sign-in.',
   failed: "SAB's automatic renewal of its sign-in failed.",
   'not-renewed': "SAB's automatic renewal saved no new sign-in.",
   abandoned: "A renewal or sign-in of it stopped before it finished.",
@@ -220,6 +220,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       if (observation.status === 'needs-login' && latest?.observation?.status !== 'needs-login') {
         log('account sign-in needs renewing', account.key, observation.reason || 'provider')
       }
+      if (observation.reason === 'not-renewed' && observation.status !== 'needs-login') log('account sign-in renewal unconfirmed', account.key)
       if (observation.status === 'needs-login' && !ownerNotifiedAt && !noticesPosting.has(account.id)) {
         noticesPosting.add(account.id)
         Promise.resolve().then(async () => {
