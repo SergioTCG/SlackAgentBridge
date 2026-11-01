@@ -8,6 +8,25 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- Every Claude login whose renewal fails now tells its owner. Before, only a
+  renewal SAB itself ran on an idle profile could: a login in use, including
+  the Mac's own, read `credential-unavailable`, and nobody was told.
+  - Claude empties a stored login once the provider refuses to renew it. SAB
+    now reads that as `needs-login` (`rejected`) for profiles in use or idle
+    and for the Mac's own login. The control channel gets the usual single
+    notice, which names `claude auth login` for the Mac's own login. A login
+    whose refresh token has reached its fixed expiry, about a month after its
+    sign-in, ends this way.
+  - When SAB reads an account through a profile, it also watches that
+    account's Mac login, with one notice per sign-out.
+  - A renewal that stays unconfirmed twice in a row sends one warning, without
+    a command, since the saved sign-in may still be fine. The first is only
+    logged and retried. A sign-in that becomes necessary later still gets its
+    own notice.
+  - For `sab account login-claude PROFILE`, a login Claude emptied also counts
+    as needing a sign-in, so dormant sessions on the profile no longer block
+    it. Running sessions still do: they would pick up whatever account signs
+    in.
 - An idle Claude profile stays signed in. SAB renewed it through
   `claude auth login` with the stored refresh token. That path asks for a
   long-lived token, and the login it saves cannot be renewed again. So each

@@ -633,12 +633,31 @@ How a renewal ends:
   `timeout`, `failed` or `not-renewed`.
 
 Any of these makes the account read `needs-login`, and launches on the
-profile refuse. So does a 401 from Claude's API, for any kind of Claude credential.
+profile refuse. So does a 401 from Claude's API, for any kind of Claude
+credential. So does a Claude login that Claude itself emptied: Claude empties a
+stored login once the provider refuses to renew it, whether SAB or a running
+session asked. That covers profiles in use, which SAB never renews, and the
+Mac's own login. A login whose refresh token has reached its fixed expiry,
+about a month after its sign-in, ends this way.
 - The control channel gets one notice per episode, naming
   `sab account login-claude PROFILE` or `sab account login-codex PROFILE` when
-  the credential is a profile. When sessions that refuse that sign-in still use
-  the profile, the notice names the new-profile route instead. That means any
-  session for Codex, and a running one for Claude.
+  the credential is a profile, and `claude auth login` for the Mac's own login.
+  When sessions that refuse that sign-in still use the profile, the notice
+  names the new-profile route instead. That means any session for Codex, and a
+  running one for Claude.
+- A renewal that stays unconfirmed (`not-renewed`) twice in a row sends one
+  warning per episode. It names no command, because the saved sign-in may still
+  be fine and SAB keeps trying. The first unconfirmed renewal is only logged. A
+  sign-in that becomes necessary later still gets its own notice: only a
+  sign-in notice covers the rest of an episode.
+- When the account that lists the Mac's own login (`native-default`) is read
+  through a profile, nothing else would notice Claude emptying the Mac's login.
+  So each pool tick also checks that login's stored record, without network
+  I/O. A read that fails changes nothing. Once Claude empties the login, the
+  daemon logs
+  `native Claude login signed out` and the control channel gets one notice
+  naming `claude auth login`. A new sign-in ends that episode, and the daemon
+  logs `native Claude login signed in again`.
 - Only a reading the provider accepted the credential for re-arms the notice: a
   good one, a 403, or another account's profile. A notice that could not be
   posted is tried again at the next reading, and never sent twice at once.
@@ -657,7 +676,8 @@ it:
 - Sessions still using the profile refuse the sign-in as above. The exception
   is a registered Claude profile that needs a new sign-in while every session
   using it is dormant, with no live process or tmux. The account needs one if
-  it has a kept lease or SAB last read it as needs-login. Those sessions are
+  it has a kept lease, if SAB last read it as needs-login, or if Claude emptied
+  its login. Those sessions are
   waiting for exactly this sign-in. A session whose tmux cannot be checked
   counts as running.
 - A sign-in that fails hands the lease back as a plain fence, so the next

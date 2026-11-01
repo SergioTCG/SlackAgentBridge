@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
-import { readClaudeOAuth, refreshInactiveClaudeProfile, verifyClaudeProfileSignIn } from '../daemon/account-claude-auth.mjs'
+import { readClaudeOAuth, refreshInactiveClaudeProfile, verifyClaudeProfileSignIn, claudeLoginState } from '../daemon/account-claude-auth.mjs'
 import { prepareClaudeProfile } from '../daemon/account-profiles.mjs'
 
 // A fake `claude`: records how it was started, and lets each test decide what
@@ -192,5 +192,23 @@ test('an owner sign-in counts only with a fresh credential for the account the p
     assert.equal(await verifyClaudeProfileSignIn({ ...options, expectedEmail: 'owner@example.test' }), 'not-signed-in')
     assert.equal(await verifyClaudeProfileSignIn({ ...options, readOAuth: async () => ({ accessToken: 'PRIVATE', expiresAt: 1000 }) }), 'not-signed-in')
     assert.equal(await verifyClaudeProfileSignIn({ ...options, readOAuth: async () => { throw new Error('none') } }), 'not-signed-in')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('only a login Claude emptied after a refused renewal reads as signed out; nothing read is unknown', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-auth-signed-out-'))
+  try {
+    const file = path.join(root, '.credentials.json')
+    const store = oauth => fs.writeFileSync(file, JSON.stringify({ claudeAiOauth: oauth }), { mode: 0o600 })
+    const state = () => claudeLoginState({ directory: root, platform: 'linux' })
+    assert.equal(await state(), 'unknown', 'no stored login at all')
+    store({ accessToken: 'PRIVATE', refreshToken: 'PRIVATE-REFRESH', expiresAt: 1 })
+    assert.equal(await state(), 'signed-in', 'an expired login can still be renewed')
+    store({ accessToken: 'PRIVATE' })
+    assert.equal(await state(), 'signed-in', 'a login without a refresh token')
+    store({ accessToken: '', refreshToken: '', expiresAt: 0 })
+    assert.equal(await state(), 'signed-out')
+    fs.chmodSync(file, 0o644)
+    assert.equal(await state(), 'unknown', 'an unsafe file is not read')
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })

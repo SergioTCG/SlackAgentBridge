@@ -6,7 +6,7 @@ import {
   codexProfileHome, prepareCodexProfile, claudeProfileHome, prepareClaudeProfile, withProfileSignIn, profileLeaseState,
   seedClaudeFirstRunState, claudeNativeConfigFile,
 } from '../daemon/account-profiles.mjs'
-import { verifyClaudeProfileSignIn } from '../daemon/account-claude-auth.mjs'
+import { verifyClaudeProfileSignIn, claudeLoginState } from '../daemon/account-claude-auth.mjs'
 
 // A session counts as running while its process or its exact tmux session
 // lives, and also when tmux cannot say.
@@ -54,9 +54,12 @@ try {
       } catch { /* unreadable registry: no exception below, plain enrollment still works */ }
     }
     const expectedEmail = registered?.email || null
-    // Needs-login as SAB last read it: a kept lease, or the provider's 401.
+    // Needs a sign-in: a kept lease, the provider's 401 as SAB last read it, or
+    // a login Claude emptied after the provider refused to renew it. Running
+    // sessions always refuse it: they would pick up any account signed in here.
     const needsLogin = Boolean(profileLeaseState(directory)?.needsLogin) ||
-      state.accountPools?.observations?.[registered?.id]?.observation?.status === 'needs-login'
+      state.accountPools?.observations?.[registered?.id]?.observation?.status === 'needs-login' ||
+      provider === 'claude' && await claudeLoginState({ directory }) === 'signed-out'
     const users = Object.values(state.sessions || {}).filter(s => (s.provider || 'claude') === provider && s.account === profile &&
       (provider === 'codex' || s.accountKind === 'claude-profile'))
     if (users.length && (provider !== 'claude' || !expectedEmail || !needsLogin || users.some(sessionRunning))) throw new Error('profile_in_use')

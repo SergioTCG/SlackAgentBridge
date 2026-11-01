@@ -40,6 +40,17 @@ export async function readClaudeOAuth({ directory = null, env = process.env, pla
   return oauth
 }
 
+// Claude empties a stored login once the provider refuses to renew it, whether
+// SAB or a running session asked. Only a new sign-in brings it back. The state
+// is `signed-out` for such a record and `signed-in` for one holding a token.
+// It is `unknown` when nothing could be read, which nobody may act on.
+export async function claudeLoginState({ directory = null, env = process.env, platform = process.platform,
+  execCredential = execute } = {}) {
+  let record
+  try { record = await readClaudeOAuth({ directory, env, platform, execCredential, requireToken: false }) } catch { return 'unknown' }
+  return !secret(record?.accessToken) && !secret(record?.refreshToken) ? 'signed-out' : 'signed-in'
+}
+
 // Claude renews a profile itself: an expired login is refreshed when Claude
 // starts, through the path every running session uses. That path rotates the
 // refresh token and saves the new pair under Claude's own lock. SAB only starts
