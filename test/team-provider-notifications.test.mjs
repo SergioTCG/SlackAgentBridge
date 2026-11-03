@@ -157,6 +157,17 @@ test('genuine local input still revokes the coordinator\'s team turn', () => {
   }
 })
 
+test('peer traffic never fails a delegated task but still ends team authority', () => {
+  for (const activeTaskId of [null, 'task_x']) {
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'peer', activeTaskId, peerMessage: true }), 'revoke_turn')
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'peer', activeTaskId, peerMessage: true, injected: true }), null)
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'peer', activeTaskId, peerMessage: true, automationEcho: true }), null)
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'peer', activeTaskId, peerMessage: true, providerInternal: true }), null)
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: '', activeTaskId, peerMessage: true }), null)
+  }
+  assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'typed', activeTaskId: 'task_x' }), 'fail_task')
+})
+
 test('bridge injections and automation echoes keep their existing semantics', () => {
   const continuation = 'SYSTEM NOTIFICATION: Team executors produced 1 new event. Continue the batch.'
   assert.equal(unacknowledgedPromptTeamEffect({ prompt: continuation, activeTaskId: null, injected: true }), null)
@@ -178,12 +189,13 @@ test('the prompt hook routes provider notifications through the shared guard', (
   // it is never that task's delivery, acknowledgement or identity mismatch.
   assert.ok(taskMarker(MONITOR_EVENT.replace('<event>',
     '<event><sab-team-task id="task_other" team="team_issues" generation="1">')) === 'task_other')
-  assert.match(promptHook, /const teamTaskId = providerInternal \? null : taskMarker\(p\)/)
-  assert.match(promptHook, /const promptTeamTurn = providerInternal \? null : providerPromptTurnMarker\(p\)/)
+  assert.match(promptHook, /const neverDelivery = providerInternal \|\| peerMessage/)
+  assert.match(promptHook, /const teamTaskId = neverDelivery \? null : taskMarker\(p\)/)
+  assert.match(promptHook, /const promptTeamTurn = neverDelivery \? null : providerPromptTurnMarker\(p\)/)
   assert.ok(promptHook.indexOf('taskMarker(p)') > classify && promptHook.indexOf('providerPromptTurnMarker(p)') > classify)
 
   assert.match(promptHook,
-    /const localPromptEffect = unacknowledgedPromptTeamEffect\(\{\s*prompt: p, activeTaskId: session\.teamActiveTaskId, injected, automationEcho, providerInternal,\s*\}\)/)
+    /const localPromptEffect = unacknowledgedPromptTeamEffect\(\{\s*prompt: p, activeTaskId: session\.teamActiveTaskId, injected, automationEcho, providerInternal, peerMessage,\s*\}\)/)
   assert.match(promptHook,
     /if \(localPromptEffect === 'fail_task'\) \{\s*await failTeamTaskForSession\(session, 'A local terminal prompt replaced the delegated worker turn\.'\)/)
   assert.match(promptHook,

@@ -8,6 +8,18 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A message from another Claude session, a subagent's message to its parent or
+  a delivery notice no longer fails a worker's delegated team task. Claude Code
+  submits these as prompts and SAB treated them as local terminal input, so the
+  task failed while the worker kept working.
+  - A task envelope quoted inside one is never treated as a delivery, so quoting
+    another task no longer fails the worker either.
+  - They still end a coordinator's team turn, so another session can't borrow
+    its authority.
+  - A turn one of them starts on an idle worker reports like any later turn: the
+    coordinator sees its reply, and that reply becomes the task's latest result.
+  - Typed and pasted input, and Codex and Pi prompts, still fail or revoke as
+    before.
 - Messages between Claude sessions no longer appear in a channel as terminal
   typing. Claude Code submits them as prompts, to an idle session and mid-turn
   alike, so the mirror posted them in full as `You (terminal)`. The mirror now

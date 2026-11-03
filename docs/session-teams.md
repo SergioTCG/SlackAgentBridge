@@ -321,6 +321,14 @@ background-command, subagent, and Monitor notifications are not local input.
 Claude Code submits them as prompts, even mid-turn, but they neither revoke the
 current turn's authority nor replace a worker's delegated turn.
 
+Messages between sessions sit between the two. A message from another Claude
+session, a subagent's message to its parent and a delivery notice never replace
+a worker's delegated turn, and a task envelope quoted inside one is never a
+delivery. Each still ends the current owner or delegated team turn, so another
+session cannot borrow that authority. A turn one of them starts on an idle worker
+reports like any later turn in the same work generation: the coordinator sees its
+reply, and that reply becomes the task's latest result.
+
 ## Agent-facing CLI
 
 The provider can use the sole public executable without constructing HTTP or

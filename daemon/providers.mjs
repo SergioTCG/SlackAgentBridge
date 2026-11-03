@@ -112,8 +112,9 @@ export function isProviderInternalPrompt(provider, prompt) {
 // - `[Cross-session delivery notice]`: what became of a message this session sent.
 // Every envelope attribute is optional, so only the marker identifies them. Text that
 // merely quotes one, or pastes it inside `<pasted_content>`, is still someone's input.
-// This decides what the terminal mirror posts and nothing else: these prompts are
-// deliberately not provider-internal, so they keep their existing team-authority effect.
+// None of them is typing, so the terminal mirror skips them and they never replace a
+// delegated worker turn. They are deliberately not provider-internal, because they still
+// end a coordinator's team-turn authority: another session must not be able to borrow it.
 const CLAUDE_PEER_PROMPT = /^(?:<(?:cross-session-message|agent-message)(?:\s[^>]*)?>|\[Cross-session delivery notice\])/
 export function isPeerMessagePrompt(provider, prompt) {
   return normalizeProvider(provider) === 'claude' &&
