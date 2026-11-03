@@ -141,7 +141,9 @@ BIN_DIR="${CCS_BIN_DIR:-/opt/homebrew/bin}"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_HOOKS="$CODEX_DIR/hooks.json"
-LOG="$BRIDGE/daemon.log"
+# launchd opens the log itself before it starts the daemon, and macOS can refuse
+# that on an external disk, so the log stays out of the checkout.
+LOG="$CONFIG_DIR/daemon.log"
 
 say() { printf '%s\n' "$*"; }
 wants_claude() { [ "$INSTALL_PROVIDER" = claude ] || [ "$INSTALL_PROVIDER" = both ] || [ "$INSTALL_PROVIDER" = all ]; }
@@ -340,4 +342,5 @@ if wants_pi; then
   say "   Start Pi locally: sab new pi"
   say "   Pi's SAB extension is loaded explicitly by sab; no global Pi extension is installed."
 fi
-say "   Logs: tail -f $LOG"
+# A staged run leaves the live agent as it was, and that agent may log elsewhere.
+if [ "$RELOAD_DAEMON" = 1 ]; then say "   Logs: tail -f $LOG"; fi

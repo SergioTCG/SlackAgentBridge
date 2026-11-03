@@ -379,3 +379,73 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     fs.rmSync(temp, { recursive: true, force: true })
   }
 })
+
+test('a daemon reload moves the log out of the checkout, and a staged run leaves it alone', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-log-path-'))
+  try {
+    const fakeBin = path.join(temp, 'fake-bin')
+    const config = path.join(temp, 'config')
+    const linkedBin = path.join(temp, 'linked-bin')
+    const bridge = path.join(temp, 'custom-install')
+    const launchAgents = path.join(temp, 'Library', 'LaunchAgents')
+    const plist = path.join(launchAgents, 'si.sergej.claudeslackproxy.plist')
+    fs.mkdirSync(fakeBin, { recursive: true })
+    fs.mkdirSync(config, { recursive: true })
+    fs.mkdirSync(linkedBin, { recursive: true })
+    fs.mkdirSync(launchAgents, { recursive: true })
+    fs.mkdirSync(path.join(bridge, 'daemon'), { recursive: true })
+    fs.mkdirSync(path.join(bridge, 'bin'), { recursive: true })
+    fs.copyFileSync(new URL('../install.sh', import.meta.url), path.join(bridge, 'install.sh'))
+    fs.writeFileSync(path.join(bridge, 'daemon/daemon.mjs'), '// isolated installer fixture\n')
+    fs.writeFileSync(path.join(bridge, 'bin/sab'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    for (const command of ['claude', 'tmux']) {
+      fs.writeFileSync(path.join(fakeBin, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    }
+    // Reports the service as not loaded and accepts everything else, so the
+    // reload path runs without reaching the real launchd.
+    fs.writeFileSync(path.join(fakeBin, 'launchctl'), '#!/bin/sh\n[ "$1" = print ] && exit 1\nexit 0\n', { mode: 0o755 })
+    fs.writeFileSync(path.join(config, 'env'), 'SLACK_BOT_TOKEN=xoxb-test\nSLACK_APP_TOKEN=xapp-test\n', { mode: 0o600 })
+
+    const oldLog = path.join(bridge, 'daemon.log')
+    const olderPlist = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0"><dict>',
+      `<key>WorkingDirectory</key><string>${bridge}</string>`,
+      `<key>StandardOutPath</key><string>${oldLog}</string>`,
+      `<key>StandardErrorPath</key><string>${oldLog}</string>`,
+      '</dict></plist>',
+      '',
+    ].join('\n')
+    fs.writeFileSync(plist, olderPlist)
+
+    const install = (...args) => spawnSync('bash', [path.join(bridge, 'install.sh'), '--provider', 'claude', ...args], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: temp,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        CCS_CONFIG_DIR: config,
+        CCS_BIN_DIR: linkedBin,
+        CODEX_HOME: path.join(temp, 'codex'),
+        CCS_SKIP_DEPENDENCY_INSTALL: '1',
+        CCS_SKIP_GIT_REMOTE_MIGRATION: '1',
+      },
+    })
+
+    const staged = install('--no-daemon-reload')
+    assert.equal(staged.status, 0, staged.stderr || staged.stdout)
+    assert.equal(fs.readFileSync(plist, 'utf8'), olderPlist, 'a staged run must not touch the live agent')
+    assert.doesNotMatch(staged.stdout, /Logs:/, 'a staged run did not set the log path, so it must not print one')
+
+    const reload = install()
+    assert.equal(reload.status, 0, reload.stderr || reload.stdout)
+    const log = path.join(config, 'daemon.log')
+    const installed = fs.readFileSync(plist, 'utf8')
+    assert.ok(installed.includes(`<key>StandardOutPath</key><string>${log}</string>`), installed)
+    assert.ok(installed.includes(`<key>StandardErrorPath</key><string>${log}</string>`), installed)
+    assert.ok(!installed.includes(oldLog), 'launchd can be refused a log inside a checkout on an external disk')
+    assert.ok(reload.stdout.includes(`Logs: tail -f ${log}`), reload.stdout)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
