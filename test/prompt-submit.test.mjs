@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createPromptSubmitHandler } from '../daemon/prompt-submit.mjs'
-import { providerOf } from '../daemon/providers.mjs'
+import { isPeerSessionPrompt, isProviderInternalPrompt, providerOf } from '../daemon/providers.mjs'
 import { createInjectedTextCache } from '../daemon/util.mjs'
 import {
   addTeamWorker, appendCoordinatorTaskMessage, beginCoordinatorTaskMessageDelivery, beginOwnerTeamTurn,
@@ -44,7 +44,8 @@ function createBridge({ provider = 'codex', start = Date.parse('2026-10-07T13:00
   const boot = () => {
     const injected = createInjectedTextCache({ now })
     const effects = {
-      failures: [], mirrored: [], reservations: [], codexTurns: [], audits: [], logs: [], pollerTurns: [], saves: 0,
+      failures: [], mirrored: [], reservations: [], codexTurns: [], audits: [], logs: [], pollerTurns: [], pollerStarts: [],
+      saves: 0,
     }
     const teamTurnProof = new Set()
     const handle = createPromptSubmitHandler({
@@ -77,7 +78,7 @@ function createBridge({ provider = 'codex', start = Date.parse('2026-10-07T13:00
         failTeamTask(state, taskId, reason, { now: clock })
         return true
       },
-      startPoller: () => {},
+      startPoller: session => { effects.pollerStarts.push(session.id) },
       saveStateNow: () => { effects.saves++ },
       post: async (_channel, text) => { effects.mirrored.push(text) },
       log: (...args) => effects.logs.push(args.map(String).join(' ')),
@@ -150,11 +151,12 @@ function createBridge({ provider = 'codex', start = Date.parse('2026-10-07T13:00
       return { message, prompt, generation: turn.providerWorkGeneration, finishTransport }
     },
     // The provider's UserPromptSubmit hook as the daemon receives it.
-    async hook(prompt, { sessionId = 'sid-worker', turnId = null } = {}) {
+    async hook(prompt, { sessionId = 'sid-worker', turnId = null, pasted = true } = {}) {
       const session = state.sessions[sessionId]
       const sessionProvider = providerOf(session)
-      // Claude Code wraps pasted multi-line input; Codex submits it verbatim.
-      const native = sessionProvider === 'claude'
+      // Claude Code wraps pasted multi-line input; Codex submits it verbatim, and
+      // so does Claude Code for what nobody pasted, such as a peer session's message.
+      const native = pasted && sessionProvider === 'claude'
         ? `\n\n<pasted_content id="4504">\n${prompt}\n</pasted_content id="4504">`
         : prompt
       await runtime.handle({
@@ -391,4 +393,130 @@ test('a late hook for a terminated task neither resurrects it nor shows as typin
   assert.equal(bridge.worker.teamActiveTaskId, undefined)
   assert.deepEqual(bridge.effects.failures, [])
   assert.equal(bridge.effects.mirrored.length, 0, 'the bridge\'s own journaled prompt is not terminal typing')
+})
+
+// A message from another Claude session, as Claude Code 2.1.317 submits it to
+// UserPromptSubmit whether the recipient is idle or mid-turn.
+const PEER_ATTRIBUTES = 'from="uds:/tmp/cc-socks/1234.sock" from-name="peer-session" from-mode="bypass"'
+const peerMessage = (attributes = ` ${PEER_ATTRIBUTES}`, body = 'Internal note from another session.') =>
+  `<cross-session-message${attributes}>\n${body}\n</cross-session-message>`
+const TYPED = 'stop and summarize what you have so far'
+const mirroredAsTyping = text => `💬 *You (terminal):*\n${text}`
+
+async function idleClaudeBridgeAfter(prompt, options = {}) {
+  const bridge = createBridge({ provider: 'claude' })
+  await bridge.hook(prompt, { pasted: false, ...options })
+  return bridge
+}
+
+// Everything the hook did except its post, for comparing two otherwise identical runs.
+function effectsApartFromThePost(bridge) {
+  const { mirrored: _mirrored, ...effects } = bridge.effects
+  return { effects, session: bridge.worker, tasks: bridge.state.teamTasks ?? null }
+}
+
+for (const [label, leading] of [['', ''], [' after leading whitespace', '\n\n  \t']]) {
+  test(`a peer message to an idle session is not mirrored${label}, and the hook's other effects are unchanged`, async () => {
+    const prompt = `${leading}${peerMessage()}`
+    assert.equal(isPeerSessionPrompt('claude', prompt), true)
+    const peer = await idleClaudeBridgeAfter(prompt)
+    assert.deepEqual(peer.effects.mirrored, [], 'nothing reaches the channel')
+
+    assert.deepEqual(peer.effects.reservations, ['provider'], 'it still starts a provider turn')
+    assert.deepEqual(peer.effects.pollerStarts, ['sid-worker'], 'and the working status still follows it')
+    assert.deepEqual(peer.effects.failures, [])
+    assert.deepEqual(peer.effects.logs, [])
+
+    // Until now the hook could not tell a peer message from typing, so typing is
+    // the exact baseline: only the post may differ.
+    const typed = await idleClaudeBridgeAfter(TYPED)
+    assert.deepEqual(typed.effects.mirrored, [mirroredAsTyping(TYPED)])
+    assert.deepEqual(effectsApartFromThePost(peer), effectsApartFromThePost(typed))
+  })
+}
+
+test('typed text that quotes the peer tag mid-line still mirrors', async () => {
+  const typed = `Why does <cross-session-message ${PEER_ATTRIBUTES}> show up in my transcript?`
+  const bridge = await idleClaudeBridgeAfter(typed)
+  assert.deepEqual(bridge.effects.mirrored, [mirroredAsTyping(typed)])
+})
+
+test('ordinary typing still mirrors', async () => {
+  const bridge = await idleClaudeBridgeAfter(TYPED)
+  assert.deepEqual(bridge.effects.mirrored, [mirroredAsTyping(TYPED)])
+})
+
+test('input that only resembles a peer message still mirrors', async () => {
+  const typed = {
+    'quoted on a later line': `see this:\n${peerMessage()}`,
+    'another tag name': `<cross-session-messages ${PEER_ATTRIBUTES}>\nnote\n</cross-session-messages>`,
+    'a longer tag name': `<cross-session-message-log ${PEER_ATTRIBUTES}>\nnote`,
+    'a tag never closed': '<cross-session-message is a tag I keep seeing, what is it',
+    'no opening bracket': `cross-session-message ${PEER_ATTRIBUTES}>`,
+  }
+  for (const [label, text] of Object.entries(typed)) {
+    assert.equal(isPeerSessionPrompt('claude', text), false, label)
+    const bridge = await idleClaudeBridgeAfter(text)
+    assert.deepEqual(bridge.effects.mirrored, [mirroredAsTyping(text)], label)
+  }
+  // Someone at the terminal pasted one: Claude Code wraps a paste, so it is input.
+  const pasted = createBridge({ provider: 'claude' })
+  await pasted.hook(peerMessage())
+  assert.equal(pasted.effects.mirrored.length, 1, 'a pasted copy is what someone typed')
+})
+
+test('every attribute combination Claude Code can write is recognized', async () => {
+  const attributes = {
+    'no attributes at all': '',
+    'Remote Control sender': ' from="bridge:session_0123"',
+    'every attribute': ` from="uds:/tmp/cc-socks/1234.sock" from-session="session-1" hop-chain="0123456789abcdef01234567" from-name="peer-session" from-mode="prompting" from-plugin="plugin-name"`,
+  }
+  for (const [label, value] of Object.entries(attributes)) {
+    const bridge = await idleClaudeBridgeAfter(peerMessage(value))
+    assert.deepEqual(bridge.effects.mirrored, [], label)
+  }
+})
+
+test('peer messages delivered mid-turn are skipped one by one, and queued typing still mirrors', async () => {
+  const bridge = createBridge({ provider: 'claude' })
+  await bridge.hook('first typed prompt', { pasted: false })
+  await bridge.hook(peerMessage(undefined, 'First note.'), { pasted: false })
+  await bridge.hook(peerMessage(undefined, 'Second note.'), { pasted: false })
+  await bridge.hook('typed while it was busy', { pasted: false })
+  assert.deepEqual(bridge.effects.mirrored, ['first typed prompt', 'typed while it was busy'].map(mirroredAsTyping))
+})
+
+test('a peer message neither gains nor loses team authority', async () => {
+  assert.equal(isProviderInternalPrompt('claude', peerMessage()), false, 'it is not a provider notification')
+
+  const coordinator = createBridge({ provider: 'claude' })
+  beginOwnerTeamTurn(coordinator.worker, { messageTs: '1.0' }, { now: coordinator.now() })
+  await coordinator.hook(peerMessage(), { pasted: false })
+  assert.equal(coordinator.worker.teamTurn, undefined, 'it revokes an owner turn, as typing does')
+  assert.deepEqual(coordinator.effects.mirrored, [])
+
+  const worker = createBridge({ provider: 'claude' })
+  const task = await runningTask(worker)
+  await worker.hook(peerMessage(), { pasted: false, turnId: 'turn-lane' })
+  assert.deepEqual(worker.effects.failures, [LOCAL_REPLACEMENT], 'it replaces a delegated turn, as typing does')
+  assert.equal(worker.task(task.id).status, 'failed')
+  assert.equal(worker.worker.teamActiveTaskId, undefined)
+  assert.deepEqual(worker.effects.mirrored, [])
+})
+
+test('only Claude writes the peer envelope, so other providers keep mirroring that text', async () => {
+  const codex = createBridge({ provider: 'codex' })
+  await codex.hook(peerMessage())
+  assert.deepEqual(codex.effects.mirrored, [mirroredAsTyping(peerMessage())])
+
+  const pi = createBridge({ provider: 'codex' })
+  pi.addSession('sid-pi', 'C-PI', 'pi')
+  await pi.hook(peerMessage(), { sessionId: 'sid-pi' })
+  assert.deepEqual(pi.effects.mirrored, [mirroredAsTyping(peerMessage())])
+
+  for (const provider of ['codex', 'pi', 'unknown']) {
+    assert.equal(isPeerSessionPrompt(provider, peerMessage()), false, provider)
+  }
+  assert.equal(isPeerSessionPrompt('claude', null), false)
+  assert.equal(isPeerSessionPrompt('claude', ''), false)
 })

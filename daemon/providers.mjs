@@ -105,6 +105,18 @@ export function isProviderInternalPrompt(provider, prompt) {
     CLAUDE_INTERNAL_PROMPT.test(String(prompt || '').trimStart())
 }
 
+// A message from another Claude session reaches its recipient as a prompt of its
+// own, whether the recipient is idle or mid-turn, in this leading envelope. Every
+// attribute is optional, so only the tag itself identifies it. Text that merely
+// quotes the tag, or pastes it inside `<pasted_content>`, is still someone's input.
+// This decides what the terminal mirror posts and nothing else: it is deliberately
+// not provider-internal, so these prompts keep their existing team-authority effect.
+const CLAUDE_PEER_SESSION_PROMPT = /^<cross-session-message(?:\s[^>]*)?>/
+export function isPeerSessionPrompt(provider, prompt) {
+  return normalizeProvider(provider) === 'claude' &&
+    CLAUDE_PEER_SESSION_PROMPT.test(String(prompt || '').trimStart())
+}
+
 // System-injected prompts (task notifications, reminders, local-command echoes)
 // arrive via UserPromptSubmit but aren't genuine typing — don't mirror them.
 export function isSystemPrompt(p) {

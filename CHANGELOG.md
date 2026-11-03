@@ -8,6 +8,15 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A message from another Claude session no longer appears in the recipient's
+  channel as terminal typing. Claude Code submits these messages as prompts,
+  to an idle session and mid-turn alike, so the mirror posted them in full as
+  `You (terminal)`. The mirror now skips a prompt that starts with the
+  `<cross-session-message>` envelope.
+  - Text that merely quotes the tag, or pastes it, still mirrors.
+  - Team authority treats these prompts as before.
+  - The session's own reply still goes to its channel, and it can repeat what
+    the other session said.
 - Every Claude login whose renewal fails now tells its owner. Before, only a
   renewal SAB itself ran on an idle profile could: a login in use, including
   the Mac's own, read `credential-unavailable`, and nobody was told.

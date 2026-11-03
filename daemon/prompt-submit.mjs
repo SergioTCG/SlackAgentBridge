@@ -1,4 +1,4 @@
-import { isProviderInternalPrompt, isSystemPrompt } from './providers.mjs'
+import { isPeerSessionPrompt, isProviderInternalPrompt, isSystemPrompt } from './providers.mjs'
 import {
   acknowledgeCoordinatorTaskMessageDelivery, beginDelegatedTeamTurn, clearTeamTurn,
   completeCoordinatorTaskMessageDelivery, coordinatedTeamForChannel, isStandingTeamTask, markTeamTaskRunning,
@@ -239,8 +239,10 @@ export function createPromptSubmitHandler({
     }
     // Mirror only genuine typing: skip the bridge's own input, recognized by its
     // injected-text record or, once that expires, its persisted team journal,
-    // and system-injected content (task notifications, reminders, echoes).
+    // another session's message, and system-injected content (task
+    // notifications, reminders, echoes).
     if (p && !automationEcho && !injected && !acknowledgedTurn && !journaledDelivery && !standingAck &&
+        !isPeerSessionPrompt(provider, p) &&
         !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
