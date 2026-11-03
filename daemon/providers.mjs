@@ -105,16 +105,19 @@ export function isProviderInternalPrompt(provider, prompt) {
     CLAUDE_INTERNAL_PROMPT.test(String(prompt || '').trimStart())
 }
 
-// A message from another Claude session reaches its recipient as a prompt of its
-// own, whether the recipient is idle or mid-turn, in this leading envelope. Every
-// attribute is optional, so only the tag itself identifies it. Text that merely
-// quotes the tag, or pastes it inside `<pasted_content>`, is still someone's input.
-// This decides what the terminal mirror posts and nothing else: it is deliberately
-// not provider-internal, so these prompts keep their existing team-authority effect.
-const CLAUDE_PEER_SESSION_PROMPT = /^<cross-session-message(?:\s[^>]*)?>/
-export function isPeerSessionPrompt(provider, prompt) {
+// Claude Code also submits peer traffic as prompts of its own, whether the recipient
+// is idle or mid-turn, each under a leading marker it writes:
+// - `<cross-session-message>`: a message from another session;
+// - `<agent-message>`: a message from this session's own subagent;
+// - `[Cross-session delivery notice]`: what became of a message this session sent.
+// Every envelope attribute is optional, so only the marker identifies them. Text that
+// merely quotes one, or pastes it inside `<pasted_content>`, is still someone's input.
+// This decides what the terminal mirror posts and nothing else: these prompts are
+// deliberately not provider-internal, so they keep their existing team-authority effect.
+const CLAUDE_PEER_PROMPT = /^(?:<(?:cross-session-message|agent-message)(?:\s[^>]*)?>|\[Cross-session delivery notice\])/
+export function isPeerMessagePrompt(provider, prompt) {
   return normalizeProvider(provider) === 'claude' &&
-    CLAUDE_PEER_SESSION_PROMPT.test(String(prompt || '').trimStart())
+    CLAUDE_PEER_PROMPT.test(String(prompt || '').trimStart())
 }
 
 // System-injected prompts (task notifications, reminders, local-command echoes)

@@ -430,9 +430,10 @@ Slack when its scope or progress is no longer appropriate.
   tmux, provider, channel, native-session, or owner/delegated-task checks.
 - Remember that mirrored prompts, responses, filenames, and attachments are
   stored under the Slack workspace's retention and administration policies.
-- A message from another Claude session is not mirrored as terminal typing, but
-  the recipient's own reply is mirrored like any other, and it can repeat what
-  the message said. Channel members see that reply.
+- Messages between Claude sessions, including a session's own subagent and
+  delivery notices, are not mirrored as terminal typing. The recipient's own
+  reply is mirrored like any other, and it can repeat what the message said.
+  Channel members see that reply.
 - Treat artifact requests as deliberate data egress. Review collaborator access
   before asking an agent to send generated files containing proprietary data.
 
