@@ -329,13 +329,26 @@ the same work generation: the coordinator sees its reply, and that reply becomes
 the task's latest result until release. A release delivers the first report after
 the worker declared completion, so such a turn can't replace the worker's answer.
 
-A message from another Claude session counts as local input. It fails a worker's
-active delegated task and ends the current team turn, though it is not mirrored as
-terminal typing and a task envelope quoted inside it is never a delivery. Nothing
-marks a turn it starts, so if the task survived, that session could steer the worker
-to complete it, and the turn's report could wake a coordinator or renew its dispatch
-budget. A standing task stays bound, so a worker that follows such a message can still
-move it.
+A message from another Claude session ends the current team turn, so that session
+cannot borrow the authority, but it never replaces a worker's delegated turn. It is
+not mirrored as terminal typing, and a task envelope quoted inside it is never a
+delivery. The session is marked from when the message arrives until the turn it
+reaches ends or the coordinator speaks. An owner message lifts it too, on a standing
+worker; an exclusive worker takes none. The transcript records which turn the message
+reached, so a turn ending just as it arrives keeps its report. If no record appears
+by the end of the next turn, the message was lost and the mark is dropped. While
+marked, for exclusive and standing tasks alike:
+
+- Gates and completion are refused, with an error saying why.
+- Replies are labelled and wake no one.
+- A provider failure in the turn it reached doesn't fail the task.
+
+If the message started the turn, the turn ends with no report: no new result and no
+continuation event. If it joined a turn already running, or the session's own work
+reached the turn it started, that work still reports, with a warning, and is not
+auto-released. The coordinator can release it or message the
+worker, which is also what a refused declaration needs. A later turn can still act on
+what the message said, as on anything else the worker has read.
 
 ## Agent-facing CLI
 

@@ -78,7 +78,7 @@ test('team lifecycle recovery cannot rebind, lose finals, or fence a worker inde
   assert.match(daemon, /TEAM_RESTART_PROOF_GRACE_MS/)
   assert.match(daemon, /no live-turn proof returned/)
   assert.match(daemon, /exceeded its seven-day lifetime/)
-  assert.match(daemon, /task\.status === 'dispatching' && task\.replies\?\.length[\s\S]*markTeamTaskRunning\(state, task\.id/)
+  assert.match(daemon, /task\.status === 'dispatching' && task\.replies\?\.some\(reply => reply\.origin\?\.kind !== 'peer'\)[\s\S]*markTeamTaskRunning\(state, task\.id/)
   assert.match(daemon, /const workerProof = !isStandingTeamTask\(task\) && \(appended\.accepted[\s\S]*session\.teamActiveTaskId === task\.id[\s\S]*recordTeamWorkerProof\(session, task\)/)
   assert.match(daemon, /const startCodexStatus = !isStandingTeamTask\(task\) && recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)[\s\S]*updateTeamTaskAudit\(task\)/)
   assert.match(daemon, /target\.teamActiveTaskId !== task\.id/)
@@ -314,7 +314,7 @@ test('provider turn reporting preserves task and process ownership until explici
   'a stale Claude Stop must settle its transcript before advancing past the old generation')
   assert.ok(claudeFinal.indexOf('teamTaskTurnOwnsCurrentLifecycle') < claudeFinal.indexOf('readNewAssistantText'),
     'a stale Claude final must be rejected before transcript consumption')
-  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn, skipped => older\.push\(skipped\)\)/,
+  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn, \{/,
     'Claude final output must be selected from the exact task generation')
   const codexFinal = /async function finalizeCodexTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.match(codexFinal,
@@ -603,12 +603,12 @@ test('Claude interim streaming persists and reuses its exact transcript generati
     daemon.indexOf("if (ev === 'Stop')"),
   )
   assert.match(preTool,
-    /interimTeamTaskProviderTurn\(state, session, body, observedAt\)[\s\S]*session\.teamActiveTaskId && !teamTaskTurn\s*\? ''\s*: readNewAssistantText\(session, teamTaskTurn, skipped => older\.push\(skipped\)\)/,
+    /interimTeamTaskProviderTurn\(state, session, body, observedAt\)[\s\S]*session\.teamActiveTaskId && !teamTaskTurn\s*\? ''\s*: readNewAssistantText\(session, teamTaskTurn, \{ onSkipped: skipped => older\.push\(skipped\) \}\)/,
   'PreToolUse must stream only the exact provider work generation, and never read a task it cannot place')
   assert.match(preTool, /const shown = \[\.\.\.older, text\]\.filter\(Boolean\)\.join\('\\n\\n'\)/,
     'text from before a marker still reaches the channel')
   const claudeFinal = /async function finalizeTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
-  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn, skipped => older\.push\(skipped\)\)/)
+  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn, \{\s*onSkipped: skipped => older\.push\(skipped\), stopObservedAt: reportObservedAt,\s*\}\)/)
   assert.match(claudeFinal, /if \(older\.length && !recoveringDeferredOutput\) \{\s*await postProviderOutput\(session\.channel, older\.join/,
     'a Stop posts older text to the channel')
   assert.ok(!/older/.test(claudeFinal.slice(claudeFinal.indexOf('finishTeamTaskForSession('))),

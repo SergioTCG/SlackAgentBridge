@@ -311,22 +311,24 @@ export function providerPromptAcknowledgesTask(session, {
     (injected || pendingJournaled || acceptedJournaled)
 }
 
-// A native prompt that is not this session's delegated-task delivery is either
-// local input or something the provider generated itself. Local input, including
-// another session's message, replaces a delegated worker turn and ends a
-// coordinator's lateral team authority. A provider notification (background
-// command, subagent, Monitor event, delivery notice, usage-limit reset) runs
-// inside or after the current turn and changes neither. SAB's own injections
-// and automation echoes keep their existing handling.
+// A native prompt that is not this session's delegated-task delivery is local input,
+// another session's message, or something the provider generated itself. Local input
+// replaces a delegated worker turn and ends a coordinator's lateral team authority.
+// Another session's message ends that authority too, but it replaces nothing: the
+// hook marks the turn it touched instead (see markPeerTurn). A provider notification
+// (background command, subagent, Monitor event, delivery notice, usage-limit reset)
+// runs inside or after the current turn and changes neither. SAB's own injections and
+// automation echoes keep their existing handling.
 export function unacknowledgedPromptTeamEffect({
   prompt = '',
   activeTaskId = null,
   injected = false,
   automationEcho = false,
   providerInternal = false,
+  peerMessage = false,
 } = {}) {
   if (!prompt || injected || automationEcho || providerInternal) return null
-  return activeTaskId ? 'fail_task' : 'revoke_turn'
+  return activeTaskId && !peerMessage ? 'fail_task' : 'revoke_turn'
 }
 
 export function activateTeamProviderTurn(session, {

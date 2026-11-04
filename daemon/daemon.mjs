@@ -70,7 +70,7 @@ import {
   dismissClaudeUsageLimitMenu, prepareClaudeTerminalDelivery, resetClaudePollerEvidence, usageLimitResumeInput,
 } from './claude-terminal.mjs'
 import {
-  claudeAssistantTextSinceOffset, staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
+  claudeAssistantTextSinceOffset, notePeerMessageRecords, staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
 } from './claude-transcript.mjs'
 import {
   nextStructuredQuestion, questionBlocks, questionFormFromPane, questionFormMatches, questionFormsFromHook,
@@ -126,7 +126,8 @@ import {
   parentTeamForChannel, setTeamAutoRelease, teamAutoRelease, addTeamSchedule, publicTeamSchedule, removeTeamSchedule,
   takeDueTeamSchedules, teamDepth, clearTeamSchedules, pruneOrphanedTeamSchedules,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
-  beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
+  PEER_TURN_WARNING, assertPeerTurnAllows, beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearPeerTurn, clearTeamTurn,
+  peerTurnHolds, takePeerTurn, teamTaskPeerReportCoversCompletion,
   beginCoordinatorTaskMessageDelivery,
   completeCoordinatorTaskMessageDelivery, closeTeam,
   consumeCoordinatorDispatch, coordinatorPromptContext,
@@ -640,6 +641,8 @@ function withArtifactDelivery(session, text, request) {
 }
 
 function beginSlackTeamTurn(session, sender, request) {
+  // The owner has spoken, so what another session's message touched is settled.
+  if (!sender) clearPeerTurn(session)
   if (!session?.channel || !activeTeamForChannel(state, session.channel)) {
     clearTeamTurn(session)
     return ''
@@ -1502,7 +1505,11 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     clearStatusDeferred(session)
     void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
     const older = []
-    const rawText = readNewAssistantText(session, teamTaskTurn, skipped => older.push(skipped))
+    const rawText = readNewAssistantText(session, teamTaskTurn, {
+      onSkipped: skipped => older.push(skipped), stopObservedAt: reportObservedAt,
+    })
+    // Take this before anything below yields, because the next turn's reads can move the mark on.
+    const peerTurn = takePeerTurn(session)
     const delivery = prepareClaudeTerminalDelivery(
       rawText || terminalFailure?.text || '',
       claudeTerminalFailures.get(session.id),
@@ -1535,7 +1542,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
         ])).digest('base64url')}`
       : null
     const finalizedTask = await finishTeamTaskForSession(session, finalText, taskFailure, {
-      expectedTeamTaskTurn: teamTaskTurn, reportKey, observedAt: reportObservedAt,
+      expectedTeamTaskTurn: teamTaskTurn, reportKey, observedAt: reportObservedAt, peerTurn,
     })
     // Slack delivery above can yield while a coordinator follow-up enters the
     // same Claude process. Never clear that newer input reservation.
@@ -1901,6 +1908,8 @@ async function readoptStatus() {
         markBootLimitPause(s)
         if (idleTask) log('re-adopted session paused for its account', s.id.slice(0, 8))
       } else if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Claude Code')
+      // Idle and not paused: the turn another session's message reached is over.
+      if (!s.usageLimitPause && !accountMaintenanceHoldsTask(s)) clearPeerTurn(s)
     }
   }
   saveState(state)
@@ -1922,15 +1931,15 @@ async function waitTranscriptSettle(file, maxMs = 4000) {
   }
 }
 
-function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = null, onSkipped = null) {
+function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = null, options = {}) {
   if (providerOf(session) !== 'claude') return ''
-  return claudeAssistantTextSinceOffset(session, advance, expectedTeamTurn, onSkipped)
+  return claudeAssistantTextSinceOffset(session, advance, expectedTeamTurn, options)
 }
 
 const peekNewAssistantText = (session, expectedTeamTurn = null) =>
   assistantTextSinceOffset(session, false, expectedTeamTurn)
-const readNewAssistantText = (session, expectedTeamTurn = null, onSkipped = null) =>
-  assistantTextSinceOffset(session, true, expectedTeamTurn, onSkipped)
+const readNewAssistantText = (session, expectedTeamTurn = null, options = {}) =>
+  assistantTextSinceOffset(session, true, expectedTeamTurn, options)
 
 function discardStaleClaudeTeamTurnTranscript(session, expected) {
   if (providerOf(session) !== 'claude' || !session.transcript || !fs.existsSync(session.transcript)) return false
@@ -1945,6 +1954,7 @@ function discardStaleClaudeTeamTurnTranscript(session, expected) {
     buffer.toString('utf8'), expected, session.claudeTranscriptOffsetTurn,
   )
   if (consumed <= 0) return false
+  notePeerMessageRecords(session, buffer.subarray(0, consumed).toString('utf8'))
   session.offset = from + consumed
   session.claudeTranscriptOffsetTurn = {
     taskId: expected.taskId,
@@ -2712,7 +2722,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     const older = []
     const text = session.teamActiveTaskId && !teamTaskTurn
       ? ''
-      : readNewAssistantText(session, teamTaskTurn, skipped => older.push(skipped))
+      : readNewAssistantText(session, teamTaskTurn, { onSkipped: skipped => older.push(skipped) })
     if (teamTaskTurn && session.claudeTranscriptOffsetTurn?.taskId === teamTaskTurn.taskId &&
         Number(session.claudeTranscriptOffsetTurn.providerWorkGeneration) ===
           teamTaskTurn.providerWorkGeneration) {
@@ -4962,6 +4972,8 @@ async function notifyTeamReplyFileFailure(task, reply) {
   saveStateNow(state)
 }
 
+const PEER_REPLY_LABEL = ' · _written after a message from another session; unverified_'
+
 async function performTeamReplyDelivery(task, reply) {
   if (reply.text && !reply.textSlackTs) {
     const gates = reply.kind === 'checkpoint'
@@ -4973,7 +4985,7 @@ async function performTeamReplyDelivery(task, reply) {
     // it is a suggestion to weigh, not owner instruction.
     const origin = reply.origin?.kind === 'collaborator'
       ? ` · _collaborator-originated${reply.origin.name ? ` (${String(reply.origin.name).replace(/[<>&*_`]/g, '')})` : ''}_`
-      : ''
+      : reply.origin?.kind === 'peer' ? PEER_REPLY_LABEL : ''
     const message = await postSlackMessage(task.sourceChannel, {
       text: `📨 *Team update from* <#${task.targetChannel}> · \`${task.id}\`${origin}\n\n${reply.text}${gates}`,
       unfurl_links: false,
@@ -5007,7 +5019,7 @@ async function performTeamReplyDelivery(task, reply) {
   saveStateNow(state)
   try {
     await uploadTeamFiles(task.sourceChannel, reply.files,
-      `📎 Team reply for \`${task.id}\` from <#${task.targetChannel}>`)
+      `📎 Team reply for \`${task.id}\` from <#${task.targetChannel}>${reply.origin?.kind === 'peer' ? PEER_REPLY_LABEL : ''}`)
     reply.fileDeliveryStatus = 'uploaded'
     saveStateNow(state)
     return true
@@ -5720,12 +5732,12 @@ async function reconcileTeamTasks() {
         } else if (task.status === 'awaiting_release' && teamAutoRelease(state.teams?.[task.teamId]) &&
             teamTaskReleaseReady(task)) {
           await autoReleaseTeamTask(task)
-        } else if (task.status === 'dispatching' && task.replies?.length) {
+        } else if (task.status === 'dispatching' && task.replies?.some(reply => reply.origin?.kind !== 'peer')) {
           // A reply already journaled by the exact authenticated worker proves
           // the delegated prompt was accepted even when Codex omitted its
           // UserPromptSubmit hook. This also heals reply/task pairs written by
           // an older daemon before this acceptance rule existed.
-          const firstReplyAt = Date.parse(task.replies[0]?.createdAt || '')
+          const firstReplyAt = Date.parse(task.replies.find(reply => reply.origin?.kind !== 'peer')?.createdAt || '')
           markTeamTaskRunning(state, task.id, { now: Number.isFinite(firstReplyAt) ? firstReplyAt : now })
           saveStateNow(state)
           await updateTeamTaskAudit(task).catch(error =>
@@ -5844,6 +5856,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
   expectedTeamTaskTurn = currentTeamTaskProviderTurn(session),
   reportKey = null,
   observedAt = Date.now(),
+  peerTurn: takenPeerTurn = null,
 } = {}) {
   // `null` is an authenticated non-match, not permission to borrow the latest
   // mutable task binding. Legacy untracked tasks are synthesized by
@@ -5860,6 +5873,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
     else saveState(state)
     return false
   }
+  let peerTurn = null
   let task
   try {
     task = teamTask(state, taskId)
@@ -5873,11 +5887,22 @@ async function finishTeamTaskForSession(session, result, error = null, {
         teamTaskProviderWorkGeneration(task))
       return false
     }
+    peerTurn = takenPeerTurn?.taskIds.includes(task.id) ? takenPeerTurn.kind : null
     const revokedTurn = clearTeamTurn(session)
-    if (error) {
+    if (peerTurn === 'started') {
+      // Another session's message started this turn, so it isn't the task's work: it reports
+      // nothing, wakes no one, and even a failed provider turn leaves the task alone. The
+      // worker's channel has already shown its reply.
+      log('team peer turn ended without a report', task.id)
+      teamTurnProof.delete(session.id)
+      saveStateNow(state)
+      return true
+    }
+    // A turn another session's message reached can't fail the task by what it ends with.
+    if (error && !peerTurn) {
       failTeamTask(state, task.id, error)
     } else {
-      const reportWarning = warning || (
+      const reportWarning = warning || (peerTurn ? PEER_TURN_WARNING : null) || (
         !finalText && teamTaskCompletionPolicy(task) !== LEGACY_COMPLETION_POLICY
           ? 'The provider turn ended without a stable final response.'
           : null
@@ -5889,6 +5914,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
         providerWorkGeneration: expectedTeamTaskTurn?.providerWorkGeneration ?? null,
         reportKey,
         observedAt,
+        peerMessage: Boolean(peerTurn),
       })
       if (reported.stale) return false
       if (!reported.created) {
@@ -6391,6 +6417,7 @@ const teamService = {
     if (origin && request.pendingGates !== undefined) {
       throw new TeamError('collaborator_turn_denied', 'A collaborator-started turn cannot change task gates.', 403)
     }
+    if (request.pendingGates !== undefined) assertPeerTurnAllows(session, task, 'change task gates')
     const replyId = `reply_${crypto.randomBytes(12).toString('base64url')}`
     if (request.paths?.length && !member.files) throw new TeamError('files_not_allowed', 'File relay is not enabled for this worker.', 403)
     let files = []
@@ -6403,7 +6430,8 @@ const teamService = {
     try {
       const append = request.pendingGates === undefined ? appendTeamTaskReply : appendTeamTaskCheckpoint
       appended = append(state, task.id, {
-        id: replyId, requestId: request.requestId, fromChannel: session.channel, text: request.text, files, origin,
+        id: replyId, requestId: request.requestId, fromChannel: session.channel, text: request.text, files,
+        origin: origin || (peerTurnHolds(session, task) ? { kind: 'peer' } : null),
         ...(request.pendingGates === undefined ? {} : { pendingGates: request.pendingGates }),
       })
     } catch (error) {
@@ -6468,6 +6496,7 @@ const teamService = {
     if (!priorRequest && session.teamTurn?.actor === 'collaborator') {
       throw new TeamError('collaborator_turn_denied', 'A collaborator-started turn cannot declare a task complete.', 403)
     }
+    if (!priorRequest) assertPeerTurnAllows(session, task, 'declare this task complete')
     if (!Number.isSafeInteger(Number(request.providerWorkGeneration)) || Number(request.providerWorkGeneration) < 1) {
       throw new TeamError('invalid_work_generation',
         'Task completion must include the provider work generation from the current SAB task prompt.', 400)
@@ -7765,7 +7794,7 @@ const autoReleaseRequestId = task =>
 async function autoReleaseTeamTask(task) {
   const team = task && state.teams?.[task.teamId]
   if (!team || team.closedAt || !teamAutoRelease(team) || !teamTaskReleaseReady(task) ||
-      taskMaintenancePending(state, task)) return false
+      teamTaskPeerReportCoversCompletion(task) || taskMaintenancePending(state, task)) return false
   const target = state.sessions?.[task.targetSessionId]
   if (!target || target.channel !== task.targetChannel || state.channels?.[task.targetChannel] !== target.id ||
       boundTeamTaskIdFor(target, task) !== task.id) return false

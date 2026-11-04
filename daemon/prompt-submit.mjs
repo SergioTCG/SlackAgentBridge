@@ -1,7 +1,7 @@
 import { isPeerMessagePrompt, isProviderInternalPrompt, isSystemPrompt } from './providers.mjs'
 import {
-  acknowledgeCoordinatorTaskMessageDelivery, beginDelegatedTeamTurn, clearTeamTurn,
-  completeCoordinatorTaskMessageDelivery, coordinatedTeamForChannel, isStandingTeamTask, markTeamTaskRunning,
+  acknowledgeCoordinatorTaskMessageDelivery, beginDelegatedTeamTurn, clearPeerTurn, clearTeamTurn,
+  completeCoordinatorTaskMessageDelivery, coordinatedTeamForChannel, isStandingTeamTask, markPeerTurn, markTeamTaskRunning,
   taskMarker, teamTaskProviderWorkGeneration,
 } from './teams.mjs'
 import {
@@ -122,6 +122,14 @@ export function createPromptSubmitHandler({
       promptTurn: promptTeamTurn, prompt: deliveredPrompt,
       isTaskEnvelope: Boolean(teamTaskId && teamTaskId === promptTeamTurn?.taskId),
     })
+    // The coordinator has spoken, so the turn is its work again. Only a new delivery counts: a
+    // worker pasting an accepted envelope back to itself proves nothing, and a collaborator's
+    // injected text never starts with the envelope. A standing delivery can settle before its
+    // hook arrives, so the record of what the bridge just submitted is what proves it.
+    const coordinatorSpoke = (acknowledgedTurn && (injected || pendingPromptTeamTurn)) || standingAck ||
+      (injected && session.teamStandingTaskId && promptTeamTurn?.taskId === session.teamStandingTaskId &&
+        /^<sab-team-(?:task|message)\b/.test(deliveredPrompt.trimStart()))
+    if (coordinatorSpoke && clearPeerTurn(session)) saveStateNow(state)
     let acknowledgedCoordinatorMessage = null
     if (acknowledgedTurn) {
       // An uncertain tmux delivery may leave only the pending generation for
@@ -228,18 +236,17 @@ export function createPromptSubmitHandler({
       await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
     } else {
       const localPromptEffect = unacknowledgedPromptTeamEffect({
-        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal,
+        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal, peerMessage,
       })
       if (localPromptEffect === 'fail_task') {
-        await failTeamTaskForSession(session, peerMessage
-          ? 'A message from another Claude session replaced the delegated worker turn.'
-          : 'A local terminal prompt replaced the delegated worker turn.')
+        await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
       } else if (localPromptEffect === 'revoke_turn') {
         // Local terminal input, uncorrelated prompts and another session's message
         // do not inherit a prior Slack owner's lateral team authority. Provider
         // notifications that Claude Code submits mid-turn keep the current turn's
-        // authority.
+        // authority. Another session's message also marks the turn it touched.
         clearTeamTurn(session)
+        if (peerMessage && markPeerTurn(session)) log('team peer turn marked', session.teamPeerTurn.taskIds.join(','))
         saveStateNow(state)
       }
     }
