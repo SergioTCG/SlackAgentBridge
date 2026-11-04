@@ -283,3 +283,23 @@ test('a session start on the Mac login is evidence for its account only while th
     assert.equal(Boolean(state.accountPools.launchChecks?.[busy.id]), !mismatch, mismatch ? 'another account\'s login proves nothing' : 'the expected login counts')
   }
 })
+
+test('an automatic switch is refused before any journal when the target login has no launch evidence', async () => {
+  const f = setup()
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  await assert.rejects(f.runtime.switchAccount(f.session, 'spare', { requestId: 'automatic-direct', automatic: true, usageLimit: true }),
+    error => error.message === 'account_launch_unchecked')
+  assert.deepEqual(f.state.accountPools.receipts, {}, 'nothing was journaled')
+  assert.equal(f.restarts.length, 0)
+})
+
+test('the monitor does not inspect a session it cannot move for want of launch evidence', async () => {
+  let inspected = 0
+  const f = setup({ usageLimitBlockReason: async () => { inspected++; return null } })
+  await f.runtime.tick(); await f.runtime.tick()
+  assert.equal(inspected, 0, 'no pane check for a move that cannot happen')
+  f.runtime.noteLaunch(f.helper)
+  await f.runtime.tick()
+  assert.equal(inspected, 1)
+  assert.equal(f.restarts.length, 1)
+})

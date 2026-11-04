@@ -201,3 +201,8 @@ test('/sab-account words the wait reasons and refusals plainly', () => {
   assert.equal(text.accountWaitingText('blocked:question awaiting an answer'), 'question awaiting an answer')
   assert.match(text.accountSwitchBlockedNotice({ blockReason: 'turn in progress' }), /^❌ Can't switch accounts right now: turn in progress\. Nothing was changed\./)
 })
+
+test('a screen that shows for one look and then gives way to the prompt is not a failure', async () => {
+  const passing = probe({ panes: Array(7).fill('loading').concat(["We've updated our Consumer Terms.", IDLE_PANE]) })
+  try { assert.deepEqual(await passing.run(), { ok: true }) } finally { passing.cleanup() }
+})
