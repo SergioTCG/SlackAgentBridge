@@ -167,6 +167,13 @@ run from the checkout already named by the live LaunchAgent; invoking it from
 an isolated development worktree fails before changing hooks, configuration,
 Git state, or the public `sab` link.
 
+Existing 2.5.1 installations should read [the 2.5.2
+section](docs/migrating-to-2.5.md#252) of the 2.5 guide. Version 2.5.2 is a fix
+release. Automatic account moves no longer wait for an earlier hand-made move
+between the same two accounts, a session that cannot move at its usage limit is
+reported to the owner, and Claude Code 2.1.318's usage-limit banner is read as a
+limit. No session state is migrated.
+
 Existing 2.5.0 installations should read [the 2.5.1
 section](docs/migrating-to-2.5.md#251) of the 2.5 guide. Version 2.5.1 is a fix
 release. A Claude worker's final answer reaches its coordinator's report in every

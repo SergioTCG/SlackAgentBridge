@@ -143,3 +143,71 @@ including the renewal that loses an idle Claude profile's sign-in after one
 refresh. A 2.5.0 daemon ignores the fields above, so a reply labelled `peer` reads
 as `worker`, and a report flagged for another session's message can be
 auto-released.
+
+## 2.5.2
+
+Version 2.5.2 is a compatible fix release from 2.5.1. The Slack manifest and
+hooks are unchanged, and no session state is migrated. It adds optional fields
+only: `launchChecks`, `waitingNotices` and `nativeIdentity` under
+`accountPools`; `measured`, `move` and `waiting` on a session's
+`sab account pool status`, and `launch` on each of its accounts; and `reason` on
+an `account_switch_blocked` refusal.
+
+What you will notice:
+
+- **Automatic moves need no earlier hand-made move.** A move needs fresh
+  measured capacity on the target, its verified identity, and evidence less than
+  a day old that its login starts: a session start on it, a committed switch
+  onto it, or SAB's own launch check. That check starts Claude with no prompt in
+  a hidden `ccs-probe-*` terminal, one login at a time, and closes it again. A
+  login stopped by a sign-in, terms, first-run, Chrome or permissions screen is
+  reported to the owner with the command to open it.
+- **Waits are reported.** A session at its account's usage limit that cannot
+  move has its reason logged and shown in `/sab-account`. The owner hears once
+  per account and reason: after 2 minutes when no account has capacity, with
+  the time the first one regains it; after 5 minutes when a launch check has not
+  passed; after 15 minutes when a safe-boundary rule blocks the move; and at
+  once when usage-limit moves are halted.
+- **The Mac's own login.** When `~/.claude.json` shows the Mac's own Claude
+  login on another account than the one listed as `native-default`, the owner
+  hears once, and new sessions start through a profile instead.
+- **Turns a limit ends.** Claude Code 2.1.318's `⚠ Usage limit reached` banner
+  is read as a limit. A Claude turn that a limit ends before its first spinner no
+  longer reads as running: held work on an account the pool measured exhausted
+  is paused for the handover or the reset, held work that Claude continues by
+  itself waits for that, and any other turn ends.
+- **Owner switches at a limit.** In auto mode, `/sab-account`, the account
+  picker and `sab account pool switch` take the usage-limit path for a session
+  stopped at its limit, instead of refusing it as busy until `/sab-kill`. Any
+  other refusal names the rule it hit.
+- **Automation stops.** An automation's record follows its session across
+  resumes, account switches and reboots, and the boot heals stale ones. A stop
+  that failed as non-exact can be repeated after the upgrade.
+- **The installer.** Its staged-activation check gives its refusal, instead of
+  stopping with no output, when a read of the loaded service is slow or fails.
+
+To upgrade:
+
+- Installations that follow `main` with the default self-update receive this
+  code within six hours. The version change makes that update run
+  `npm ci --omit=dev`, though no dependency moves.
+- To upgrade deliberately, follow the controlled upgrade above. The lockfile
+  changes only in its version, so `npm ci --omit=dev` is optional.
+
+After the upgrade:
+
+- **The first moves can wait for launch checks.** At first, only committed,
+  identity-verified switches at the current registry revision count as
+  evidence. Any other Claude login gets a launch check before work moves to it,
+  so a session at its limit right after the restart can wait for that check,
+  with a notice after 5 minutes. A Codex login earns evidence only from a real
+  session start on it, and a legacy token never does.
+- **Notices for waits already under way.** A session that is already waiting at
+  the restart is reported once its delay passes, and so is the Mac's own login
+  if it differs from the registry.
+
+To roll back, stop the daemon, return the live checkout to `v2.5.1` and start the
+daemon again. No dependency changed. That brings back what 2.5.2 fixes,
+including automatic moves that wait without a word for an earlier hand-made move
+between the same two accounts, and a Claude turn that reads as running after a
+limit ended it. A 2.5.1 daemon ignores the new `accountPools` fields.
