@@ -19,6 +19,35 @@ Notable changes to this project. Format based on
   - SAB sends it no key: its Escape would only cancel Claude's own automatic
     continuation.
   - The notice and chooser of earlier Claude Code versions are read as before.
+- Automatic account moves no longer need an earlier hand-made move between the
+  exact same pair of accounts, recorded at the current registry revision. Any
+  registry edit voided all of those, so adding one account stopped nearly every
+  move, and SAB skipped them without a word. A move now needs fresh measured
+  capacity on the target, its verified identity, and evidence less than a day
+  old that the target's login starts: a session start on it, a committed switch
+  onto it, or SAB's own hidden launch check. That check starts Claude with no
+  prompt in a throwaway terminal, and reports a sign-in, terms, first-run,
+  Chrome or permissions screen that would strand a moved session.
+- A session at its account's usage limit that cannot move is no longer silent.
+  Its reason is logged, `/sab-account` shows it, and the owner hears once per
+  account and reason: when no account has capacity (with the next reset), when
+  a launch check fails, when a safe-boundary rule keeps blocking it, and at once
+  when usage-limit moves are halted. `/sab-account` shows the move by measured
+  capacity instead of "no capacity" once the reservation estimate is spent.
+- SAB notices when the Mac's own Claude login is signed in to another account
+  than its registry says. The owner hears once, and new sessions start through a
+  profile instead of on that login. Before, SAB started sessions on an exhausted
+  login it believed had capacity, and never moved them.
+- A Claude turn that a usage limit ends before its first spinner is no longer
+  read as running forever. Held work on an exhausted account is paused, as Codex
+  turns already were, so the handover or the reset resumes it; any other turn
+  ends.
+- An owner's `/sab-account`, account picker or `sab account pool switch` on a
+  session stopped at its usage limit takes the usage-limit path, instead of
+  refusing it as busy until `/sab-kill`. Other refusals name the rule they hit.
+- An automation's record follows its session to a new terminal after a resume,
+  an account switch or a reboot, and stale records are healed at boot. A stale
+  record made the owner's stop fail as non-exact.
 
 ## [2.5.1] — 2026-11-04
 

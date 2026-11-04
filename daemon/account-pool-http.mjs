@@ -57,11 +57,13 @@ export async function handleAccountPoolHttp(req, res, url, runtime, state) {
     const input = parsed.data, session = state.sessions?.[state.channels?.[input.channel]]
     if (!session || session.id !== input.session || session.channel !== input.channel) error(409, 'stale_account_session')
     send(res, 200, reconciling ? await runtime.reconcile(session, { expectedSessionId: input.session, requestId: input.requestId })
-      : await runtime.switchAccount(session, input.account, { expectedSessionId: input.session, requestId: input.requestId,
+      : await (runtime.ownerSwitch || runtime.switchAccount)(session, input.account, { expectedSessionId: input.session, requestId: input.requestId,
           ...(input.preserveTask ? { preserveTask: input.preserveTask } : {}) }))
   } catch (failure) {
     const fixed = failure.status ? failure.message : publicErrors.has(failure.message) ? failure.message : 'account_pool_request_failed'
-    send(res, failure.status || 409, { ok: false, error: fixed })
+    // The safe-boundary rule a refusal hit is a fixed phrase, never session content.
+    send(res, failure.status || 409, { ok: false, error: fixed,
+      ...(fixed === 'account_switch_blocked' && typeof failure.blockReason === 'string' ? { reason: failure.blockReason.slice(0, 160) } : {}) })
   }
   return true
 }

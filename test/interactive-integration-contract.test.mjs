@@ -60,11 +60,13 @@ test('a Claude session with no conversation yet is refused by every restart path
   const restart = /async function restartSessionWithMutation\([\s\S]*?\n\}\n\nasync function switchAccount/.exec(daemon)?.[0] || ''
   const refused = restart.indexOf('if (claudeConversationGone(session)) throw new Error(')
   assert.ok(refused > 0 && refused < restart.indexOf('reserveSessionMaintenance('))
-  // Both owner-initiated pool switches explain the refusal instead of failing generically.
-  const switches = daemon.split('await accountPools.switchAccount(').slice(0, -1)
+  // Both owner-initiated pool switches explain the refusal instead of failing
+  // generically, and go through the owner's switch rules.
+  assert.equal(daemon.split('await accountPools.switchAccount(').length, 1, 'owners switch through ownerSwitch only')
+  const switches = daemon.split('await accountPools.ownerSwitch(').slice(0, -1)
   assert.equal(switches.length, 2)
   for (const before of switches) {
-    assert.match(before.slice(-200), /if \(claudeConversationGone\(session\)\) return post\(channel, NO_CONVERSATION_NOTICE\)\n\s*const result = $/)
+    assert.match(before.slice(-200), /if \(claudeConversationGone\(session\)\) return post\(channel, NO_CONVERSATION_NOTICE\)\n\s*let result\n\s*try \{ result = $/)
   }
 })
 
