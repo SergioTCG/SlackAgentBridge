@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.5.1] — 2026-11-04
+
 ### Fixed
 
 - A message from another Claude session no longer fails a worker's delegated team
@@ -138,6 +140,14 @@ Notable changes to this project. Format based on
 - A Claude profile also inherits the owner's answer to Claude's "Claude in
   Chrome extension detected" dialog (`claudeInChromeDefaultEnabled`).
   Unanswered, that dialog stopped a detached launch before SessionStart.
+
+### Security
+
+- `@hono/node-server` moves from 2.1.1 to 2.1.5 for
+  [GHSA-rmxm-3fg6-px4f](https://github.com/advisories/GHSA-rmxm-3fg6-px4f). SAB
+  never imports the affected code, so the advisory was not reachable from it.
+
+[2.5.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.5.1
 
 ## [2.5.0] — 2026-10-28
 

@@ -167,6 +167,13 @@ run from the checkout already named by the live LaunchAgent; invoking it from
 an isolated development worktree fails before changing hooks, configuration,
 Git state, or the public `sab` link.
 
+Existing 2.5.0 installations should read [the 2.5.1
+section](docs/migrating-to-2.5.md#251) of the 2.5 guide. Version 2.5.1 is a fix
+release. A Claude worker's final answer reaches its coordinator's report in every
+generation of a task, a message from another Claude session no longer fails a
+delegated task, and an idle Claude profile stays signed in. No session state is
+migrated.
+
 Existing 2.4 installations should read [Migrating to
 2.5](docs/migrating-to-2.5.md). Version 2.5 keeps held work moving at a usage
 limit. In auto mode, a team task, an automation or a turn the limit ended moves
