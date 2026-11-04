@@ -56,6 +56,12 @@ Notable changes to this project. Format based on
 - An automation's record follows its session to a new terminal after a resume,
   an account switch or a reboot, and stale records are healed at boot. A stale
   record made the owner's stop fail as non-exact.
+- The installer's staged-activation check no longer ends without a word when a
+  read of the loaded service is slow or fails. Its readers stopped at their
+  first match, so under `pipefail` the rest of a `launchctl print` listing could
+  kill `launchctl` with SIGPIPE, and that or a failed `lsof` ended the installer
+  before its refusal. It changed nothing either way; now it says why it refuses.
+  This was also the cause of occasional CI failures with no output.
 
 ## [2.5.1] — 2026-11-04
 

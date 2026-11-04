@@ -280,6 +280,68 @@ exit 99
   }
 })
 
+test('staged activation gives its refusal when a read of the loaded service is slow or fails', () => {
+  // Under pipefail, a reader that quit at its first match could kill a writer
+  // still printing with SIGPIPE, and a failed read ended the installer. Both
+  // stopped it before its refusal. These fakes pause or fail on purpose, and
+  // lsof fails wherever the listing alone must give the working directory.
+  const cases = [
+    { name: 'a pause after the working directory', listing: ['working directory = LIVE', 'pause', 'pid = 4242'], lsof: 'fail', refusal: 'uses' },
+    { name: 'a pause after the pid', listing: ['pid = 4242', 'pause', 'state = running'], lsof: 'cwd', refusal: 'uses' },
+    { name: 'a pid lsof cannot read', listing: ['pid = 4242'], lsof: 'fail', refusal: 'unverified' },
+    { name: 'a service gone after the first check', listing: ['pid = 4242'], once: true, lsof: 'cwd', refusal: 'unverified' },
+  ]
+  for (const { name, listing, lsof, once, refusal } of cases) {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-service-read-'))
+    try {
+      const scriptDir = path.join(temp, 'download')
+      const destination = path.join(temp, 'staged-destination')
+      const liveBridge = path.join(temp, 'live-bridge')
+      const fakeBin = path.join(temp, 'fake-bin')
+      const gitMarker = path.join(temp, 'git-was-called')
+      fs.mkdirSync(scriptDir, { recursive: true })
+      fs.mkdirSync(liveBridge, { recursive: true })
+      fs.mkdirSync(fakeBin, { recursive: true })
+      const downloaded = path.join(scriptDir, 'install.sh')
+      fs.copyFileSync(new URL('../install.sh', import.meta.url), downloaded)
+      const lines = listing.map(line => line === 'pause'
+        ? '  sleep 0.3'
+        : `  printf '%s\\n' '${line.replace('LIVE', liveBridge)}'`)
+      // A service that unloads after the installer's first check answers
+      // only that check, so every later read fails.
+      const listed = path.join(temp, 'listed')
+      const gone = once ? `  [ -e '${listed}' ] && exit 1\n  : > '${listed}'\n` : ''
+      fs.writeFileSync(path.join(fakeBin, 'launchctl'),
+        `#!/bin/sh\nif [ "$1" = print ]; then\n${gone}${lines.join('\n')}\n  exit 0\nfi\nexit 1\n`, { mode: 0o755 })
+      fs.writeFileSync(path.join(fakeBin, 'lsof'), lsof === 'fail'
+        ? '#!/bin/sh\nexit 1\n'
+        : `#!/bin/sh\nprintf '%s\\n' p4242 fcwd 'n${liveBridge}'\n`, { mode: 0o755 })
+      fs.writeFileSync(path.join(fakeBin, 'git'), `#!/bin/sh
+printf called > '${gitMarker}'
+exit 99
+`, { mode: 0o755 })
+
+      const run = spawnSync('bash', [downloaded, '--provider', 'codex', '--no-daemon-reload'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HOME: temp,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          CCS_HOME: destination,
+        },
+      })
+      const output = `${run.stdout}\n${run.stderr}`
+      assert.equal(run.status, 1, `${name}: ${output}`)
+      if (refusal === 'unverified') assert.match(output, /working directory cannot be verified/, name)
+      else assert.ok(output.includes(`the loaded service uses ${liveBridge}.`), `${name}: ${output}`)
+      assert.equal(fs.existsSync(gitMarker), false, name)
+      assert.equal(fs.existsSync(destination), false, name)
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true })
+    }
+  }
+})
+
 test('provider hook installation is idempotent and no-restart is isolated', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-install-'))
   try {

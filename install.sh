@@ -67,17 +67,23 @@ verify_staged_install_target() {
   # the public `sab` link, so only the loaded service checkout may be selected.
   if command -v launchctl >/dev/null 2>&1 &&
       launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    # Each reader takes its whole input, and a failed read leaves the value
+    # empty. Under pipefail, a reader that quit at its first match could kill a
+    # slower writer with SIGPIPE, and that or a failed lsof ended the installer
+    # before it could print the refusal below.
     LOADED_BRIDGE="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '
-      /^[[:space:]]*working directory = / {
-        sub(/^[[:space:]]*working directory = /, ""); print; exit
+      !found && /^[[:space:]]*working directory = / {
+        sub(/^[[:space:]]*working directory = /, ""); print; found = 1
       }
-    ')"
+    ')" || LOADED_BRIDGE=""
     if [ -z "$LOADED_BRIDGE" ]; then
       LOADED_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '
-        /^[[:space:]]*pid = [0-9]+/ { print $3; exit }
-      ')"
+        !found && /^[[:space:]]*pid = [0-9]+/ { print $3; found = 1 }
+      ')" || LOADED_PID=""
       if [ -n "$LOADED_PID" ] && command -v lsof >/dev/null 2>&1; then
-        LOADED_BRIDGE="$(lsof -a -p "$LOADED_PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+        LOADED_BRIDGE="$(lsof -a -p "$LOADED_PID" -d cwd -Fn 2>/dev/null | awk '
+          !found && /^n/ { print substr($0, 2); found = 1 }
+        ')" || LOADED_BRIDGE=""
       fi
     fi
     if [ -z "$LOADED_BRIDGE" ]; then
