@@ -934,7 +934,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
           if (halt) {
             if (haltLogged !== halt.requestId) log('usage-limit handovers halted until this channel is reconciled', halt.channelId)
             haltLogged = halt.requestId
-            wait(halt.channelId === session.channel ? 'interrupted' : `halted:${halt.channelId}`)
+            wait(`halted:${halt.channelId}`) // this channel's own uncertain handover was reported above
             continue
           }
         }
