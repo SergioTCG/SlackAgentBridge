@@ -26,14 +26,16 @@ const declaration = name => {
   return found
 }
 
-async function pollerAtLimit({ pane = BANNER_PANE, held = true, exhausted = true, pending = false, dispatching = false } = {}) {
+async function pollerAtLimit({ pane = BANNER_PANE, held = true, exhausted = true, pending = false, dispatching = false, restartingNow = false,
+  notices = new Map() } = {}) {
   const block = between('const limit = line || form || holdAnsweredForm ? null : claudeUsageLimitSurface(pane)', 'const decision = claudePollerDecision({')
   const calls = [], p = { stopped: false, sawSpinner: false }
   const session = { id: 'worker-one', channel: 'CWORK', ...(held ? { teamActiveTaskId: 'task' } : {}), ...(pending ? { teamProviderTurnPending: {} } : {}) }
   const deps = { line: '', form: null, holdAnsweredForm: false, pane, claudeUsageLimitSurface, holdsUsageLimitWork, session, p, observation: {},
     state: { teamTasks: { task: { status: dispatching ? 'dispatching' : 'running' } } },
     accountPools: { measuredExhaustion: () => exhausted ? { accountId: 'acct-out', email: 'out@example.test' } : null },
-    ownsAutomationRecord: () => false, teamProviderPollerObservationCurrent: () => true,
+    ownsAutomationRecord: () => false, teamProviderPollerObservationCurrent: () => true, limitPauseNotices: notices,
+    restarting: new Set(restartingNow ? ['worker-one'] : []), clearQuestionForm: async () => calls.push('clear form'),
     stopPoller: () => calls.push('stop'), saveStateNow: () => calls.push('save'), clearStatus: async () => calls.push('clear'),
     log: message => calls.push(message), post: async (channel, text) => { calls.push(`post ${channel}: ${text}`) } }
   const result = await new AsyncFunction('deps', `const { ${Object.keys(deps).join(', ')} } = deps\n${block}\nreturn 'continued'`)(deps)
@@ -45,15 +47,28 @@ test('a held Claude turn that a usage limit ended at once is paused instead of r
   assert.equal(result, undefined, 'the poller stops here')
   assert.equal(p.stopped, true)
   assert.deepEqual(session.usageLimitPause.accountId, 'acct-out')
-  assert.deepEqual(calls.slice(0, 4), ['stop', 'save', 'clear', 'Claude turn paused at a usage limit'])
+  assert.deepEqual(calls.slice(0, 5), ['stop', 'save', 'clear', 'clear form', 'Claude turn paused at a usage limit'])
   assert.match(calls.at(-1), /^post CWORK: ⏸️ Claude hit the usage limit on out@example\.test\. SAB paused this turn/)
 })
 
-test('a limit-ended turn with nothing held, or nothing the pool can act on, simply ends', async () => {
-  for (const options of [{ held: false }, { exhausted: false }, { pending: true }, { dispatching: true }]) {
+test('a pause is announced once per half hour, however often the limit ends a turn', async () => {
+  const notices = new Map()
+  const first = await pollerAtLimit({ notices }), second = await pollerAtLimit({ notices })
+  assert.ok(first.calls.some(call => call.startsWith('post ')))
+  assert.ok(!second.calls.some(call => call.startsWith('post ')), 'the second pause is quiet')
+  assert.ok(second.session.usageLimitPause, 'but still recorded')
+})
+
+test('a limit-ended turn with nothing held simply ends; held work the pool cannot move yet keeps waiting, unreported', async () => {
+  const free = await pollerAtLimit({ held: false })
+  assert.equal(free.result, 'continued')
+  assert.equal(free.p.sawSpinner, true, 'the limit counts as the turn having run, so the poller finalizes it')
+  assert.equal(free.session.usageLimitPause, undefined)
+  for (const options of [{ exhausted: false }, { pending: true }, { dispatching: true }, { restartingNow: true }]) {
     const { result, calls, p, session } = await pollerAtLimit(options)
-    assert.equal(result, 'continued', JSON.stringify(options))
-    assert.equal(p.sawSpinner, true, 'the limit counts as the turn having run, so the poller finalizes it')
+    assert.equal(result, undefined, `${JSON.stringify(options)}: the poller keeps watching this tick`)
+    assert.equal(p.sawSpinner, false, 'never finalized early: Claude continues it at the reset')
+    assert.equal(p.stopped, false)
     assert.equal(session.usageLimitPause, undefined)
     assert.deepEqual(calls, [])
   }
@@ -189,7 +204,14 @@ test("the Mac login's account is read from Claude's own config, and only again w
 test('the daemon wires the launch check, the Mac login reader and the owner limit rule into the pool, and reports each session start', () => {
   assert.match(daemon, /nativeLoginIdentity: async \(\) => readNativeClaudeIdentity\(\),/)
   assert.match(daemon, /probeLaunch: account => probeClaudeLaunch\(account\),/)
-  assert.match(daemon, /atUsageLimit: async session => Boolean\(session\.usageLimitPause\) \|\|\n\s*Boolean\(session\.tmux && usageLimitSurface\(providerOf\(session\), await tmuxCapture\(session\.tmux\)\)\),/)
+  assert.match(daemon, /atUsageLimit: async session => Boolean\(session\.pid && pidAlive\(session\.pid\) && session\.tmux\) && \(Boolean\(session\.usageLimitPause\) \|\|\n\s*Boolean\(usageLimitSurface\(providerOf\(session\), await tmuxCapture\(session\.tmux\)\)\)\),/,
+    'a dormant session is never at a limit, whatever marker it kept')
+  assert.match(between("if (ev === 'SessionEnd') {", 'clearTeamInputReservation(session)'), /delete session\.usageLimitPause/)
+  assert.match(daemon, /isProfileInactive: async \(provider, profile\) => \{\n\s*if \(provider === 'claude' && probingProfiles\.has\(profile\)\) return false/,
+    'a renewal never runs on a profile a launch check is using')
+  const boot = between('await recoverProviderSwitches()', 'startAutomationReconciler()')
+  assert.ok(boot.indexOf('syncAutomationTmux(s)') > 0 && boot.indexOf('syncAutomationTmux(s)') < boot.indexOf('automationLifecycle.recover()'),
+    'records are healed before interrupted stops are recovered')
   assert.match(daemon, /const started = await completeAuthoritativeSessionStart\(session, provider, body\.source\)\n(?:\s*\/\/.*\n)*\s*if \(started && !\['compact', 'clear'\]\.includes\(body\.source\)\) accountPools\.noteLaunch\(session\)\n\s*return/)
 })
 
@@ -216,4 +238,48 @@ test('a launch check terminal a restart cut short is removed at boot, and nothin
   } })
   assert.deepEqual(removed, ['ccs-probe-0123456789'])
   assert.ok(daemon.indexOf('await removeOrphanedLaunchProbes()') < daemon.indexOf('await readoptStatus() // recover live status'))
+})
+
+test('the bypass-permissions dialog is a blocker even though it shows the prompt footer\'s words and a cursor', async () => {
+  const dialog = ['WARNING: Claude Code running in Bypass Permissions mode', '', '❯ 1. No, exit', '  2. Yes, I accept', '',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
+  assert.equal(targetStartupState('claude', dialog), 'ready', 'the shared rule alone would call it ready')
+  const blocked = probe({ panes: [dialog] })
+  try { assert.deepEqual(await blocked.run(), { ok: false, reason: 'permissions' }) } finally { blocked.cleanup() }
+})
+
+test('folder trust is answered once, an unknown trust screen is reported as such, and the probe env disables updates', async () => {
+  const trust = 'Is this a project you created or one you trust?\n❯ Yes, I trust this folder\n  No, exit'
+  const latched = probe({ panes: [trust, trust, trust, IDLE_PANE] })
+  try {
+    assert.deepEqual(await latched.run(), { ok: true })
+    assert.equal(latched.calls.filter(call => call[1] === 'send-keys').length, 1, 'never a second Enter onto the next screen')
+    const launch = latched.calls.find(call => call[1] === 'new-session')
+    assert.ok(launch.includes('DISABLE_AUTOUPDATER=1'), 'an update is never cut off by the probe ending')
+  } finally { latched.cleanup() }
+  const unknown = probe({ panes: ['Is this a project you created or one you trust?\n  1) maybe'] })
+  try { assert.deepEqual(await unknown.run(), { ok: false, reason: 'trust' }) } finally { unknown.cleanup() }
+})
+
+test('a terminal is removed even when creating it failed', async () => {
+  const calls = []
+  const failing = probe({ panes: [IDLE_PANE] })
+  try {
+    const source = between('const CLAUDE_LAUNCH_BLOCKERS = [', "// The account the Mac's own Claude login")
+    const deps = { accountCredentialReference, targetStartupState, fs, path, os, crypto, CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'sab-probe-')),
+      claudeProfileHome: (dir, profile) => `/profiles/${profile}`, seedClaudeFirstRunState: () => {}, claudeNativeConfigFile: () => '/n', sleep: async () => {},
+      execFile: async (command, args) => { calls.push(args[0]); if (args[0] === 'new-session') throw new Error('timed out after creating it'); return { stdout: '' } } }
+    const result = await new AsyncFunction('deps', `const { ${Object.keys(deps).join(', ')} } = deps\n${source}\nreturn probeClaudeLaunch(deps.account)`)(
+      { ...deps, account: { provider: 'claude', email: 'x@example.test', credentials: [{ kind: 'claude-profile', profile: 'spare' }] } })
+    assert.deepEqual(result, { ok: false, reason: 'failed' })
+    assert.deepEqual(calls, ['new-session', 'kill-session'])
+    fs.rmSync(deps.CONFIG_DIR, { recursive: true, force: true })
+  } finally { failing.cleanup() }
+})
+
+test('a prompt that is not in bypass-permissions mode is not the ready a session needs', async () => {
+  const plain = [BOX, '❯ ', BOX, '  ? for shortcuts · shift+tab to cycle'].join('\n')
+  assert.equal(targetStartupState('claude', plain), 'ready')
+  const probed = probe({ panes: [plain] })
+  try { assert.deepEqual(await probed.run(), { ok: false, reason: 'timeout' }) } finally { probed.cleanup() }
 })

@@ -80,6 +80,7 @@ test('bulk update blockers cover interactive, transitional, managed, and restart
   const base = { id: 'one', channel: 'C1', tmux: 'sab-one' }
   assert.equal(bulkUpdateBlockReason(base, { questionSessionIds: new Set(['one']) }), 'question awaiting an answer')
   assert.equal(bulkUpdateBlockReason(base, { pendingPermissionChannels: new Set(['C1']) }), 'permission awaiting a decision')
+  assert.equal(bulkUpdateBlockReason(base, { pausedSessionIds: new Set(['one']) }), 'turn paused at a usage limit')
   assert.equal(bulkUpdateBlockReason(base, { transitionChannels: new Set(['C1']) }), 'provider switch in progress')
   assert.equal(bulkUpdateBlockReason(base, { internalSessionIds: new Set(['one']) }), 'private maintenance turn in progress')
   assert.equal(bulkUpdateBlockReason({ ...base, teamActiveTaskId: 'task_one' }), 'delegated team task in progress')

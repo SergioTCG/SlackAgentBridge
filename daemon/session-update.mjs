@@ -14,6 +14,7 @@ export function bulkUpdateBlockReason(session, {
   internalSessionIds = new Set(),
   restartingSessionIds = new Set(),
   wakingSessionIds = new Set(),
+  pausedSessionIds = new Set(),
   automations = {},
   conversationMissing = () => false,
 } = {}) {
@@ -26,6 +27,9 @@ export function bulkUpdateBlockReason(session, {
   if (internalSessionIds.has(session.id)) return 'private maintenance turn in progress'
   if (restartingSessionIds.has(session.id) || wakingSessionIds.has(session.id)) return 'session already restarting'
   if (busySessionIds.has(session.id) || session.codexTurnStartedAt || session.piTurnStartedAt) return 'turn in progress'
+  // A held turn a usage limit paused is still that session's turn: the
+  // handover or the reset resumes it, and a restart would lose it.
+  if (pausedSessionIds.has(session.id)) return 'turn paused at a usage limit'
   // Claude writes a conversation only with its first prompt; until then a
   // restart's `--resume` exits at once and strands the channel.
   if (conversationMissing(session)) return 'no conversation to resume yet'

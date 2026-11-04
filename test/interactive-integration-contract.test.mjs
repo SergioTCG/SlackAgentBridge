@@ -167,7 +167,8 @@ test('the limit banner lifts a stale Claude poller\'s busy hold and marks the pa
     providerOf, targetStartupState, pidAlive: pid => pid === 4242, tmuxCapture: async () => pane, assertTaskMaintenance: () => {},
     state: { automations: {}, teamTasks: {} }, teamMessageDeliveries: new Map(), ownsAutomationRecord: () => false, saveState: () => {},
     bulkUpdateContext: () => ({ busySessionIds: new Set(['worker']), questionSessionIds: new Set(), pendingPermissionChannels: new Set(),
-      transitionChannels: new Set(), internalSessionIds: new Set(), restartingSessionIds: new Set(), wakingSessionIds: new Set() }) }
+      transitionChannels: new Set(), internalSessionIds: new Set(), restartingSessionIds: new Set(), wakingSessionIds: new Set(),
+      pausedSessionIds: new Set(['worker']) }) }
   const { usageLimitBlockReason, markSessionLimitPause } = new Function('deps', `const { ${Object.keys(deps).join(', ')} } = deps\n` +
     `${sources.join('\n')}\nreturn { usageLimitBlockReason, markSessionLimitPause }`)(deps)
   const maintenance = { taskId: 'task' }
@@ -351,4 +352,13 @@ test('Claude menu settings are durable before the visible topic confirms them', 
   assert.match(settings, /if \(name === 'model'\) session\.model = val/)
   assert.match(settings, /if \(name === 'effort'\) session\.effort = val/)
   assert.ok(settings.indexOf('saveStateNow(state)') < settings.indexOf('await updateTopic(session)'))
+})
+
+test("a session's own usage-limit pause never blocks the handover or the resume meant to end it", () => {
+  const blockReason = /async function usageLimitBlockReason\([\s\S]*?\n\}\n/.exec(daemon)?.[0] || ''
+  assert.ok(blockReason.indexOf('context.pausedSessionIds.delete(session.id)') > 0 &&
+    blockReason.indexOf('context.pausedSessionIds.delete(session.id)') < blockReason.indexOf('return bulkUpdateBlockReason('))
+  const resume = /async function resumeSessionAfterLimit\([\s\S]*?\n\}\n/.exec(daemon)?.[0] || ''
+  assert.match(resume, /context\.pausedSessionIds\.delete\(session\.id\)/)
+  assert.match(/function bulkUpdateContext\(\) \{[\s\S]*?\n\}/.exec(daemon)?.[0] || '', /pausedSessionIds: new Set\(Object\.values\(state\.sessions \|\| \{\}\)\.filter\(s => s\.usageLimitPause && s\.pid && pidAlive\(s\.pid\)\)/)
 })

@@ -432,3 +432,25 @@ test('a new session never starts on a profile whose launch check failed', async 
   f.runtime.noteLaunch(f.helper)
   assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }).account, 'spare', 'a real start proves it again')
 })
+
+test('a Claude Mac-login mismatch says nothing about Codex\'s own native login', async () => {
+  const registry = compileAccountRegistry({ schemaVersion: 1, requestId: 'two-natives', accounts: [
+    { key: 'mac', provider: 'claude', email: 'mac@example.test', identityConfirmed: true, credentials: [{ kind: 'native-default' }] },
+    { key: 'codex', provider: 'codex', email: 'codex@example.test', identityConfirmed: true, credentials: [{ kind: 'native-default' }] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['mac', 'codex'] }], routing: { defaultGroup: 'mine', channels: {} } })
+  const codex = { id: 'codex-native', channel: 'CCODEX', provider: 'codex', pid: null, tmux: 'sab-codex', cwd: '/c',
+    model: 'gpt', requestedModel: 'gpt', effort: 'high', requestedEffort: 'high', launchFlags: '--yolo' }
+  const state = { channels: { CCODEX: codex.id }, sessions: { [codex.id]: codex } }
+  const runtime = createAccountPoolRuntime({ state, mode: 'auto', readRegistry: () => registry, persist: () => {}, now: () => start,
+    readQuota: async account => account.provider === 'claude'
+      ? normalizeQuotaObservation({ provider: 'claude', observedAt: start, identity: { email: account.email, principalId: account.id },
+        quota: { five_hour: { utilization: 10, resets_at: new Date(start + 3600000).toISOString() } } })
+      : normalizeQuotaObservation({ provider: 'codex', observedAt: start, identity: { email: account.email, principalId: account.id },
+        quota: { ordinaryUsageAllowed: true, rateLimits: { limitId: 'codex', primary: { usedPercent: 10, resetsAt: Math.floor((start + 3600000) / 1000) } } } }),
+    nativeLoginIdentity: async () => ({ email: 'stranger@example.test' }) })
+  await runtime.tick()
+  assert.ok(state.accountPools.nativeIdentity, 'the Claude mismatch is recorded')
+  runtime.noteLaunch(codex)
+  const account = runtime.inventory().registry.accounts.find(a => a.key === 'codex')
+  assert.equal(state.accountPools.launchChecks[account.id]?.ok, true)
+})
