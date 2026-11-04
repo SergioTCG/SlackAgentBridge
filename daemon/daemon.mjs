@@ -70,7 +70,7 @@ import {
   dismissClaudeUsageLimitMenu, prepareClaudeTerminalDelivery, resetClaudePollerEvidence, usageLimitResumeInput,
 } from './claude-terminal.mjs'
 import {
-  staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
+  claudeAssistantTextSinceOffset, staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
 } from './claude-transcript.mjs'
 import {
   nextStructuredQuestion, questionBlocks, questionFormFromPane, questionFormMatches, questionFormsFromHook,
@@ -106,7 +106,7 @@ import {
 } from './team-message-delivery.mjs'
 import {
   activatePendingTeamProviderTurn, activateTeamProviderTurn, beginTeamProviderPollerObservation,
-  boundTeamTaskProviderTurn, claimDeferredTeamProviderFinal, clearDeferredTeamProviderFinal,
+  boundTeamTaskProviderTurn, interimTeamTaskProviderTurn, claimDeferredTeamProviderFinal, clearDeferredTeamProviderFinal,
   deferPendingTeamProviderFinal, deferredTeamProviderFinal,
   discardPendingTeamProviderTurn, pendingTeamProviderTurn,
   refreshTeamProviderPollerTurn, releaseDeferredTeamProviderFinalClaim,
@@ -1504,7 +1504,8 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     }
     clearStatusDeferred(session)
     void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
-    const rawText = readNewAssistantText(session, teamTaskTurn)
+    const older = []
+    const rawText = readNewAssistantText(session, teamTaskTurn, skipped => older.push(skipped))
     const delivery = prepareClaudeTerminalDelivery(
       rawText || terminalFailure?.text || '',
       claudeTerminalFailures.get(session.id),
@@ -1513,6 +1514,10 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     if (delivery.failure) rememberClaudeTerminalFailure(session.id, delivery.failure)
     else if (finalText) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
     try {
+      // Text from before this generation's marker reaches the channel, not its report.
+      if (older.length && !recoveringDeferredOutput) {
+        await postProviderOutput(session.channel, older.join('\n\n'))
+      }
       if (finalText && !delivery.suppress && !recoveringDeferredOutput) {
         await postProviderOutput(session.channel, finalText)
       }
@@ -1921,61 +1926,15 @@ async function waitTranscriptSettle(file, maxMs = 4000) {
   }
 }
 
-// Reads assistant text written since session.offset. Only COMPLETE lines are
-// parsed, so a record being flushed is never cut in half. Poller failure
-// detection peeks without advancing; final delivery advances atomically.
-function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = null) {
+function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = null, onSkipped = null) {
   if (providerOf(session) !== 'claude') return ''
-  const f = session.transcript
-  if (!f || !fs.existsSync(f)) return ''
-  const size = fs.statSync(f).size
-  const from = session.offset || 0
-  if (size <= from) return ''
-  const fd = fs.openSync(f, 'r')
-  const buf = Buffer.alloc(size - from)
-  fs.readSync(fd, buf, 0, buf.length, from)
-  fs.closeSync(fd)
-  const str = buf.toString('utf8')
-  const lastNl = str.lastIndexOf('\n')
-  if (lastNl < 0) return '' // no complete line yet; wait for more
-  const complete = str.slice(0, lastNl + 1)
-  if (expectedTeamTurn) {
-    const selected = teamTurnAssistantTranscript(
-      complete, expectedTeamTurn, session.claudeTranscriptOffsetTurn,
-    )
-    if (selected) {
-      if (advance) {
-        session.offset = from + selected.consumedBytes
-        session.claudeTranscriptOffsetTurn = {
-          taskId: expectedTeamTurn.taskId,
-          providerWorkGeneration: expectedTeamTurn.providerWorkGeneration,
-        }
-      }
-      return selected.text
-    }
-    // A persisted different-generation boundary means the exact marker for
-    // this final has not entered the unread suffix yet. Do not fall back to an
-    // unbounded read which could attribute another generation's output.
-    if (session.claudeTranscriptOffsetTurn) return ''
-  }
-  if (advance) session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
-  const out = []
-  for (const line of str.slice(0, lastNl).split('\n')) {
-    if (!line.trim()) continue
-    let rec
-    try { rec = JSON.parse(line) } catch { continue }
-    if (rec.type !== 'assistant' || !rec.message?.content) continue
-    for (const c of rec.message.content) {
-      if (c.type === 'text' && c.text?.trim()) out.push(c.text.trim())
-    }
-  }
-  return out.join('\n\n')
+  return claudeAssistantTextSinceOffset(session, advance, expectedTeamTurn, onSkipped)
 }
 
 const peekNewAssistantText = (session, expectedTeamTurn = null) =>
   assistantTextSinceOffset(session, false, expectedTeamTurn)
-const readNewAssistantText = (session, expectedTeamTurn = null) =>
-  assistantTextSinceOffset(session, true, expectedTeamTurn)
+const readNewAssistantText = (session, expectedTeamTurn = null, onSkipped = null) =>
+  assistantTextSinceOffset(session, true, expectedTeamTurn, onSkipped)
 
 function discardStaleClaudeTeamTurnTranscript(session, expected) {
   if (providerOf(session) !== 'claude' || !session.transcript || !fs.existsSync(session.transcript)) return false
@@ -2750,18 +2709,26 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     if (targetClaim || internalTurns.has(session.id)) return
     const previousOffset = Number(session.offset) || 0
     const previousTranscriptTurn = JSON.stringify(session.claudeTranscriptOffsetTurn || null)
-    const teamTaskTurn = currentTeamTaskProviderTurn(session, body)
-    const text = readNewAssistantText(session, teamTaskTurn)
+    const observedAt = Number(body.observed_at) || Date.now()
+    const teamTaskTurn = interimTeamTaskProviderTurn(state, session, body, observedAt)
+    // An unbounded read here would pass the delivery marker of a task it couldn't place,
+    // and Stop could then never find that generation's final answer.
+    const older = []
+    const text = session.teamActiveTaskId && !teamTaskTurn
+      ? ''
+      : readNewAssistantText(session, teamTaskTurn, skipped => older.push(skipped))
     if (teamTaskTurn && session.claudeTranscriptOffsetTurn?.taskId === teamTaskTurn.taskId &&
         Number(session.claudeTranscriptOffsetTurn.providerWorkGeneration) ===
           teamTaskTurn.providerWorkGeneration) {
-      session.claudeTranscriptOffsetTurn.observedAt = Number(body.observed_at) || Date.now()
+      session.claudeTranscriptOffsetTurn.observedAt = observedAt
     }
     if ((Number(session.offset) || 0) !== previousOffset ||
         JSON.stringify(session.claudeTranscriptOffsetTurn || null) !== previousTranscriptTurn) {
       saveStateNow(state)
     }
-    if (text) { clearStatusDeferred(session); await postProviderOutput(session.channel, text) }
+    // Text from before a follow-up's marker isn't this generation's, but it is still the worker's.
+    const shown = [...older, text].filter(Boolean).join('\n\n')
+    if (shown) { clearStatusDeferred(session); await postProviderOutput(session.channel, shown) }
     const structuredForms = questionFormsFromHook(body)
     if (structuredForms.length) {
       await clearStatus(session)

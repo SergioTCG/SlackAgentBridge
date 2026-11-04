@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import { isPeerMessagePrompt, isProviderInternalPrompt } from './providers.mjs'
 import { providerPromptTurnMarker } from './team-provider-turn.mjs'
 
@@ -16,11 +17,20 @@ function transcriptMessageText(record) {
 // own records can quote one without being one: a meta record holds a subagent's or another
 // session's message in full, a notification can quote team output, and a compact summary
 // can quote the conversation. This refuses what the prompt hook refuses and leaves the rest
-// alone, so a new delivery wrapper can't hide a real boundary.
+// alone, so a new delivery wrapper can't hide a real boundary. A prompt that reaches a busy
+// session is recorded when Claude Code drains it, as a queued command, not as a user record.
+function submittedPromptText(record) {
+  if (record?.type === 'user') {
+    return record.isMeta === true || record.isCompactSummary === true ? '' : transcriptMessageText(record)
+  }
+  const attachment = record?.type === 'attachment' ? record.attachment : null
+  if (attachment?.type !== 'queued_command' || attachment.isMeta === true) return ''
+  return transcriptMessageText({ message: { content: attachment.prompt } })
+}
+
 function deliveredTeamTurnMarker(record) {
-  if (record?.type !== 'user' || record.isMeta === true || record.isCompactSummary === true) return null
-  const text = transcriptMessageText(record)
-  if (isProviderInternalPrompt('claude', text) || isPeerMessagePrompt('claude', text)) return null
+  const text = submittedPromptText(record)
+  if (!text || isProviderInternalPrompt('claude', text) || isPeerMessagePrompt('claude', text)) return null
   return providerPromptTurnMarker(text)
 }
 
@@ -36,7 +46,8 @@ function sameTeamTurn(marker, expected) {
 // Select assistant text from one exact task generation. The returned byte count
 // includes any stale complete-line prefix before that generation, but stops at
 // the next task marker. This lets the current finalizer retire older output
-// without ever attributing it to the current task report.
+// without ever attributing it to the current task report. The older text comes
+// back separately as skippedText, because the channel should still show it.
 export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
   const input = String(text || '')
   let cursor = 0
@@ -45,6 +56,13 @@ export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
   let promptObservedAt = Number.isSafeInteger(Number(offsetTurn?.observedAt))
     ? Number(offsetTurn.observedAt) : null
   const output = []
+  const skipped = []
+  const selection = bytes => ({
+    text: output.join('\n\n'),
+    consumedBytes: bytes,
+    ...(promptObservedAt ? { promptObservedAt } : {}),
+    ...(skipped.length ? { skippedText: skipped.join('\n\n') } : {}),
+  })
   while (cursor < input.length) {
     const newline = input.indexOf('\n', cursor)
     if (newline < 0) break
@@ -54,11 +72,7 @@ export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
     const marker = deliveredTeamTurnMarker(record)
     if (marker) {
       if (collecting && !sameTeamTurn(marker, expected)) {
-        return {
-          text: output.join('\n\n'),
-          consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
-          ...(promptObservedAt ? { promptObservedAt } : {}),
-        }
+        return selection(Buffer.byteLength(input.slice(0, cursor), 'utf8'))
       }
       collecting = sameTeamTurn(marker, expected)
       matched ||= collecting
@@ -66,18 +80,14 @@ export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
         const timestamp = Date.parse(String(record.timestamp || ''))
         if (Number.isFinite(timestamp)) promptObservedAt = timestamp
       }
-    } else if (collecting && record?.type === 'assistant') {
+    } else if (record?.type === 'assistant') {
       const assistant = transcriptMessageText(record).trim()
-      if (assistant) output.push(assistant)
+      if (assistant) (collecting ? output : skipped).push(assistant)
     }
     cursor = newline + 1
   }
   if (!matched) return null
-  return {
-    text: output.join('\n\n'),
-    consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
-    ...(promptObservedAt ? { promptObservedAt } : {}),
-  }
+  return selection(Buffer.byteLength(input.slice(0, cursor), 'utf8'))
 }
 
 // Return the complete-line byte prefix belonging to an older Claude team turn.
@@ -109,4 +119,55 @@ export function staleTeamTurnTranscriptPrefixBytes(text, expected, offsetTurn = 
     cursor = newline + 1
   }
   return Buffer.byteLength(input.slice(0, cursor), 'utf8')
+}
+
+// Reads assistant text written since session.offset. Only COMPLETE lines are
+// parsed, so a record being flushed is never cut in half. Poller failure
+// detection peeks without advancing; final delivery advances atomically.
+export function claudeAssistantTextSinceOffset(session, advance = false, expectedTeamTurn = null, onSkipped = null) {
+  const f = session.transcript
+  if (!f || !fs.existsSync(f)) return ''
+  const size = fs.statSync(f).size
+  const from = session.offset || 0
+  if (size <= from) return ''
+  const fd = fs.openSync(f, 'r')
+  const buf = Buffer.alloc(size - from)
+  fs.readSync(fd, buf, 0, buf.length, from)
+  fs.closeSync(fd)
+  const str = buf.toString('utf8')
+  const lastNl = str.lastIndexOf('\n')
+  if (lastNl < 0) return '' // no complete line yet; wait for more
+  const complete = str.slice(0, lastNl + 1)
+  if (expectedTeamTurn) {
+    const selected = teamTurnAssistantTranscript(
+      complete, expectedTeamTurn, session.claudeTranscriptOffsetTurn,
+    )
+    if (selected) {
+      if (advance) {
+        session.offset = from + selected.consumedBytes
+        session.claudeTranscriptOffsetTurn = {
+          taskId: expectedTeamTurn.taskId,
+          providerWorkGeneration: expectedTeamTurn.providerWorkGeneration,
+        }
+        if (selected.skippedText) onSkipped?.(selected.skippedText)
+      }
+      return selected.text
+    }
+    // A persisted different-generation boundary means the exact marker for
+    // this final has not entered the unread suffix yet. Do not fall back to an
+    // unbounded read which could attribute another generation's output.
+    if (session.claudeTranscriptOffsetTurn) return ''
+  }
+  if (advance) session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
+  const out = []
+  for (const line of str.slice(0, lastNl).split('\n')) {
+    if (!line.trim()) continue
+    let rec
+    try { rec = JSON.parse(line) } catch { continue }
+    if (rec.type !== 'assistant' || !rec.message?.content) continue
+    for (const c of rec.message.content) {
+      if (c.type === 'text' && c.text?.trim()) out.push(c.text.trim())
+    }
+  }
+  return out.join('\n\n')
 }

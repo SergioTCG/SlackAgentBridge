@@ -470,6 +470,17 @@ export function boundTeamTaskProviderTurn(state, session, body = null) {
   return tracked ? Object.freeze(tracked) : null
 }
 
+// PreToolUse carries no timestamp, because the hook would need a process per tool call to
+// stamp one, and Claude has no native turn id. Without either, a session with more than one
+// tracked generation resolves to no turn. This hook arrives as it fires, so the time it
+// reached the daemon places it.
+export function interimTeamTaskProviderTurn(state, session, body = null, now = Date.now()) {
+  return boundTeamTaskProviderTurn(state, session, {
+    ...body,
+    observed_at: Number(body?.observed_at) || now,
+  })
+}
+
 export function teamTaskTurnOwnsLifecycle(state, session, expected) {
   const taskId = session?.teamActiveTaskId || null
   if (!taskId) return expected == null
