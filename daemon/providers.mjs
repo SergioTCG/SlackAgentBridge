@@ -118,10 +118,9 @@ export function isProviderInternalPrompt(provider, prompt) {
 // envelope attribute is optional, so only the marker identifies it. Text that merely quotes
 // one, or pastes it inside `<pasted_content>`, is still someone's input. It isn't typing, so
 // the terminal mirror skips it, and a task envelope quoted in it is never a delivery. It is
-// deliberately not provider-internal: it counts as local input, failing a worker's active
-// delegated task and ending a team turn. Nothing marks a turn it starts, so if that task
-// survived, that session could steer the worker to complete it, and the turn's report could
-// wake a coordinator. A standing task stays bound, so that gap remains there.
+// deliberately not provider-internal: it ends a coordinator's team-turn authority, and the
+// turn it touches can't move the worker's tasks (see markPeerTurn in teams.mjs). Another
+// session must not be able to borrow that authority or steer that work.
 const CLAUDE_PEER_PROMPT = /^<cross-session-message(?:\s[^>]*)?>/
 export function isPeerMessagePrompt(provider, prompt) {
   return normalizeProvider(provider) === 'claude' &&

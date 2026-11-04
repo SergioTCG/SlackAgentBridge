@@ -328,13 +328,19 @@ turn. A turn one of them starts on an idle worker reports like any later turn in
 the same work generation: the coordinator sees its reply, and that reply becomes
 the task's latest result, which a later release delivers.
 
-A message from another Claude session counts as local input. It fails a worker's
-active delegated task and ends the current team turn, though it is not mirrored as
-terminal typing and a task envelope quoted inside it is never a delivery. Nothing
-marks a turn it starts, so if the task survived, that session could steer the worker
-to complete it, and the turn's report could wake a coordinator or renew its dispatch
-budget. A standing task stays bound, so a worker that follows such a message can still
-move it.
+A message from another Claude session ends the current team turn, so that session
+cannot borrow the authority, but it never replaces a worker's delegated turn. It is
+not mirrored as terminal typing, and a task envelope quoted inside it is never a
+delivery. The turn it touches is marked until that turn ends or the coordinator or
+owner speaks, whether the task is exclusive or standing:
+
+- It cannot change gates or declare completion. The worker gets an error saying why.
+- Its replies are labelled and wake no one.
+- If the message started the turn, the turn ends with no report: no new result, no
+  continuation event, and a provider failure leaves the task alone.
+- If the message joined a turn already working on the task, that work still reports,
+  with a warning, and is not auto-released. The coordinator can message the worker to
+  confirm it, which is what a declaration refused in that turn needs too.
 
 ## Agent-facing CLI
 

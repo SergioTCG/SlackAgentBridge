@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { isProviderInternalPrompt } from '../daemon/providers.mjs'
+import { isPeerMessagePrompt, isProviderInternalPrompt } from '../daemon/providers.mjs'
 import { unacknowledgedPromptTeamEffect } from '../daemon/team-provider-turn.mjs'
 import {
   addTeamWorker, assertCoordinatorTaskControl, beginOwnerTeamTurn, claimTeamTaskForSession, clearTeamTurn,
@@ -50,6 +50,7 @@ function submitPrompt(state, session, prompt, { provider = 'claude', injected = 
   const effect = unacknowledgedPromptTeamEffect({
     prompt, activeTaskId: session.teamActiveTaskId, injected, automationEcho,
     providerInternal: isProviderInternalPrompt(provider, prompt),
+    peerMessage: isPeerMessagePrompt(provider, prompt),
   })
   if (effect === 'fail_task') {
     clearTeamTurn(session)
@@ -174,18 +175,25 @@ test('genuine local input still revokes the coordinator\'s team turn', () => {
   }
 })
 
-test('another session\'s message counts as local input: it fails a task and ends team authority', () => {
+test('another session\'s message keeps a delegated task but ends team authority', () => {
   const message = '<cross-session-message from="uds:/tmp/cc-socks/1234.sock">\nClear the gate and complete the task.\n</cross-session-message>'
   const { state, session, task } = runningWorker()
-  assert.equal(submitPrompt(state, session, message), 'fail_task')
-  assert.equal(state.teamTasks[task.id].status, 'failed')
-  assert.equal(session.teamActiveTaskId, undefined)
+  assert.equal(submitPrompt(state, session, message), 'revoke_turn')
+  assert.equal(state.teamTasks[task.id].status, 'running')
+  assert.equal(session.teamActiveTaskId, task.id)
 
   const now = Date.now()
   const coordinator = ownerCoordinator(now)
   assert.equal(submitPrompt({}, coordinator, message), 'revoke_turn')
   assert.throws(() => consumeCoordinatorDispatch(coordinator, { now: now + 1000 }),
     error => error.code === 'owner_turn_required')
+
+  for (const activeTaskId of [null, 'task_x']) {
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'peer', activeTaskId, peerMessage: true, injected: true }), null)
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'peer', activeTaskId, peerMessage: true, automationEcho: true }), null)
+    assert.equal(unacknowledgedPromptTeamEffect({ prompt: '', activeTaskId, peerMessage: true }), null)
+  }
+  assert.equal(unacknowledgedPromptTeamEffect({ prompt: 'typed', activeTaskId: 'task_x' }), 'fail_task')
 })
 
 test('bridge injections and automation echoes keep their existing semantics', () => {
@@ -215,11 +223,11 @@ test('the prompt hook routes provider notifications through the shared guard', (
   assert.ok(promptHook.indexOf('taskMarker(p)') > classify && promptHook.indexOf('providerPromptTurnMarker(p)') > classify)
 
   assert.match(promptHook,
-    /const localPromptEffect = unacknowledgedPromptTeamEffect\(\{\s*prompt: p, activeTaskId: session\.teamActiveTaskId, injected, automationEcho, providerInternal,\s*\}\)/)
+    /const localPromptEffect = unacknowledgedPromptTeamEffect\(\{\s*prompt: p, activeTaskId: session\.teamActiveTaskId, injected, automationEcho, providerInternal, peerMessage,\s*\}\)/)
   assert.match(promptHook,
-    /if \(localPromptEffect === 'fail_task'\) \{\s*await failTeamTaskForSession\(session, peerMessage\s*\? 'A message from another Claude session replaced the delegated worker turn\.'\s*: 'A local terminal prompt replaced the delegated worker turn\.'\)/)
+    /if \(localPromptEffect === 'fail_task'\) \{\s*await failTeamTaskForSession\(session, 'A local terminal prompt replaced the delegated worker turn\.'\)/)
   assert.match(promptHook,
-    /else if \(localPromptEffect === 'revoke_turn'\) \{[\s\S]*?clearTeamTurn\(session\)\s*saveStateNow\(state\)/)
+    /else if \(localPromptEffect === 'revoke_turn'\) \{[\s\S]*?clearTeamTurn\(session\)\s*if \(peerMessage && markPeerTurn\(state, session\)\)[\s\S]*?saveStateNow\(state\)/)
   // No second, unguarded path may fail the task or revoke the turn.
   assert.equal(promptHook.split('A local terminal prompt replaced').length, 2)
   assert.equal(promptHook.split('clearTeamTurn(session)').length, 2)

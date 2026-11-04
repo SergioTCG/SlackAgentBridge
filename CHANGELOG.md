@@ -8,6 +8,17 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A message from another Claude session no longer fails a worker's delegated team
+  task, and can no longer steer one. The turn it touches is marked until that turn
+  ends or the coordinator or owner speaks, for exclusive and standing tasks alike.
+  - That turn can't change gates or declare completion, and its replies are labelled
+    and wake no one.
+  - If the message started the turn, the turn ends with no report, so it can't change
+    the task's result or wake a coordinator.
+  - If it joined a turn already working on the task, that work still reports, with a
+    warning, and isn't auto-released.
+  - It still ends a coordinator's team turn, it still isn't mirrored, and a task
+    envelope quoted inside it is never treated as a delivery.
 - The prompt Claude Code submits when a usage limit resets no longer fails a
   worker's delegated team task, ends a coordinator's team turn or appears in the
   channel as terminal typing. The task failed while the worker carried on, as
@@ -22,11 +33,6 @@ Notable changes to this project. Format based on
   - A turn one of these prompts starts on an idle worker reports like any later
     turn: the coordinator sees its reply, and that reply becomes the task's latest
     result, which a later release delivers.
-  - A message from another Claude session still fails a worker's active task and
-    ends the team turn, because nothing yet stops that session steering a worker to
-    complete its task. The failure now names it instead of a terminal prompt. A
-    standing task stays bound, as before. A task envelope quoted inside it is no
-    longer treated as a delivery.
   - Other typed and pasted input, and Codex and Pi prompts, still fail or revoke as
     before. Typing one of these markers or the exact reset text at the start of a
     prompt counts as a notification, as typing `<task-notification>` already does.

@@ -1,7 +1,7 @@
 import { isPeerMessagePrompt, isProviderInternalPrompt, isSystemPrompt } from './providers.mjs'
 import {
-  acknowledgeCoordinatorTaskMessageDelivery, beginDelegatedTeamTurn, clearTeamTurn,
-  completeCoordinatorTaskMessageDelivery, coordinatedTeamForChannel, isStandingTeamTask, markTeamTaskRunning,
+  acknowledgeCoordinatorTaskMessageDelivery, beginDelegatedTeamTurn, clearPeerTurn, clearTeamTurn,
+  completeCoordinatorTaskMessageDelivery, coordinatedTeamForChannel, isStandingTeamTask, markPeerTurn, markTeamTaskRunning,
   taskMarker, teamTaskProviderWorkGeneration,
 } from './teams.mjs'
 import {
@@ -145,6 +145,8 @@ export function createPromptSubmitHandler({
         activeTurn.taskId === acknowledgedTurn.taskId &&
         activeTurn.providerWorkGeneration === acknowledgedTurn.providerWorkGeneration &&
         teamTaskTurnOwnsCurrentLifecycle(session, acknowledgedTurn))
+      // The coordinator has spoken, so the turn is its work again.
+      clearPeerTurn(session)
       // Codex Stop/App Server completion can race the Slack audit below. Start
       // and persist its lifecycle now so that finalization may clear this exact
       // turn. A delayed prompt hook must not recreate a final already claimed,
@@ -198,6 +200,7 @@ export function createPromptSubmitHandler({
         // Authority re-attaches only where the attempt's own fence was
         // released (an uncertain write). An owner, collaborator or
         // continuation turn is never converted into a delegated one.
+        if (clearPeerTurn(session)) saveStateNow(state)
         const ownTeam = coordinatedTeamForChannel(state, session.channel)
         if (ownTeam && !session.teamTurn) {
           beginDelegatedTeamTurn(session, { teamId: ownTeam.id, sourceTaskId: standingAck.task.id })
@@ -228,18 +231,20 @@ export function createPromptSubmitHandler({
       await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
     } else {
       const localPromptEffect = unacknowledgedPromptTeamEffect({
-        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal,
+        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal, peerMessage,
       })
       if (localPromptEffect === 'fail_task') {
-        await failTeamTaskForSession(session, peerMessage
-          ? 'A message from another Claude session replaced the delegated worker turn.'
-          : 'A local terminal prompt replaced the delegated worker turn.')
+        await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
       } else if (localPromptEffect === 'revoke_turn') {
         // Local terminal input, uncorrelated prompts and another session's message
         // do not inherit a prior Slack owner's lateral team authority. Provider
         // notifications that Claude Code submits mid-turn keep the current turn's
-        // authority.
+        // authority. Another session's message also marks the turn it touched.
         clearTeamTurn(session)
+        if (peerMessage && markPeerTurn(state, session)) {
+          log('team peer turn marked', session.teamPeerTurn.taskIds.join(','),
+            session.teamPeerTurn.joinedRunningTurn ? 'joined' : 'started')
+        }
         saveStateNow(state)
       }
     }

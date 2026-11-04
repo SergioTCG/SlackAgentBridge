@@ -126,7 +126,8 @@ import {
   parentTeamForChannel, setTeamAutoRelease, teamAutoRelease, addTeamSchedule, publicTeamSchedule, removeTeamSchedule,
   takeDueTeamSchedules, teamDepth, clearTeamSchedules, pruneOrphanedTeamSchedules,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
-  beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearTeamTurn,
+  PEER_TURN_WARNING, assertPeerTurnAllows, beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearPeerTurn, clearTeamTurn,
+  peerTurnAtStop, peerTurnHolds,
   beginCoordinatorTaskMessageDelivery,
   completeCoordinatorTaskMessageDelivery, closeTeam,
   consumeCoordinatorDispatch, coordinatorPromptContext,
@@ -640,6 +641,8 @@ function withArtifactDelivery(session, text, request) {
 }
 
 function beginSlackTeamTurn(session, sender, request) {
+  // The owner has spoken, so what another session's message touched is settled.
+  if (!sender) clearPeerTurn(session)
   if (!session?.channel || !activeTeamForChannel(state, session.channel)) {
     clearTeamTurn(session)
     return ''
@@ -1885,6 +1888,7 @@ async function readoptStatus() {
       // lost offset from before the restart doesn't strand mirroring behind, and
       // clear any status left frozen by the restart.
       const idleTask = readoptedTeamTaskFingerprint(s)
+      clearPeerTurn(s) // idle: the turn that message touched is over
       try { const sz = fs.statSync(s.transcript).size; if (Number.isFinite(sz) && sz !== s.offset) { s.offset = sz; log('re-anchored idle session', s.id.slice(0, 8), 'offset→EOF') } } catch {}
       if (ts) { try { await web.chat.delete({ channel: s.channel, ts }) } catch {} }
       if (accountPools.mode === 'auto' && claudeUsageLimitSurface(pane) || accountMaintenanceHoldsTask(s)) {
@@ -5006,7 +5010,7 @@ async function performTeamReplyDelivery(task, reply) {
     // it is a suggestion to weigh, not owner instruction.
     const origin = reply.origin?.kind === 'collaborator'
       ? ` · _collaborator-originated${reply.origin.name ? ` (${String(reply.origin.name).replace(/[<>&*_`]/g, '')})` : ''}_`
-      : ''
+      : reply.origin?.kind === 'peer' ? ' · _written after a message from another session; unverified_' : ''
     const message = await postSlackMessage(task.sourceChannel, {
       text: `📨 *Team update from* <#${task.targetChannel}> · \`${task.id}\`${origin}\n\n${reply.text}${gates}`,
       unfurl_links: false,
@@ -5889,10 +5893,12 @@ async function finishTeamTaskForSession(session, result, error = null, {
       return false
     }
     const revokedTurn = clearTeamTurn(session)
-    if (revokedTurn) saveStateNow(state)
+    const endedPeerTurn = clearPeerTurn(session)
+    if (revokedTurn || endedPeerTurn) saveStateNow(state)
     else saveState(state)
     return false
   }
+  let peerTurn = null
   let task
   try {
     task = teamTask(state, taskId)
@@ -5906,14 +5912,25 @@ async function finishTeamTaskForSession(session, result, error = null, {
         teamTaskProviderWorkGeneration(task))
       return false
     }
+    peerTurn = peerTurnAtStop(session, task)
+    clearPeerTurn(session)
     const revokedTurn = clearTeamTurn(session)
+    if (peerTurn === 'started') {
+      // Another session's message started this turn, so it isn't the task's work: it reports
+      // nothing, wakes no one, and even a failed provider turn leaves the task alone. The
+      // worker's channel has already shown its reply.
+      log('team peer turn ended without a report', task.id)
+      teamTurnProof.delete(session.id)
+      saveStateNow(state)
+      return true
+    }
     if (error) {
       failTeamTask(state, task.id, error)
     } else {
       const reportWarning = warning || (
         !finalText && teamTaskCompletionPolicy(task) !== LEGACY_COMPLETION_POLICY
           ? 'The provider turn ended without a stable final response.'
-          : null
+          : peerTurn === 'joined' ? PEER_TURN_WARNING : null
       )
       const reported = reportTeamTaskTurn(state, task.id, {
         targetSessionId: session.id,
@@ -5949,7 +5966,8 @@ async function finishTeamTaskForSession(session, result, error = null, {
     const report = task.reports?.at(-1)
     if (report) await ensureTeamReportDelivery(task, report).catch(failure =>
       log('team turn report delivery deferred', task.id, String(failure?.message || failure)))
-    await autoReleaseTeamTask(task)
+    // Another session's message reached this turn, so the coordinator decides.
+    if (!peerTurn) await autoReleaseTeamTask(task)
   }
   if (!session.teamActiveTaskId || teamTaskTurnOwnsCurrentLifecycle(session, expectedTeamTaskTurn)) {
     teamTurnProof.delete(session.id)
@@ -6424,6 +6442,7 @@ const teamService = {
     if (origin && request.pendingGates !== undefined) {
       throw new TeamError('collaborator_turn_denied', 'A collaborator-started turn cannot change task gates.', 403)
     }
+    if (request.pendingGates !== undefined) assertPeerTurnAllows(session, task, 'change task gates')
     const replyId = `reply_${crypto.randomBytes(12).toString('base64url')}`
     if (request.paths?.length && !member.files) throw new TeamError('files_not_allowed', 'File relay is not enabled for this worker.', 403)
     let files = []
@@ -6436,7 +6455,8 @@ const teamService = {
     try {
       const append = request.pendingGates === undefined ? appendTeamTaskReply : appendTeamTaskCheckpoint
       appended = append(state, task.id, {
-        id: replyId, requestId: request.requestId, fromChannel: session.channel, text: request.text, files, origin,
+        id: replyId, requestId: request.requestId, fromChannel: session.channel, text: request.text, files,
+        origin: origin || (peerTurnHolds(session, task) ? { kind: 'peer' } : null),
         ...(request.pendingGates === undefined ? {} : { pendingGates: request.pendingGates }),
       })
     } catch (error) {
@@ -6501,6 +6521,7 @@ const teamService = {
     if (!priorRequest && session.teamTurn?.actor === 'collaborator') {
       throw new TeamError('collaborator_turn_denied', 'A collaborator-started turn cannot declare a task complete.', 403)
     }
+    if (!priorRequest) assertPeerTurnAllows(session, task, 'declare this task complete')
     if (!Number.isSafeInteger(Number(request.providerWorkGeneration)) || Number(request.providerWorkGeneration) < 1) {
       throw new TeamError('invalid_work_generation',
         'Task completion must include the provider work generation from the current SAB task prompt.', 400)

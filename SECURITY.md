@@ -433,10 +433,11 @@ Slack when its scope or progress is no longer appropriate.
 - Messages between Claude sessions, including a session's own subagent and
   delivery notices, are not mirrored as terminal typing. The recipient's own
   reply is mirrored like any other, and it can repeat what the message said.
-  Channel members see that reply. A message from another session counts as local
-  input: it fails a worker's active delegated task and ends the current team turn.
-  A standing task stays bound, so a worker that follows such a message can still
-  move it.
+  Channel members see that reply. A message from another session ends the current
+  team turn, and the turn it touches can't change gates or declare completion. Its
+  replies wake no one, and a turn it started reports nothing. The mark ends with that
+  turn, so a later turn could still act on what the message said, as it could on
+  anything else the worker has read. A lost hook leaves that turn unmarked.
 - Treat artifact requests as deliberate data egress. Review collaborator access
   before asking an agent to send generated files containing proprietary data.
 
