@@ -128,6 +128,49 @@ test('only Claude\'s own limit rendering counts, never a reply that quotes it', 
     '  Enter to confirm · Esc to cancel', ...footer].join('\n')), null, 'no notice row, no surface')
 })
 
+// Claude Code 2.1.318 shows the limit as a banner under the input box and
+// writes no notice row. The rows of a real pane, with unrelated text masked.
+const BOX_RULE = '─'.repeat(80)
+const LIMIT_BANNER_ROWS = ['                                        ✔ xxxxxx xxxxxxxxx · /xxxxxxx xx xxxxx', BOX_RULE, '❯ ', BOX_RULE,
+  '  ⚠ Usage limit reached · limit resets 8am', '    Continuing automatically at 8am · Esc to cancel · /usage-credits to',
+  '    xxxxxxxx xxx', '', '  ⏵⏵ bypass permissions on (shift+tab to cycle)']
+const LIMIT_BANNER = LIMIT_BANNER_ROWS.join('\n')
+
+test('Claude Code\'s limit banner under the input box is an ended turn while it is current', async () => {
+  assert.equal(claudeUsageLimitSurface(LIMIT_BANNER), 'ended')
+  assert.equal(claudeUsageLimitSurface(`${LIMIT_BANNER}\n\n\n\n`), 'ended', 'trailing blank rows')
+  assert.equal(claudeUsageLimitSurface(LIMIT_BANNER_ROWS.map(row => row.trimEnd()).join('\n')), 'ended', 'tmux trims trailing spaces')
+  for (const wording of ['  ⚠ Weekly limit reached · resets Mon 10am', '  ⚠ Opus weekly limit reached · resets 4pm',
+    '  ⚠\uFE0F 5-hour limit reached · resets 3pm', "  ⚠ You've hit your session limit · resets 8am"]) {
+    assert.equal(claudeUsageLimitSurface(LIMIT_BANNER.replace(LIMIT_BANNER_ROWS[4], wording)), 'ended', wording)
+  }
+  assert.equal(claudeUsageLimitSurface(['⏺ The build printed Linking… (cached) and passed.', '', '⏺ Next step.', LIMIT_BANNER].join('\n')),
+    'ended', 'spinner-like text in earlier output is not a newer turn')
+  // An older notice row neither hides a current banner nor reads differently.
+  assert.equal(claudeUsageLimitSurface([LIMIT_NOTICE, '⏺ Resumed on the new account.', LIMIT_BANNER].join('\n')), 'ended')
+  assert.equal(claudeUsageLimitSurface(LIMIT_IDLE), 'ended')
+  assert.equal(claudeUsageLimitSurface(LIMIT_MENU), 'menu')
+  // The banner's Escape would cancel only Claude's own automatic continuation.
+  const sent = []
+  const result = await dismissClaudeUsageLimitMenu({ capture: async () => LIMIT_BANNER, sendKey: async key => { sent.push(key) },
+    sleep: async () => {} })
+  assert.equal(result.dismissed, false)
+  assert.deepEqual(sent, [])
+})
+
+test('a limit banner counts only from the status area and only while nothing newer is pending', () => {
+  assert.equal(claudeUsageLimitSurface(LIMIT_BANNER.replace('❯ ', '❯ typed but not sent')), null, 'typed input is newer')
+  assert.equal(claudeUsageLimitSurface(LIMIT_BANNER.replace('❯ \n', '❯ \n  typed on a second row\n')), null, 'so is a second typed row')
+  assert.equal(claudeUsageLimitSurface(['⏺ Resuming the task.', '', '✶ Newspapering… (8s · ↓ 487 tokens)', LIMIT_BANNER].join('\n')),
+    null, 'a spinner above the box is a newer turn')
+  assert.equal(claudeUsageLimitSurface(['⏺ The status area said:', '  ⚠ Usage limit reached · limit resets 8am', '', BOX_RULE, '❯ ',
+    BOX_RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')), null, 'a reply that quotes the banner')
+  assert.equal(claudeUsageLimitSurface(LIMIT_BANNER.replace('Usage limit reached · limit resets', 'Approaching usage limit · resets')),
+    null, 'a warning before the limit')
+  assert.equal(claudeUsageLimitSurface(LIMIT_BANNER.replace(LIMIT_BANNER_ROWS[4], '  Weekly limit reached · 100% used')), null,
+    'a status line without Claude\'s warning glyph')
+})
+
 test('the usage-limit chooser is dismissed with one Escape and never buys credits', async () => {
   const sent = []
   let pane = LIMIT_MENU
