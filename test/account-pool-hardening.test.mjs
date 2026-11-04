@@ -1,0 +1,515 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { compileAccountRegistry } from '../daemon/account-registry.mjs'
+import { normalizeQuotaObservation } from '../daemon/account-quota.mjs'
+import { createAccountPoolRuntime, launchCheckNotice, nativeIdentityNotice } from '../daemon/account-pool-runtime.mjs'
+
+const start = 1800000000000
+// Both main accounts are full Claude profiles, as SAB's own logins are; the
+// third is a legacy token, whose identity SAB cannot verify.
+const enrollment = () => ({ schemaVersion: 1, requestId: 'hardening-fixture', accounts: [
+  { key: 'busy', provider: 'claude', email: 'busy@example.test', identityConfirmed: true,
+    credentials: [{ kind: 'native-default' }, { kind: 'claude-profile', profile: 'busy' }] },
+  { key: 'spare', provider: 'claude', email: 'spare@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'spare' }] },
+  { key: 'token', provider: 'claude', email: 'token@example.test', identityConfirmed: true, credentials: [{ kind: 'legacy-claude', alias: 'token' }] },
+], groups: [{ key: 'mine', name: 'Mine', members: ['busy', 'spare', 'token'], preferred: { claude: 'busy' } }],
+routing: { defaultGroup: 'mine', channels: {} } })
+const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)) }
+
+function setup({ quota = { busy: 100, spare: 10, token: 100 }, ...overrides } = {}) {
+  const registry = compileAccountRegistry(enrollment(), { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+  let time = start
+  const session = { id: 'native-one', channel: 'CMINE', cwd: '/work', tmux: 'sab-one', pid: 100, model: 'opus', effort: 'max',
+    launchFlags: '--dsp', account: 'busy', accountKind: 'claude-profile' }
+  // A second session, already on the spare profile: its start is evidence that login launches.
+  const helper = { id: 'native-helper', channel: 'CHELP', cwd: '/help', tmux: 'sab-help', pid: null, model: 'opus', effort: 'max',
+    launchFlags: '--dsp', account: 'spare', accountKind: 'claude-profile' }
+  const state = { channels: { CMINE: session.id, CHELP: helper.id }, sessions: { [session.id]: session, [helper.id]: helper } }
+  const restarts = [], owner = [], notices = [], logs = []
+  const runtime = createAccountPoolRuntime({ state, mode: 'auto', readRegistry: () => registry, persist: () => {}, now: () => time,
+    readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: time,
+      identity: { email: account.email, principalId: account.id },
+      quota: { five_hour: { utilization: quota[account.key] ?? 10, resets_at: new Date(time + 3600000).toISOString() } } }),
+    blockReason: () => null, usageLimitBlockReason: async () => null, verifyIdentity: async () => 'verified',
+    restart: async (current, alias, options) => {
+      restarts.push({ channel: current.channel, alias, usageLimit: options.usageLimit, taskMaintenance: options.taskMaintenance })
+      current.account = alias; current.accountKind = 'claude-profile'; current.pid = 200
+    },
+    notify: async (channel, notice) => { notices.push({ channel, notice }) },
+    notifyOwner: async message => { owner.push(message) },
+    log: (...args) => logs.push(args), ...overrides })
+  const account = key => runtime.inventory().registry.accounts.find(a => a.key === key)
+  return { runtime, state, session, helper, restarts, owner, notices, logs, account, advance: ms => { time += ms }, at: () => time }
+}
+
+function holdTask(f, { status = 'running' } = {}) {
+  f.session.teamActiveTaskId = 'task-held'
+  f.state.teams = { team: { id: 'team', coordinatorChannel: 'CCOORD', members: { CMINE: { role: 'worker' } } } }
+  f.state.teamTasks = { 'task-held': { id: 'task-held', teamId: 'team', status, completionPolicy: 'coordinator-release',
+    sourceChannel: 'CCOORD', targetSessionId: f.session.id, targetChannel: 'CMINE', targetProvider: 'claude',
+    workGeneration: 2, providerWorkGeneration: 2, messages: [], replies: [], reports: [{ workGeneration: 2, deliveryStatus: 'delivered' }] } }
+  return structuredClone(f.state.teamTasks)
+}
+
+test('an automatic usage-limit move needs no proof for its pair of accounts, only evidence that the target login starts', async () => {
+  const f = setup()
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 0, 'nothing has shown that the spare login starts')
+  assert.equal(f.runtime.status('CMINE').waiting, 'launch-check:pending')
+  f.runtime.noteLaunch(f.helper)
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.restarts[0].usageLimit, true)
+  assert.equal(f.session.account, 'spare')
+  assert.deepEqual(f.state.accountPools.proofs, {}, 'no pair proof was involved')
+  assert.equal(f.runtime.status('CMINE').waiting, null)
+})
+
+test('a committed, verified switch onto a login is its launch evidence too', async () => {
+  const f = setup({ quota: { busy: 50, spare: 10, token: 100 } })
+  await f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'by-hand' })
+  assert.equal(f.state.accountPools.launchChecks[f.account('spare').id].ok, true)
+  assert.equal(f.state.accountPools.launchChecks[f.account('spare').id].source, 'switch')
+})
+
+test('launch evidence older than a day is renewed by SAB\'s own hidden launch before a move', async () => {
+  const probes = []
+  const f = setup({ probeLaunch: async account => { probes.push(account.key); return { ok: true } } })
+  f.runtime.noteLaunch(f.helper)
+  f.advance(25 * 3600000)
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 0, 'day-old evidence does not move anything')
+  for (let i = 0; i < 4 && !f.restarts.length; i++) { await settle(); await f.runtime.tick() }
+  assert.ok(probes.includes('spare'))
+  assert.ok(!probes.includes('token'), 'a legacy token is never launched by SAB')
+  assert.equal(new Set(probes).size, probes.length, 'each login is checked once')
+  assert.equal(f.restarts.length, 1)
+})
+
+test('a login that fails its launch check is reported once, keeps sessions off it, and is checked again after 30 minutes', async () => {
+  const probes = []
+  let answer = { ok: false, reason: 'terms' }
+  const f = setup({ probeLaunch: async account => { probes.push(account.key); return account.key === 'spare' ? answer : { ok: true } } })
+  for (let i = 0; i < 3; i++) { await f.runtime.tick(); await settle() }
+  assert.equal(f.restarts.length, 0)
+  const failures = () => f.owner.filter(message => message.startsWith("⚠️ SAB couldn't start Claude"))
+  assert.deepEqual(failures(), [launchCheckNotice(f.account('spare'), 'terms')])
+  assert.match(failures()[0], /asked to accept updated terms/)
+  assert.match(failures()[0], /CLAUDE_CONFIG_DIR=~\/\.config\/ccs\/account-auth\/claude\/spare claude/)
+  assert.equal(f.runtime.status('CMINE').waiting, 'launch-check:terms')
+  const checked = () => probes.filter(key => key === 'spare').length, before = checked()
+  f.advance(10 * 60000); await f.runtime.tick(); await settle()
+  assert.equal(checked(), before, 'no new check inside 30 minutes')
+  f.advance(25 * 60000); await f.runtime.tick(); await settle()
+  assert.equal(checked(), before + 1)
+  assert.equal(failures().length, 1, 'the same failure is not announced again')
+  answer = { ok: true }
+  f.advance(31 * 60000); await f.runtime.tick(); await settle(); await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+})
+
+test('a check skipped while the login is busy records nothing and runs again', async () => {
+  let skip = true
+  const f = setup({ probeLaunch: async account => account.key === 'spare' && skip ? { skipped: true } : { ok: true } })
+  for (let i = 0; i < 3; i++) { await f.runtime.tick(); await settle() }
+  assert.equal(f.state.accountPools.launchChecks[f.account('spare').id], undefined)
+  assert.equal(f.owner.filter(message => message.startsWith("⚠️ SAB couldn't")).length, 0)
+  skip = false
+  for (let i = 0; i < 3 && !f.restarts.length; i++) { await f.runtime.tick(); await settle() }
+  assert.equal(f.restarts.length, 1)
+})
+
+test('an upgrade counts committed, verified switches at the current registry revision as launch evidence, and no older ones', async () => {
+  for (const current of [true, false]) {
+    const f = setup()
+    const revision = f.runtime.inventory().registryRevision
+    f.state.accountPools = { schemaVersion: 1, observations: {}, bindings: {}, switches: {}, proofs: {}, receipts: { earlier: {
+      phase: 'committed', identityVerified: true, registryRevision: current ? revision : revision - 1, targetAccountId: f.account('spare').id,
+      completedAt: f.at() - 3600000, channelId: 'COLD', sessionId: 'old', requestId: 'old', digest: 'x' } } }
+    await f.runtime.tick()
+    assert.equal(f.restarts.length, current ? 1 : 0)
+  }
+})
+
+test('a legacy token login never earns automatic moves from a session start, as before', async () => {
+  const f = setup({ quota: { busy: 100, spare: 100, token: 10 } })
+  const tokenSession = { id: 'native-token', channel: 'CTOK', cwd: '/t', tmux: 'sab-tok', pid: null, model: 'opus', effort: 'max',
+    launchFlags: '--dsp', account: 'token', accountKind: 'legacy-claude' }
+  f.state.sessions[tokenSession.id] = tokenSession; f.state.channels.CTOK = tokenSession.id
+  f.runtime.noteLaunch(tokenSession)
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 0)
+  assert.equal(f.state.accountPools.launchChecks[f.account('token').id], undefined)
+})
+
+test('evidence for another credential reference of the account does not count', async () => {
+  const f = setup()
+  f.runtime.noteLaunch(f.helper)
+  f.state.accountPools.launchChecks[f.account('spare').id].credential = 'claude-profile:retired'
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 0)
+})
+
+test('sessions with nowhere to go are reported once, with the next reset, after two minutes', async () => {
+  const f = setup({ quota: { busy: 100, spare: 100, token: 100 } })
+  await f.runtime.tick(); await settle()
+  assert.equal(f.runtime.status('CMINE').waiting, 'no-capacity')
+  assert.equal(f.owner.length, 0, 'a brief wait stays quiet')
+  f.advance(3 * 60000); await f.runtime.tick(); await settle()
+  assert.equal(f.owner.length, 1)
+  assert.match(f.owner[0], /^⏳ 1 session on \*busy@example\.test\* is at its usage limit, and no account in the group has capacity left\. The first account regains capacity <!date\^\d+\^\{date_short_pretty\} at \{time\}\|[^>]+>; SAB moves it then\.$/)
+  f.advance(10 * 60000); await f.runtime.tick(); await settle()
+  assert.equal(f.owner.length, 1, 'once per episode')
+  assert.equal(f.logs.filter(args => args[0] === 'usage-limit move waiting').length, 1, 'one log line per change')
+})
+
+test('a stuck episode ends when its sessions move, so a later one is reported again', async () => {
+  let quota = { busy: 100, spare: 100, token: 100 }
+  const g = setup({ quota: undefined, readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: g.at(),
+    identity: { email: account.email, principalId: account.id },
+    quota: { five_hour: { utilization: quota[account.key], resets_at: new Date(g.at() + 3600000).toISOString() } } }) })
+  g.runtime.noteLaunch(g.helper)
+  g.advance(3 * 60000); await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.owner.length, 1)
+  quota = { busy: 100, spare: 10, token: 100 }
+  g.advance(6 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.restarts.length, 1)
+  assert.equal(Object.keys(g.state.accountPools.waitingNotices).length, 1, 'kept a while, in case the wait comes back')
+  g.advance(31 * 60000); await g.runtime.tick(); await settle()
+  assert.deepEqual(g.state.accountPools.waitingNotices, {}, 'the episode is over')
+})
+
+test('a session at its limit that stays blocked is reported after 15 minutes; a turn still running below 100% is a normal wait', async () => {
+  const blocked = setup({ usageLimitBlockReason: async () => 'automation setup in progress' })
+  blocked.runtime.noteLaunch(blocked.helper)
+  await blocked.runtime.tick()
+  assert.equal(blocked.runtime.status('CMINE').waiting, 'blocked:automation setup in progress')
+  blocked.advance(10 * 60000); await blocked.runtime.tick(); await settle()
+  assert.equal(blocked.owner.length, 0)
+  blocked.advance(6 * 60000); await blocked.runtime.tick(); await settle()
+  assert.deepEqual(blocked.owner, ['⏳ 1 session on *busy@example.test* is at its usage limit but can\'t move yet: <#CMINE> (automation setup in progress).'])
+
+  const below = setup({ quota: { busy: 95, spare: 10, token: 100 }, usageLimitBlockReason: async () => 'turn in progress' })
+  below.runtime.noteLaunch(below.helper)
+  for (const minutes of [0, 20, 20]) { below.advance(minutes * 60000); await below.runtime.tick(); await settle() }
+  assert.equal(below.runtime.status('CMINE').waiting, 'blocked:turn in progress')
+  assert.equal(below.owner.length, 0, 'a turn still working below the hard limit is not news')
+
+  const stuck = setup({ usageLimitBlockReason: async () => 'turn in progress' })
+  stuck.runtime.noteLaunch(stuck.helper)
+  for (const minutes of [0, 20]) { stuck.advance(minutes * 60000); await stuck.runtime.tick(); await settle() }
+  assert.equal(stuck.owner.length, 1, 'a turn "running" on an account at 100% is reported')
+})
+
+test('the status names the measured-capacity target once the current account is out and the estimate is spent', async () => {
+  const f = setup({ blockReason: session => session.teamActiveTaskId ? 'delegated team task in progress' : null })
+  for (let i = 0; i < 20; i++) {
+    const other = { id: `other-${i}`, channel: `COTHER${i}`, pid: 300 + i, tmux: `sab-other-${i}`, cwd: '/o', account: 'spare', accountKind: 'claude-profile', teamActiveTaskId: 'elsewhere' }
+    f.state.sessions[other.id] = other; f.state.channels[other.channel] = other.id
+  }
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  const info = f.runtime.status('CMINE')
+  assert.equal(info.decision.accountId, null, 'the estimate alone finds no capacity')
+  assert.equal(info.measured.accountId, f.account('spare').id)
+  assert.equal(info.accounts.find(a => a.id === f.account('spare').id).launch.ready, false)
+})
+
+test("a Mac login signed in to another account is reported once and is never used for new sessions", async () => {
+  let email = 'stranger@example.test'
+  const f = setup({ quota: { busy: 10, spare: 10, token: 100 }, nativeLoginIdentity: async () => ({ email }) })
+  f.runtime.noteLaunch(f.helper)
+  assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }), null, 'before the check, a ready native login is kept')
+  await f.runtime.tick(); await settle()
+  assert.deepEqual(f.owner, [nativeIdentityNotice({ observed: 'stranger@example.test', expected: 'busy@example.test' })])
+  const selection = f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' })
+  assert.equal(selection.accountKind, 'claude-profile', 'a new session starts through a profile, not the Mac login')
+  await f.runtime.tick(); await settle()
+  assert.equal(f.owner.length, 1, 'once per episode')
+  email = 'BUSY@example.test'
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.nativeIdentity, undefined)
+  assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }), null)
+  assert.ok(f.logs.some(args => args[0] === 'native Claude login matches the registry again'))
+})
+
+test('an unreadable Mac login changes nothing', async () => {
+  const f = setup({ quota: { busy: 10, spare: 10, token: 100 }, nativeLoginIdentity: async () => { throw new Error('unreadable') } })
+  await f.runtime.tick(); await settle()
+  assert.equal(f.state.accountPools.nativeIdentity, undefined)
+  assert.equal(f.owner.length, 0)
+})
+
+test("an owner's switch of a session stopped at its usage limit takes the usage-limit path; otherwise it names the rule that blocks it", async () => {
+  let atLimit = false
+  const f = setup({ blockReason: session => session.teamActiveTaskId ? 'delegated team task in progress' : null, atUsageLimit: async () => atLimit })
+  const tasks = holdTask(f)
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  f.runtime.noteLaunch(f.helper)
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'plain' }),
+    error => error.message === 'account_switch_blocked' && error.blockReason === 'delegated team task in progress')
+  assert.equal(f.restarts.length, 0)
+  atLimit = true
+  const result = await f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'at-limit' })
+  assert.equal(result.status, 'committed')
+  assert.equal(f.restarts[0].usageLimit, true)
+  assert.equal(f.restarts[0].taskMaintenance.kind, 'usage-limit')
+  assert.deepEqual(f.state.teamTasks, tasks, 'the task is unchanged')
+})
+
+test("an owner's switch on an account that still has capacity keeps the ordinary safe boundary", async () => {
+  const f = setup({ quota: { busy: 50, spare: 10, token: 100 }, blockReason: () => 'turn in progress', atUsageLimit: async () => true })
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'busy-turn' }), error => error.blockReason === 'turn in progress')
+  await assert.rejects(f.runtime.switchAccount(f.session, 'spare', { requestId: 'claimed-limit', usageLimit: true }),
+    error => error.blockReason === 'the turn has not stopped at a measured usage limit')
+  assert.equal(f.restarts.length, 0)
+})
+
+test('a refusal from the usage-limit rule names its reason', async () => {
+  const f = setup({ usageLimitBlockReason: async () => 'question awaiting an answer', atUsageLimit: async () => true })
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  f.runtime.noteLaunch(f.helper)
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'question' }), error => error.blockReason === 'question awaiting an answer')
+})
+
+test('a session start on the Mac login is evidence for its account only while that login is the expected account', async () => {
+  for (const mismatch of [false, true]) {
+    const registry = compileAccountRegistry({ ...enrollment(), accounts: enrollment().accounts.map(a => a.key === 'busy'
+      ? { ...a, credentials: [{ kind: 'native-default' }] } : a) }, { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+    const native = { id: 'native-mac', channel: 'CMAC', cwd: '/m', tmux: 'sab-mac', pid: null, model: 'opus', effort: 'max', launchFlags: '--dsp' }
+    const state = { channels: { CMAC: native.id }, sessions: { [native.id]: native } }
+    const runtime = createAccountPoolRuntime({ state, mode: 'auto', readRegistry: () => registry, persist: () => {}, now: () => start,
+      readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: start, identity: { email: account.email, principalId: account.id },
+        quota: { five_hour: { utilization: 10, resets_at: new Date(start + 3600000).toISOString() } } }),
+      nativeLoginIdentity: async () => ({ email: mismatch ? 'stranger@example.test' : 'busy@example.test' }) })
+    await runtime.tick()
+    runtime.noteLaunch(native)
+    const busy = runtime.inventory().registry.accounts.find(a => a.key === 'busy')
+    assert.equal(Boolean(state.accountPools.launchChecks?.[busy.id]), !mismatch, mismatch ? 'another account\'s login proves nothing' : 'the expected login counts')
+  }
+})
+
+test('an automatic switch is refused before any journal when the target login has no launch evidence', async () => {
+  const f = setup()
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  await assert.rejects(f.runtime.switchAccount(f.session, 'spare', { requestId: 'automatic-direct', automatic: true, usageLimit: true }),
+    error => error.message === 'account_launch_unchecked')
+  assert.deepEqual(f.state.accountPools.receipts, {}, 'nothing was journaled')
+  assert.equal(f.restarts.length, 0)
+})
+
+test('the monitor does not inspect a session it cannot move for want of launch evidence', async () => {
+  let inspected = 0
+  const f = setup({ usageLimitBlockReason: async () => { inspected++; return null } })
+  await f.runtime.tick(); await f.runtime.tick()
+  assert.equal(inspected, 0, 'no pane check for a move that cannot happen')
+  f.runtime.noteLaunch(f.helper)
+  await f.runtime.tick()
+  assert.equal(inspected, 1)
+  assert.equal(f.restarts.length, 1)
+})
+
+test('the monitor moves to the best login known to start, not the best by headroom', async () => {
+  // A legacy token has the most headroom but can never be an automatic target.
+  const f = setup({ quota: { busy: 100, spare: 10, token: 5 } })
+  f.runtime.noteLaunch(f.helper)
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.session.account, 'spare')
+})
+
+test('a login whose launch check fails does not hold moves to another that starts', async () => {
+  const registry = compileAccountRegistry({ ...enrollment(), accounts: [...enrollment().accounts,
+    { key: 'third', provider: 'claude', email: 'third@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'third' }] }],
+  groups: [{ key: 'mine', name: 'Mine', members: ['busy', 'spare', 'token', 'third'], preferred: { claude: 'busy' } }] }, { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+  const f = setup({ quota: { busy: 100, spare: 10, token: 100, third: 40 }, readRegistry: () => registry,
+    probeLaunch: async account => account.key === 'spare' ? { ok: false, reason: 'terms' } : { ok: true } })
+  for (let i = 0; i < 6 && !f.restarts.length; i++) { await f.runtime.tick(); await settle() }
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.session.account, 'third', 'spare had more headroom, but its login does not start')
+})
+
+test('a Codex login keeps what a real start proved, since SAB cannot check it again by itself', async () => {
+  let time = start
+  const record = compileAccountRegistry({ schemaVersion: 1, requestId: 'codex-evidence', accounts: [
+    { key: 'one', provider: 'codex', email: 'one@example.test', identityConfirmed: true, credentials: [{ kind: 'codex-profile', profile: 'one' }] },
+    { key: 'two', provider: 'codex', email: 'two@example.test', identityConfirmed: true, credentials: [{ kind: 'codex-profile', profile: 'two' }] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['one', 'two'] }], routing: { defaultGroup: 'mine', channels: {} } })
+  const session = { id: 'codex-one', channel: 'CONE', provider: 'codex', pid: 500, tmux: 'sab-one', cwd: '/c', account: 'one',
+    model: 'gpt', requestedModel: 'gpt', effort: 'high', requestedEffort: 'high', launchFlags: '--yolo' }
+  const helper = { id: 'codex-two', channel: 'CTWO', provider: 'codex', pid: null, tmux: 'sab-two', cwd: '/c', account: 'two',
+    model: 'gpt', requestedModel: 'gpt', effort: 'high', requestedEffort: 'high', launchFlags: '--yolo' }
+  const state = { channels: { CONE: session.id, CTWO: helper.id }, sessions: { [session.id]: session, [helper.id]: helper } }
+  const restarts = [], quota = { one: 99, two: 10 }
+  const runtime = createAccountPoolRuntime({ state, mode: 'auto', readRegistry: () => record, persist: () => {}, now: () => time,
+    usageLimitBlockReason: async () => null, verifyIdentity: async () => 'verified', probeLaunch: async () => assert.fail('Codex is never launched by SAB'),
+    readQuota: async account => normalizeQuotaObservation({ provider: 'codex', observedAt: time, identity: { email: account.email, principalId: account.id },
+      quota: { ordinaryUsageAllowed: true, rateLimits: { limitId: 'codex', primary: { usedPercent: quota[account.key], resetsAt: Math.floor((time + 3600000) / 1000) } } } }),
+    restart: async (current, profile, options) => { restarts.push(options); current.account = profile; current.pid = 501 } })
+  runtime.noteLaunch(helper)
+  time += 30 * 3600000
+  await runtime.tick()
+  assert.equal(restarts.length, 1)
+  assert.equal(session.account, 'two')
+})
+
+test("an owner's switch at a limit goes only where an automatic move could: a verified login known to start", async () => {
+  const f = setup({ quota: { busy: 100, spare: 10, token: 10 }, atUsageLimit: async () => true })
+  holdTask(f)
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare'); await f.runtime.refresh('token')
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'unchecked' }),
+    error => error.blockReason === "SAB has not yet confirmed that spare@example.test's login starts")
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'token', { requestId: 'legacy' }),
+    error => error.blockReason === 'held work cannot move to a legacy token login')
+  assert.equal(f.restarts.length, 0)
+})
+
+test("an owner's uncertain usage-limit switch fences its own channel, not every automatic move", async () => {
+  const f = setup({ atUsageLimit: async () => true, restart: async (current, alias, options) => {
+    current.account = alias; current.accountKind = 'claude-profile'; current.pid = 200
+    if (current.channel === 'CMINE') throw new Error('replacement never became ready')
+  } })
+  const second = { id: 'native-two', channel: 'CTWO', cwd: '/two', tmux: 'sab-two', pid: 102, model: 'opus', effort: 'max', launchFlags: '--dsp',
+    account: 'busy', accountKind: 'claude-profile' }
+  f.state.sessions[second.id] = second; f.state.channels.CTWO = second.id
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  f.runtime.noteLaunch(f.helper)
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'owner-uncertain' }), /uncertain/)
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted')
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CTWO.phase, 'committed', 'automatic moves carry on')
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted', 'its own channel stays fenced')
+})
+
+test('a halt lists the sessions it holds back, not the uncertain one itself', async () => {
+  // The uncertain handover failed before the session's account changed, so it is still at its limit.
+  const f = setup({ restart: async (current, alias) => {
+    if (current.channel === 'CMINE') throw new Error('replacement never became ready')
+    current.account = alias; current.accountKind = 'claude-profile'; current.pid = 200
+  } })
+  const second = { id: 'native-two', channel: 'CTWO', cwd: '/two', tmux: 'sab-two', pid: 102, model: 'opus', effort: 'max', launchFlags: '--dsp',
+    account: 'busy', accountKind: 'claude-profile' }
+  f.state.sessions[second.id] = second; f.state.channels.CTWO = second.id
+  f.runtime.noteLaunch(f.helper)
+  await f.runtime.tick(); await f.runtime.tick(); await settle()
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted')
+  assert.equal(f.runtime.status('CMINE').waiting, 'interrupted')
+  assert.equal(f.runtime.status('CTWO').waiting, 'halted:CMINE')
+  const halted = f.owner.filter(message => message.startsWith('⚠️ Usage-limit moves are halted'))
+  assert.equal(halted.length, 1)
+  assert.match(halted[0], /^⚠️ Usage-limit moves are halted, so 1 session on/)
+})
+
+test('a missed reading does not start a new wait episode or repeat its notice', async () => {
+  let failing = false
+  const g = setup({ quota: undefined, readQuota: async account => {
+    if (failing) throw new Error('throttled')
+    return normalizeQuotaObservation({ provider: 'claude', observedAt: g.at(), identity: { email: account.email, principalId: account.id },
+      quota: { five_hour: { utilization: 100, resets_at: new Date(g.at() + 3600000).toISOString() } } })
+  } })
+  await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.owner.length, 1)
+  failing = true; g.advance(6 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.runtime.status('CMINE').waiting, null, 'the failed reading dropped the wait')
+  failing = false
+  for (let i = 0; i < 4; i++) { g.advance(4 * 60000); await g.runtime.tick(); await settle() }
+  assert.equal(g.runtime.status('CMINE').waiting, 'no-capacity', 'the wait came back with the next reading')
+  assert.equal(g.owner.length, 1, 'and is still the same episode')
+})
+
+test('the "no capacity" notice gives the time an account really regains capacity', async () => {
+  const g = setup({ quota: undefined, readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: g.at(),
+    identity: { email: account.email, principalId: account.id }, quota: {
+      five_hour: { utilization: account.key === 'busy' ? 100 : 20, resets_at: new Date(g.at() + 3600000).toISOString() },
+      seven_day: { utilization: 100, resets_at: new Date(g.at() + (account.key === 'spare' ? 50 : 96) * 3600000).toISOString() } } }) })
+  await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.owner.length, 1)
+  const seconds = Number(/<!date\^(\d+)\^/.exec(g.owner[0])[1])
+  assert.ok(Math.abs(seconds * 1000 - (start + 50 * 3600000)) < 10 * 60000, 'spare\'s weekly reset, not anyone\'s next 5-hour window')
+})
+
+test('a new session never starts on a profile whose launch check failed', async () => {
+  const f = setup({ quota: { busy: 100, spare: 10, token: 100 }, probeLaunch: async account => account.key === 'spare' ? { ok: false, reason: 'terms' } : { ok: true } })
+  for (let i = 0; i < 3; i++) { await f.runtime.tick(); await settle() }
+  assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }), null)
+  f.runtime.noteLaunch(f.helper)
+  assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }).account, 'spare', 'a real start proves it again')
+})
+
+test('a Claude Mac-login mismatch says nothing about Codex\'s own native login', async () => {
+  const registry = compileAccountRegistry({ schemaVersion: 1, requestId: 'two-natives', accounts: [
+    { key: 'mac', provider: 'claude', email: 'mac@example.test', identityConfirmed: true, credentials: [{ kind: 'native-default' }] },
+    { key: 'codex', provider: 'codex', email: 'codex@example.test', identityConfirmed: true, credentials: [{ kind: 'native-default' }] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['mac', 'codex'] }], routing: { defaultGroup: 'mine', channels: {} } })
+  const codex = { id: 'codex-native', channel: 'CCODEX', provider: 'codex', pid: null, tmux: 'sab-codex', cwd: '/c',
+    model: 'gpt', requestedModel: 'gpt', effort: 'high', requestedEffort: 'high', launchFlags: '--yolo' }
+  const state = { channels: { CCODEX: codex.id }, sessions: { [codex.id]: codex } }
+  const runtime = createAccountPoolRuntime({ state, mode: 'auto', readRegistry: () => registry, persist: () => {}, now: () => start,
+    readQuota: async account => account.provider === 'claude'
+      ? normalizeQuotaObservation({ provider: 'claude', observedAt: start, identity: { email: account.email, principalId: account.id },
+        quota: { five_hour: { utilization: 10, resets_at: new Date(start + 3600000).toISOString() } } })
+      : normalizeQuotaObservation({ provider: 'codex', observedAt: start, identity: { email: account.email, principalId: account.id },
+        quota: { ordinaryUsageAllowed: true, rateLimits: { limitId: 'codex', primary: { usedPercent: 10, resetsAt: Math.floor((start + 3600000) / 1000) } } } }),
+    nativeLoginIdentity: async () => ({ email: 'stranger@example.test' }) })
+  await runtime.tick()
+  assert.ok(state.accountPools.nativeIdentity, 'the Claude mismatch is recorded')
+  runtime.noteLaunch(codex)
+  const account = runtime.inventory().registry.accounts.find(a => a.key === 'codex')
+  assert.equal(state.accountPools.launchChecks[account.id]?.ok, true)
+})
+
+test("an owner's switch at a limit of a session that holds nothing keeps the ordinary choice", async () => {
+  const f = setup({ atUsageLimit: async () => true })
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  const result = await f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'idle-at-limit' })
+  assert.equal(result.status, 'committed', 'no launch evidence needed for a session holding nothing')
+  assert.equal(f.restarts[0].usageLimit, true)
+})
+
+test('an uncertain handover is reported before any capacity reason', async () => {
+  const f = setup({ quota: { busy: 100, spare: 10, token: 5 } })
+  f.state.accountPools = { schemaVersion: 1, observations: {}, bindings: {}, receipts: {}, proofs: {},
+    switches: { CMINE: { channelId: 'CMINE', sessionId: f.session.id, phase: 'interrupted', usageLimit: true, automatic: true, requestId: 'old' } } }
+  await f.runtime.tick()
+  assert.equal(f.runtime.status('CMINE').waiting, 'interrupted', 'not a launch-check wait')
+})
+
+test('/sab-account shows the move the monitor makes, not the unconfirmed account with more headroom', async () => {
+  const registry = compileAccountRegistry({ ...enrollment(), accounts: [...enrollment().accounts,
+    { key: 'third', provider: 'claude', email: 'third@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'third' }] }],
+  groups: [{ key: 'mine', name: 'Mine', members: ['busy', 'spare', 'token', 'third'], preferred: { claude: 'busy' } }] }, { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+  const f = setup({ quota: { busy: 100, spare: 10, token: 100, third: 40 }, readRegistry: () => registry })
+  const third = { id: 'native-third', channel: 'CTHIRD', cwd: '/t', tmux: 'sab-t', pid: null, model: 'opus', effort: 'max', launchFlags: '--dsp',
+    account: 'third', accountKind: 'claude-profile' }
+  f.state.sessions[third.id] = third; f.state.channels.CTHIRD = third.id
+  f.runtime.noteLaunch(third)
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare'); await f.runtime.refresh('third')
+  assert.equal(f.runtime.status('CMINE').move.accountId, f.account('third').id)
+})
+
+test('a launch check that fails differently is announced again, but not within six hours', async () => {
+  let reason = 'terms'
+  const f = setup({ probeLaunch: async account => account.key === 'spare' ? { ok: false, reason } : { ok: true } })
+  for (let i = 0; i < 3; i++) { await f.runtime.tick(); await settle() }
+  const failures = () => f.owner.filter(message => message.startsWith("⚠️ SAB couldn't start Claude"))
+  assert.equal(failures().length, 1)
+  reason = 'login'
+  f.advance(31 * 60000); await f.runtime.tick(); await settle()
+  assert.equal(failures().length, 1, 'a different failure within six hours stays quiet')
+  f.advance(6 * 3600000); await f.runtime.tick(); await settle()
+  assert.equal(failures().length, 2)
+  assert.match(failures()[1], /asked for a sign-in/)
+})
+
+test('only an account that could take the session counts toward the time capacity returns', async () => {
+  const registry = compileAccountRegistry({ ...enrollment(), accounts: [...enrollment().accounts,
+    { key: 'elsewhere', provider: 'claude', email: 'elsewhere@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'elsewhere' }],
+      allowedChannels: ['COTHER'] }],
+  groups: [{ key: 'mine', name: 'Mine', members: ['busy', 'spare', 'token', 'elsewhere'], preferred: { claude: 'busy' } }] }, { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+  const g = setup({ quota: undefined, readRegistry: () => registry, readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: g.at(),
+    identity: { email: account.email, principalId: account.id }, quota: {
+      seven_day: { utilization: 100, resets_at: new Date(g.at() + (account.key === 'elsewhere' ? 2 : account.key === 'spare' ? 50 : 96) * 3600000).toISOString() } } }) })
+  await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  const seconds = Number(/<!date\^(\d+)\^/.exec(g.owner[0])[1])
+  assert.ok(Math.abs(seconds * 1000 - (start + 50 * 3600000)) < 10 * 60000, 'an account allowlisted to other channels is not counted')
+})

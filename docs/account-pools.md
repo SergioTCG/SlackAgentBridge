@@ -12,7 +12,7 @@ document distinguishes implemented code from live-provider proof.
 | Group/account CRUD, membership, preferences, routing, drain/retire | Implemented; revision-guarded, no credential deletion |
 | Claude/Codex isolated full login and inactive native refresh | Implemented; real new-account login/refresh canaries required |
 | Usage polling, resets, sticky selection, conservative switch-back | Implemented; unknown scope/auth/usage fails closed |
-| Idle native account handover | Implemented; exact-direction manual resume proof gates automatic selection |
+| Idle native account handover | Implemented; evidence that the target login starts gates automatic selection |
 | Instant active/delegated quota-blocked continuation | Not implemented; no safe checkpoint/background-job proof in current bridge contract |
 | Live migration/activation | Not performed by development; explicit maintenance and canary required |
 
@@ -313,7 +313,7 @@ and reports contain private emails and channel identities: do not commit them.
 | `off` (default) | None; no registry I/O | Existing legacy Claude path |
 | `shadow` | Account-scoped, serialized, durable | Recommendations only |
 | `manual` | Same monitor | Explicit owner request, idle exact session only |
-| `auto` | Same monitor | Manual behavior plus proven safe-boundary rotation |
+| `auto` | Same monitor | Manual behavior plus safe-boundary rotation onto logins known to start |
 
 Changing this configuration requires a controlled daemon rollout. No command
 here edits the live daemon configuration automatically. Stage the registry
@@ -395,14 +395,16 @@ Eligible current assignments stay sticky. Confirmed exhausted headroom may
 select another permitted account. Scope/auth/network/model-capacity failures
 alone are not quota-exhaustion evidence and cannot trigger rotation. Preferred
 switch-back requires a fresh post-reset sample, at least 20 percentage points
-of benefit, and a 15-minute cooldown. Every automatic direction must first have
-passed a successful explicitly requested native resume at the same registry
-revision. No global login files are swapped behind live processes.
+of benefit, and a 15-minute cooldown. An automatic move also needs fresh
+evidence that the target account's login starts (see *Launch checks* below).
+It needs no earlier move between that exact pair of accounts, and a registry
+edit does not reset anything. No global login files are swapped behind live
+processes.
 
 Fresh backend identity is checked before teardown and again against the exact
-replacement's verified provider-root/profile binding before committing a proof.
+replacement's verified provider-root/profile binding before committing.
 Scope-limited legacy tokens may still switch manually, but are explicitly
-unverified and never create automatic handover proof. Policies are enforced
+unverified and never earn automatic moves. Policies are enforced
 before new-channel prompts, automation initial prompts, queued input, and
 provider-switch handoff transfer. Shadow mode does not enforce these routes or
 clear the legacy launch environment.
@@ -420,6 +422,86 @@ Boot never retries a journaled uncertain restart. This stage does **not** offer
 instant mid-tool handover or speculative replay of a quota-blocked prompt.
 Existing task reservations/background work are protected by refusing those
 handovers, with the one exception below.
+
+### Launch checks, waits and the Mac's own login
+
+**Launch checks.** A login that stops Claude before SessionStart (a sign-in,
+updated terms, first-run screens, the Claude in Chrome dialog, or the
+bypass-permissions prompt) would strand any session moved onto it. So an
+automatic move needs evidence, less than a day old, that the target account's
+own credential reference starts:
+- a session that freshly started on it (compaction and `/clear` do not count);
+- a committed, identity-verified switch onto it; or
+- SAB's own hidden launch check.
+
+The monitor chooses among the logins known to start, by the usual headroom
+rules. An account with more headroom whose login is not yet confirmed does not
+hold the move; its check keeps running, and it is chosen once that passes. New
+sessions likewise start only on a confirmed profile or on the Mac's own login.
+
+The check runs one login at a time, for an active Claude account whose usage
+reading works but whose evidence is missing or stale. It starts Claude in a
+throwaway `ccs-probe-*` terminal, from the same profile seeding a session gets,
+with a clean environment, no prompt and no `CCS_BRIDGE`, so nothing reaches the
+model and its hooks never reach SAB. It trusts only its own folder
+(`~/.config/ccs/login-probe`), as `claude-consent.sh` does, and answers nothing
+else. A screen that blocks the launch is reported to the owner once per failing
+streak, with the command to open it, and checked again after 30 minutes. A
+profile held by a renewal or sign-in is skipped and tried later. A check that a
+daemon restart cut short leaves a terminal, which the next boot removes. Legacy
+tokens are never launched and, as before, never earn automatic moves. Codex
+logins earn evidence from real starts only, and keep it, since SAB cannot check
+them again by itself. On upgrade, committed verified switches at the current
+registry revision count as evidence.
+
+**Waits are visible.** A session at its own account's usage limit that does not
+move gets its reason logged once per change, `/sab-account` shows it, and the
+owner hears once per account and reason, after a delay:
+
+| Reason | Owner notice after |
+|---|---|
+| No account in the group has capacity (with the time the first one regains it) | 2 minutes |
+| The target login's launch check has not passed | 5 minutes |
+| Blocked by a safe-boundary rule (for example a question, a permission, or automation setup) | 15 minutes |
+| Usage-limit moves halted, or an earlier handover here uncertain | at once |
+
+A turn still running on an account below 100% is a normal wait and is not
+reported. A wait that drops out for a missed reading is the same wait: an
+episode ends only 30 minutes after its last sighting. Once the current
+account's own usage is exhausted, `/sab-account` shows the move by measured
+capacity rather than the reservation estimate.
+
+**Owner switches at a limit.** In auto mode, when the pool has measured the
+session's own account exhausted and its turn visibly stopped at the limit (the
+pane's limit notice, or a pause marker), `/sab-account`, the account picker and
+`sab account pool switch` take the usage-limit path. So a session sitting at
+its limit can be switched without `/sab-kill` first. For a session holding a
+team task, a team turn or an automation, that path goes only where an automatic
+move could: a verified login known to start, never a legacy token. A session
+holding nothing keeps the owner's ordinary choice. If the switch ends uncertain,
+only its own channel is fenced; automatic moves elsewhere carry on. Any other
+refusal names the safe-boundary rule it hit.
+
+**Claude turns that end at a limit.** A turn can end at a usage limit before
+the poller saw a spinner, with no Stop, in every pool mode. Held work on an
+account the pool measured exhausted is paused (a marker, a ⏸️ notice) for the
+handover or the reset to resume. Held work that Claude itself continues at the
+reset ("Continuing automatically at …") waits for that, with one notice, rather
+than being reported early. Any other limit-ended turn, including one whose
+continuation was cancelled, ends as it always did. A paused held turn counts as
+occupied for bulk updates and ordinary switches until a new turn, its
+SessionEnd, the handover or the resume ends the pause.
+
+**The Mac's own login.** Claude records which account the Mac's own login holds
+in `~/.claude.json`. SAB compares it with the account that lists `native-default`
+on every reading. On a mismatch the owner hears once, in auto mode new sessions
+start through a profile with capacity instead of the Mac's login, and the Mac's
+login earns no Claude launch evidence. The mismatch ends when the login, or the registry, matches
+again.
+
+**Automation terminals.** A resume, an account switch or a reboot gives a
+session a new tmux. The automation that owns the session follows it at every
+hook and at boot, so a later stop is never refused as non-exact.
 
 ### Usage-limit handover of held work
 

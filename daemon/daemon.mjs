@@ -97,7 +97,7 @@ import { readAccountIdentity, readAccountQuota, verifyClaudeLaunchIdentity } fro
 import { claudeLoginState } from './account-claude-auth.mjs'
 import { accountRegistryDigest } from './account-registry.mjs'
 import { readAccountRegistry, readPrivateAccountFile, manageAccountRegistry } from './account-registry-store.mjs'
-import { accountCredentialReference } from './account-profiles.mjs'
+import { accountCredentialReference, claudeNativeConfigFile, claudeProfileHome, seedClaudeFirstRunState } from './account-profiles.mjs'
 import { assertTaskMaintenance, taskMaintenancePending, taskMaintenanceClaimAllowed, proveIdleTaskProcessTree } from './account-task-maintenance.mjs'
 import { handleTeamHttp } from './team-http.mjs'
 import {
@@ -198,6 +198,98 @@ const { web } = slackRuntime
 const syncTopic = createTopicSync(web)
 const artifactGrants = createArtifactGrantStore()
 const state = loadState()
+// SAB's own hidden launch check of a Claude login: Claude starts with no
+// prompt in a throwaway terminal, from the same profile seeding a session
+// gets, and either reaches its prompt or shows what would stop a session.
+// Nothing reaches the model, and without CCS_BRIDGE its hooks never reach SAB.
+const CLAUDE_LAUNCH_BLOCKERS = [
+  ['login', /Select login method|Please run \/login|Not logged in|Invalid API key/i],
+  ['terms', /Consumer Terms|updated (?:our )?(?:Consumer )?Terms|Terms of Service/i],
+  ['onboarding', /Choose the text style/i],
+  ['chrome', /Claude in Chrome extension detected/i],
+  ['permissions', /Bypass Permissions mode[\s\S]*Yes, I accept/i],
+]
+const probingProfiles = new Set() // Claude profiles a launch check is using: renewals wait
+async function probeClaudeLaunch(account) {
+  const ref = accountCredentialReference(account)
+  if (account.provider !== 'claude' || !['claude-profile', 'native-default'].includes(ref?.kind)) return { ok: false, reason: 'failed' }
+  let directory = null
+  if (ref.kind === 'claude-profile') {
+    // A renewal or sign-in holds the profile: not a failure, try again later.
+    try { directory = claudeProfileHome(CONFIG_DIR, ref.profile) } catch { return { skipped: true } }
+    try { seedClaudeFirstRunState(directory, claudeNativeConfigFile({}, os.homedir())) } catch {}
+  }
+  const cwd = path.join(CONFIG_DIR, 'login-probe')
+  fs.mkdirSync(cwd, { recursive: true, mode: 0o700 })
+  const name = `ccs-probe-${crypto.randomBytes(5).toString('hex')}`
+  const env = { HOME: os.homedir(), PATH: `${path.join(os.homedir(), '.local/bin')}:${process.env.PATH || '/usr/bin:/bin'}`,
+    LANG: process.env.LANG || 'en_US.UTF-8', TERM: 'xterm-256color', DISABLE_AUTOUPDATER: '1',
+    ...(process.env.USER ? { USER: process.env.USER } : {}), ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+    ...(directory ? { CLAUDE_CONFIG_DIR: directory } : {}) }
+  if (directory) probingProfiles.add(ref.profile)
+  try {
+    try {
+      await execFile('tmux', ['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', cwd, 'env', '-i',
+        ...Object.entries(env).map(([key, value]) => `${key}=${value}`), 'claude', '--dangerously-skip-permissions'], { timeout: 10000 })
+    } catch { return { ok: false, reason: 'failed' } }
+    let last = null, trusted = false, trustLooks = 0
+    for (let attempt = 0; attempt < 120; attempt++) {
+      await sleep(500)
+      let pane
+      try { pane = (await execFile('tmux', ['capture-pane', '-p', '-t', name], { timeout: 5000 })).stdout } catch { return { ok: false, reason: 'failed' } }
+      // A blocking dialog can carry the same words as the prompt's footer (the
+      // bypass-permissions one does), so it rules out "ready" whatever else shows.
+      const blocker = CLAUDE_LAUNCH_BLOCKERS.find(([, pattern]) => pattern.test(pane))?.[0] || null
+      if (!blocker && targetStartupState('claude', pane) === 'ready' && /⏵⏵\s*bypass permissions on/i.test(pane)) return { ok: true }
+      // Trust the probe's own folder as claude-consent.sh does: Enter once, and
+      // only on a visibly selected "Yes", never a guess.
+      if (!trusted && /you created or one you trust/.test(pane)) {
+        if (/^[ \t]*(?:❯|>)[ \t]*Yes, I trust this folder/m.test(pane)) {
+          await execFile('tmux', ['send-keys', '-t', name, 'Enter']).catch(() => {})
+          trusted = true
+          await sleep(1000)
+        } else if (/^[ \t]*(?:❯|>)[ \t]*No, exit/m.test(pane)) await execFile('tmux', ['send-keys', '-t', name, 'Down']).catch(() => {})
+        else if (++trustLooks >= 10) return { ok: false, reason: 'trust' }
+        continue
+      }
+      // A blocking screen counts once it has stayed for two looks.
+      const lasting = attempt < 6 ? null : blocker
+      if (lasting && lasting === last) return { ok: false, reason: lasting }
+      last = lasting
+    }
+    return { ok: false, reason: 'timeout' }
+  } finally {
+    await execFile('tmux', ['kill-session', '-t', name], { timeout: 5000 }).catch(() => {})
+    if (directory) probingProfiles.delete(ref.profile)
+  }
+}
+// Only SAB's launch check names terminals ccs-probe-*. One a daemon restart cut
+// short would otherwise keep its Claude running forever.
+async function removeOrphanedLaunchProbes() {
+  let names = []
+  try { names = (await execFile('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 5000 })).stdout.split('\n') } catch { return }
+  for (const name of names.filter(item => /^ccs-probe-[0-9a-f]{10}$/.test(item))) {
+    await execFile('tmux', ['kill-session', '-t', name], { timeout: 5000 }).catch(() => {})
+    log('removed a launch check terminal left by a restart', name)
+  }
+}
+// The account the Mac's own Claude login is signed in to, from Claude's own
+// config, which holds no token. Parsed again only when the file changes.
+let nativeIdentityCache = null
+function readNativeClaudeIdentity() {
+  const file = claudeNativeConfigFile({}, os.homedir())
+  let stat
+  try { stat = fs.statSync(file) } catch { return null }
+  if (stat.size > 32 << 20) return null
+  if (nativeIdentityCache?.mtimeMs === stat.mtimeMs && nativeIdentityCache.size === stat.size) return nativeIdentityCache.identity
+  let identity = null
+  try {
+    const email = JSON.parse(fs.readFileSync(file, 'utf8'))?.oauthAccount?.emailAddress
+    identity = typeof email === 'string' && email ? { email } : null
+  } catch { return null }
+  nativeIdentityCache = { mtimeMs: stat.mtimeMs, size: stat.size, identity }
+  return identity
+}
 const accountPools = createAccountPoolRuntime({
   state, mode: process.env.CCS_ACCOUNT_POOLS || 'off',
   readRegistry: () => {
@@ -212,6 +304,7 @@ const accountPools = createAccountPoolRuntime({
     usage, legacyAccounts: readPrivateAccountFile(path.join(CONFIG_DIR, 'accounts'), { missing: '' }),
   }),
   readQuota: account => readAccountQuota(account, { configDir: CONFIG_DIR, isProfileInactive: async (provider, profile) => {
+    if (provider === 'claude' && probingProfiles.has(profile)) return false
     for (const candidate of Object.values(state.sessions || {})) {
       if (providerOf(candidate) !== provider || candidate.account !== profile || provider === 'claude' && candidate.accountKind !== 'claude-profile') continue
       if (candidate.pid && pidAlive(candidate.pid) || candidate.tmux && await tmuxAlive(candidate.tmux)) return false
@@ -309,6 +402,13 @@ const accountPools = createAccountPoolRuntime({
   markLimitPause: (session, accountId) => markSessionLimitPause(session, accountId),
   // The Mac's own Claude login: its keychain item and private file only, never a profile.
   nativeLoginState: () => claudeLoginState({ env: process.env }),
+  nativeLoginIdentity: async () => readNativeClaudeIdentity(),
+  probeLaunch: account => probeClaudeLaunch(account),
+  holdsWork: session => holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) }),
+  // An owner's switch takes the usage-limit path only for a turn visibly
+  // stopped at the limit: a pause marker, or the limit notice as its pane's latest output.
+  atUsageLimit: async session => Boolean(session.pid && pidAlive(session.pid) && session.tmux) && (Boolean(session.usageLimitPause) ||
+    Boolean(usageLimitSurface(providerOf(session), await tmuxCapture(session.tmux)))),
   onSettled: (session, settled) => {
     if (settled?.journal?.usageLimit) {
       try { settleUsageLimitHandover(session, settled) }
@@ -871,6 +971,7 @@ async function clearQuestionForm(session) {
   try { await web.chat.update({ channel: session.channel, ts: q.ts, text: '✅ Question answered', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '❓ → ✅ _answered — the turn continues_' } }] }) } catch {}
 }
 
+const limitPauseNotices = new Map() // session → when its last pause was announced
 function startPoller(session) {
   if (pollers.has(session.id)) return
   const p = {
@@ -915,6 +1016,53 @@ function startPoller(session) {
     // NEW transcript records so stale errors in terminal scrollback cannot end a
     // later healthy turn.
     const newAssistantText = line ? '' : peekNewAssistantText(session, observation.teamTaskTurn)
+    // A usage limit can end the turn before this poller ever saw a spinner, and
+    // Claude sends no Stop for it, so the turn would read as running forever.
+    // Held work on an account the pool can act on is paused rather than
+    // reported, as Codex's is: the handover, or the limit's reset, resumes it.
+    // Any other turn is simply over.
+    const limit = line || form || holdAnsweredForm ? null : claudeUsageLimitSurface(pane)
+    if (limit) {
+      // The limit proves the turn ran: once nothing below holds it open, the
+      // idle rule finalizes it, even if no spinner was ever seen.
+      p.sawSpinner = true
+      const heldTask = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
+      const settled = !session.teamProviderTurnPending && heldTask?.status !== 'dispatching'
+      const exhaustion = settled && holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) })
+        ? accountPools.measuredExhaustion(session) : null
+      if (exhaustion) {
+        // Held work the pool can move: pause it, as Codex turns are; the
+        // handover, or the reset, resumes it. A handover already underway
+        // stops this poller itself.
+        if (restarting.has(session.id) || !teamProviderPollerObservationCurrent(p, observation)) return
+        p.stopped = true
+        stopPoller(session)
+        session.usageLimitPause = { at: Date.now(), accountId: exhaustion.accountId }
+        saveStateNow(state)
+        await clearStatus(session)
+        // An answered form left behind would read as a question awaiting an answer.
+        void clearQuestionForm(session).catch(error => log('paused question clear error', String(error?.message || error)))
+        log('Claude turn paused at a usage limit', session.id.slice(0, 8))
+        if (Date.now() - (limitPauseNotices.get(session.id) || 0) > 30 * 60000) {
+          limitPauseNotices.set(session.id, Date.now())
+          await post(session.channel, `⏸️ Claude hit the usage limit on ${exhaustion.email}. SAB paused this turn: it moves to an account with capacity, or resumes here once the limit resets.`).catch(() => {})
+        }
+        return
+      }
+      // Claude 2.1.318 schedules its own continuation ("Continuing automatically
+      // at …"), so held work it shows that for is not over: report nothing
+      // early. Without that promise (an older notice, the chooser, or a
+      // continuation the owner cancelled) the turn ends as it always did.
+      if (settled && limit === 'ended' && /Continuing automatically\b/i.test(pane) &&
+          holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) })) {
+        if (Date.now() - (limitPauseNotices.get(session.id) || 0) > 30 * 60000) {
+          limitPauseNotices.set(session.id, Date.now())
+          await clearStatus(session)
+          await post(session.channel, '⏳ Claude hit its usage limit and continues this turn by itself when the limit resets. SAB reports nothing for it until then.').catch(() => {})
+        }
+        return
+      }
+    }
     const decision = claudePollerDecision({
       spinner: Boolean(line), newAssistantText, hasForm: Boolean(form) || holdAnsweredForm,
       sawSpinner: p.sawSpinner, idleTicks: p.idle,
@@ -1504,6 +1652,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     }
     clearStatusDeferred(session)
     void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
+    delete session.usageLimitPause // a turn that completed is past any pause before it
     const older = []
     const rawText = readNewAssistantText(session, teamTaskTurn, {
       onSkipped: skipped => older.push(skipped), stopObservedAt: reportObservedAt,
@@ -1797,6 +1946,11 @@ async function readoptStatus() {
           '⚠️ The bridge restarted before a queued input reached this dormant provider. It was not retried; please resend it.').catch(() => {})
       }
       continue
+    }
+    // Records written before this was kept may still name the terminal from
+    // before a resume or reboot; heal them here, before any stop can need them.
+    if (s.channel && state.channels?.[s.channel] === s.id && syncAutomationTmux(s)) {
+      log('automation terminal record follows its session', s.id.slice(0, 8))
     }
     const deferred = deferredTeamProviderFinal(s)
     if (deferred && !pendingTeamProviderTurn(s, deferred)) {
@@ -2458,6 +2612,9 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
   if (session.channel && session.tmux) state.channelTmux[session.channel] = session.tmux
   // Heal stored claims too (a poisoned name may have been recorded before the guard).
   if (session.tmux && !tmux && !(await validTmuxClaim(pid, session.tmux))) session.tmux = null
+  if (session.tmux && state.channels?.[session.channel] === session.id && syncAutomationTmux(session)) {
+    log('automation terminal record follows its session', session.id.slice(0, 8))
+  }
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
   if (provider === 'codex' && body.model && (ev === 'SessionStart' || !restarting.has(sid))) {
@@ -2700,7 +2857,11 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     // A switch target is provisional until its private handoff-readiness turn
     // succeeds. Never create/rebind a Slack channel or mirror startup noise yet.
     if (targetClaim) return
-    await completeAuthoritativeSessionStart(session, provider, body.source)
+    const started = await completeAuthoritativeSessionStart(session, provider, body.source)
+    // A session that freshly started on its account's own login is that
+    // login's launch evidence for automatic moves. Compaction and /clear start
+    // no process, and a repeat start in the same terminal proves nothing new.
+    if (started && !['compact', 'clear'].includes(body.source)) accountPools.noteLaunch(session)
     return
   }
   if (ev === 'UserPromptSubmit') {
@@ -2766,6 +2927,9 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
   if (ev === 'SessionEnd') {
     stopPoller(session)
     await clearStatus(session)
+    // The paused turn ended with its process; a marker left behind would send
+    // the owner's next switch down the usage-limit path to a dormant session.
+    delete session.usageLimitPause
     await failTeamTaskForSession(session, 'The worker session ended before completing its delegated task.', {
       preserveReported: true,
     })
@@ -3882,6 +4046,8 @@ function bulkUpdateContext() {
     internalSessionIds: new Set(internalTurns.keys()),
     restartingSessionIds: new Set([...restarting, ...updatingSessions]),
     wakingSessionIds: new Set(resurrectInFlight.keys()),
+    pausedSessionIds: new Set(Object.values(state.sessions || {}).filter(s => s.usageLimitPause && s.pid && pidAlive(s.pid) &&
+      holdsUsageLimitWork(s, { automationOwned: ownsAutomationRecord(s) })).map(s => s.id)),
     conversationMissing: claudeConversationGone,
   }
 }
@@ -7162,6 +7328,8 @@ async function usageLimitBlockReason(session, taskMaintenance = null, { reserved
       (task.messages || []).some(message => teamMessageDeliveries.has(message.id)))) return 'team message delivery in progress'
   const context = bulkUpdateContext()
   if (reserved) context.restartingSessionIds.delete(session.id)
+  // The handover is what ends this session's own pause.
+  context.pausedSessionIds.delete(session.id)
   // A turn that failed at once leaves a poller that never saw a spinner, and a
   // Codex turn marker the limit's error never cleared.
   const ended = usageLimitSurface(provider, await tmuxCapture(session.tmux))
@@ -7311,6 +7479,7 @@ async function resumeSessionAfterLimit(session) {
     // still wait.
     const context = bulkUpdateContext()
     if (provider === 'claude') context.busySessionIds.delete(session.id)
+    context.pausedSessionIds.delete(session.id) // resuming is what ends this session's own pause
     return Boolean(bulkUpdateBlockReason({ ...session, teamActiveTaskId: null },
       { ...context, automations: {}, conversationMissing: () => false }))
   }
@@ -7370,13 +7539,49 @@ function settleUsageLimitHandover(session, { journal, source, target }) {
       { at, reason: 'usage_limit', fromAccount: source?.email || null, toAccount: target?.email || null, taskStatus: task.status }].slice(-8)
     task.updatedAt = at
   }
+  syncAutomationTmux(session)
+  saveStateNow(state)
+}
+
+// An automation owns its session's exact terminal. A resume, an account switch
+// or a reboot gives the session a new tmux; the record must follow it, or the
+// owner's stop is later refused as a non-exact stop.
+function syncAutomationTmux(session) {
+  let changed = false
+  if (!session?.tmux || Object.values(state.sessions || {}).some(other => other !== session && other.tmux === session.tmux)) return false
   for (const record of Object.values(state.automations || {})) {
     if (record.sessionId !== session.id || record.channelId !== session.channel || ['stopped', 'released'].includes(record.status) ||
-        !session.tmux || record.tmux === session.tmux || Object.values(state.sessions || {}).some(other => other !== session && other.tmux === session.tmux)) continue
+        record.tmux === session.tmux) continue
     record.tmux = session.tmux
     record.updatedAt = Date.now()
+    changed = true
   }
-  saveStateNow(state)
+  return changed
+}
+
+// A refused owner switch says which safe-boundary rule it hit.
+function accountSwitchBlockedNotice(error) {
+  return `❌ Can't switch accounts right now: ${error.blockReason}. Nothing was changed. ` +
+    'A session stopped at its usage limit can always be switched; otherwise wait for it to finish, or stop it with `/sab-kill`, then switch.'
+}
+
+// Plain wording for a login's launch state in /sab-account.
+function accountLaunchText(reason) {
+  return reason === 'running' ? 'checking now' : ['pending', 'stale'].includes(reason) ? 'not checked yet'
+    : reason === 'manual-only' ? 'legacy token, never moved to automatically'
+      : reason === 'no-start-yet' ? 'no session has started on it yet' : `check failed (${reason})`
+}
+
+// Plain wording for the account pool's wait reasons in /sab-account.
+function accountWaitingText(reason) {
+  const [kind, ...rest] = String(reason || '').split(':'), detail = rest.join(':')
+  return kind === 'no-capacity' ? 'no account in the group has capacity'
+    : kind === 'launch-check' ? `the target login ${detail === 'running' ? 'is being checked now' : detail === 'pending' || detail === 'stale' ? 'is still to be checked'
+      : detail === 'manual-only' ? 'is a legacy token, which SAB never moves sessions to by itself'
+        : detail === 'no-start-yet' ? 'has had no session start on it yet' : `fails its launch check (${detail})`}`
+      : kind === 'halted' ? 'usage-limit moves are halted by an uncertain handover elsewhere'
+        : kind === 'interrupted' ? 'an earlier handover here ended uncertain'
+          : detail || kind.replace(/_/g, ' ')
 }
 
 async function postAccountPoolStatus(channel) {
@@ -7387,11 +7592,17 @@ async function postAccountPoolStatus(channel) {
     const windows = known?.windows?.map(w => `${Math.round(w.usedPercent)}% (${w.inactive ? 'unused window; reset not started' : `resets ${new Date(w.resetsAt).toISOString()}`})`).join(' · ') || 'unknown'
     const age = sample ? `${Math.max(0, Math.floor((Date.now() - sample.observedAt) / 1000))}s old` : 'not sampled'
     const reason = /^[a-z-]{1,20}$/.test(sample?.reason || '') ? ` (${sample.reason})` : ''
-    return `• ${account.email}: ${sample?.status || 'unknown'}${reason} · ${known && known !== sample ? 'last known (not eligible): ' : ''}${windows} · ${age}`.slice(0, 2900)
+    const launch = !account.launch ? '' : account.launch.ready ? ' · starts: checked' : ` · starts: ${accountLaunchText(account.launch.reason)}`
+    return `• ${account.email}: ${sample?.status || 'unknown'}${reason} · ${known && known !== sample ? 'last known (not eligible): ' : ''}${windows} · ${age}${launch}`.slice(0, 2900)
   })
+  // The move the monitor would make: only to a login known to start, and by
+  // measured capacity once the current account is out.
+  const measured = info.move && info.accounts.find(a => a.id === info.move.accountId)
+  const selection = measured ? `moves to ${measured.email}${info.move.reason === 'measured-capacity' ? ' (its own usage has room; the reservation estimate is spent)' : ''}` : info.decision.reason
   const text = `*Account group: ${info.group.name}* · mode: ${info.mode}\n` +
     `Current: ${info.currentAccount?.email || 'unresolved legacy binding'}\n${rows.join('\n')}\n` +
-    `Selection: ${info.decision.reason}${info.decision.nextResetAt ? ` · next reset ${new Date(info.decision.nextResetAt).toISOString()}` : ''}.\n` +
+    `Selection: ${selection}${info.decision.nextResetAt ? ` · next reset ${new Date(info.decision.nextResetAt).toISOString()}` : ''}.\n` +
+    (info.waiting ? `Automatic move waiting: ${accountWaitingText(info.waiting)}.\n` : '') +
     'Switch an idle session with `/sab-account <email|account-key|alias>`. No model/effort downgrade is permitted.'
   const session = sessionByChannel(channel), inventory = accountPools.inventory()
   return postSlackMessage(channel, { text: text.slice(0, 3500), blocks: [
@@ -7399,7 +7610,8 @@ async function postAccountPoolStatus(channel) {
       accounts: accountPools.enforcing ? info.accounts.filter(a => inventory.registry.accounts.find(v => v.id === a.id)?.lifecycle === 'active' && !info.group.drainingMembers.includes(a.id)) : [] }),
     ...rows.slice(0, 40).map(row => ({ type: 'section', text: { type: 'mrkdwn', text: row } })),
     ...(rows.length > 40 ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: `${rows.length - 40} more accounts: use sab account pool status --channel ${channel} --json.` }] }] : []),
-    { type: 'context', elements: [{ type: 'mrkdwn', text: `Mode: ${info.mode} · ${info.decision.reason}. Unknown usage never authorizes automatic switching.` }] },
+    ...(info.waiting ? [{ type: 'section', text: { type: 'mrkdwn', text: `*Automatic move waiting:* ${accountWaitingText(info.waiting)}.` } }] : []),
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `Mode: ${info.mode} · ${measured ? `moves to ${measured.email}` : info.decision.reason}. Unknown usage never authorizes automatic switching.` }] },
   ] })
 }
 
@@ -8509,7 +8721,9 @@ async function dispatch(name, rest, channel, ingressProvider = null, request = n
       const info = accountPools.status(channel)
       const selector = ['default', 'none'].includes(rest[0].toLowerCase()) ? info.group.preferred[providerOf(session)] : rest[0]
       if (claudeConversationGone(session)) return post(channel, NO_CONVERSATION_NOTICE)
-      const result = await accountPools.switchAccount(session, selector, { expectedSessionId: expectedSessionId || session.id, requestId: `slack-${crypto.randomUUID()}` })
+      let result
+      try { result = await accountPools.ownerSwitch(session, selector, { expectedSessionId: expectedSessionId || session.id, requestId: `slack-${crypto.randomUUID()}` }) }
+      catch (error) { if (error?.blockReason) return post(channel, accountSwitchBlockedNotice(error)); throw error }
       if (result.status === 'unchanged') return post(channel, 'Already using that account.')
       return
     }
@@ -9515,7 +9729,9 @@ async function handleManagementAction(body, action, parsed) {
     }
     if (parsed.action === 'select' && action.selected_option?.value) {
       if (claudeConversationGone(session)) return post(channel, NO_CONVERSATION_NOTICE)
-      const result = await accountPools.switchAccount(session, action.selected_option.value, { expectedSessionId, requestId: `slack-${crypto.randomUUID()}` })
+      let result
+      try { result = await accountPools.ownerSwitch(session, action.selected_option.value, { expectedSessionId, requestId: `slack-${crypto.randomUUID()}` }) }
+      catch (error) { if (error?.blockReason) return post(channel, accountSwitchBlockedNotice(error)); throw error }
       if (result.status === 'unchanged') return post(channel, 'Already using that account.')
       return
     }
@@ -10034,6 +10250,10 @@ setInterval(async () => {
   await socketCoordinator.start()
   log('socket mode connected — bridge ready')
   await recoverProviderSwitches()
+  // Interrupted stops below compare each record with its session's terminal.
+  for (const s of Object.values(state.sessions || {})) {
+    if (s.channel && state.channels?.[s.channel] === s.id && syncAutomationTmux(s)) log('automation terminal record follows its session', s.id.slice(0, 8))
+  }
   automationLifecycle.recover()
   startAutomationReconciler()
   // Switch recovery may have changed an authoritative leg after the pre-ingress
@@ -10042,6 +10262,7 @@ setInterval(async () => {
   repairDurableTeamBindings()
   await recoverHooklessCodexResumes()
   await flushSettledDeferredTeamProviderFinals()
+  await removeOrphanedLaunchProbes()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   await recoverInterruptedTeamContinuations() // adopt a proven live wake; never replay an uncertain one
   startTeamReconciler() // status adoption must fence workers that were already busy before restart

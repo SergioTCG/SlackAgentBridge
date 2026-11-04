@@ -9,8 +9,85 @@ import { choosePoolAccount, nextQuotaPollAt, quotaReadiness } from './account-qu
 import { accountCredentialReference } from './account-profiles.mjs'
 
 const fail = code => { throw new Error(code) }
+// A refusal that names the safe-boundary rule it hit, so the owner reads why.
+const failBlocked = reason => {
+  throw Object.assign(new Error('account_switch_blocked'), { blockReason: String(reason || 'work or input was pending').slice(0, 160) })
+}
 const requestPattern = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
+// Proofs are kept as history only: an automatic move no longer needs one for
+// its exact pair of accounts at the current registry revision. That rule broke
+// every move whenever the registry changed, and nothing reported it.
 const proofKey = (from, to) => `${from}:${to}`
+// What protects a move instead is evidence that the target's login starts:
+// a committed switch onto it, a session starting on it, or SAB's own hidden
+// launch check. A login whose first-run, sign-in or terms screen blocks Claude
+// before SessionStart would otherwise strand the session it was moved to.
+const LAUNCH_CHECK_TTL_MS = 24 * 3600000
+const LAUNCH_CHECK_RETRY_MS = 30 * 60000
+const credentialKey = ref => ref ? `${ref.kind}:${ref.profile || ref.alias || ''}` : null
+const sessionCredentialKey = session => !session.account ? 'native-default:'
+  : providerOf(session) === 'codex' ? `codex-profile:${session.account}`
+    : session.accountKind === 'claude-profile' ? `claude-profile:${session.account}` : `legacy-claude:${session.account}`
+const launchCheckReasons = {
+  login: 'it asked for a sign-in',
+  terms: 'it asked to accept updated terms',
+  onboarding: 'it showed its first-run screens',
+  chrome: 'it asked about the Claude in Chrome extension',
+  permissions: 'it asked to accept bypass-permissions mode',
+  trust: 'it asked to trust its folder in a way SAB could not answer',
+  timeout: 'it did not reach its prompt within a minute',
+  failed: 'the check could not run',
+}
+export function launchCheckNotice(account, reason) {
+  const ref = accountCredentialReference(account)
+  const command = ref?.kind === 'claude-profile' ? `CLAUDE_CONFIG_DIR=~/.config/ccs/account-auth/claude/${ref.profile} claude` : 'claude'
+  return `⚠️ SAB couldn't start Claude on *${account.email}*'s login: ${launchCheckReasons[reason] || launchCheckReasons.failed}. ` +
+    `Until it can, SAB won't move sessions to that account. Run \`${command}\` on this Mac once to see the screen and answer it; ` +
+    'SAB checks again within 30 minutes.'
+}
+// The Mac's own login signed in to an account the registry does not expect.
+export function nativeIdentityNotice({ observed, expected }) {
+  return `⚠️ This Mac's own Claude login is signed in to *${observed}*, but SAB's account registry says it is *${expected}*. ` +
+    `In auto mode SAB starts new sessions through a profile with capacity instead, and it still counts sessions already on that login as *${expected}*, which may be wrong. ` +
+    `Sign the Mac back in as ${expected} with \`claude auth login\`, or have the registry updated to follow the Mac.`
+}
+// Owner notices for sessions an exhausted account cannot hand over. Brief
+// waits stay quiet: a turn finishing, or the reset a few minutes away.
+// A wait that drops out for a reading or two is still the same wait.
+const WAITING_EPISODE_GRACE_MS = 30 * 60000
+const WAITING_NOTICE_AFTER_MS = { 'no-capacity': 2 * 60000, 'launch-check': 5 * 60000, halted: 0, interrupted: 0, blocked: 15 * 60000 }
+const slackTime = ms => `<!date^${Math.floor(ms / 1000)}^{date_short_pretty} at {time}|${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC>`
+const plural = (n, one, many) => n === 1 ? one : many
+const waitingReasonText = reason => {
+  const [kind, ...rest] = String(reason).split(':'), detail = rest.join(':')
+  if (kind === 'blocked') return detail || 'work or input pending'
+  if (kind === 'rejected') return `a handover was rejected (${detail || 'see the channel'}), retrying later`
+  if (kind === 'launch-check') {
+    return detail === 'running' ? 'its launch check is running' : ['pending', 'stale'].includes(detail) ? 'its launch check has not run yet'
+      : detail === 'manual-only' ? 'it is a legacy token login, which SAB never moves sessions to by itself'
+        : detail === 'no-start-yet' ? 'no session has started on that login yet'
+          : `its launch check failed: ${launchCheckReasons[detail] || detail}`
+  }
+  if (kind === 'halted') return 'usage-limit moves are halted'
+  if (kind === 'interrupted') return 'an earlier handover ended uncertain'
+  if (kind === 'no-capacity') return 'no account has capacity'
+  return kind.replace(/_/g, ' ')
+}
+export function waitingNotice({ kind, source, target, items, nextCapacityAt }) {
+  const n = items.length, sessions = `${n} ${plural(n, 'session', 'sessions')}`, are = plural(n, 'is', 'are')
+  const channels = items.slice(0, 8).map(item => `<#${item.session.channel}> (${waitingReasonText(item.reason)})`).join(', ') + (n > 8 ? `, and ${n - 8} more` : '')
+  if (kind === 'no-capacity') {
+    return `⏳ ${sessions} on *${source.email}* ${are} at its usage limit, and no account in the group has capacity left.` +
+      (nextCapacityAt ? ` The first account regains capacity ${slackTime(nextCapacityAt)}; SAB moves ${plural(n, 'it', 'them')} then.` : '')
+  }
+  if (kind === 'launch-check') {
+    return `⚠️ ${sessions} on *${source.email}* ${are} at its usage limit and would move to *${target?.email || 'another account'}*, ` +
+      `but SAB has not confirmed that its login starts: ${waitingReasonText(items[0].reason)}.`
+  }
+  if (kind === 'halted') return `⚠️ Usage-limit moves are halted, so ${sessions} on *${source.email}* wait: a handover ended uncertain in ` +
+    `<#${String(items[0].reason).split(':')[1]}>. Check it with /sab-status, then reconcile it from /sab-account there.`
+  return `⏳ ${sessions} on *${source.email}* ${are} at its usage limit but can't move yet: ${channels}.`
+}
 // Plain causes for the pre-teardown rejections an owner can act on.
 const rejectionCauses = {
   account_identity_unverified: 'the target login could not be verified',
@@ -85,6 +162,14 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   isDormant = async session => !session.pid && !session.tmux, adoptReplacement = async () => null,
   usageLimitBlockReason = async () => 'usage-limit maintenance unavailable',
   resumeAfterLimit = async () => false, markLimitPause = async () => false, nativeLoginState = async () => 'unknown',
+  // SAB's own hidden launch of a login, with no prompt: { ok, reason }. Absent, logins earn evidence only from real starts.
+  probeLaunch = null,
+  // Whether the session's turn visibly ended at a usage limit (pane notice or pause marker).
+  atUsageLimit = async () => false,
+  // The account the Mac's own Claude login is signed in to: { email } or null when unreadable.
+  nativeLoginIdentity = async () => null,
+  // Whether the session holds work a usage-limit move must protect: a team task or turn, or an automation.
+  holdsWork = session => Boolean(session?.teamActiveTaskId || session?.teamStandingTaskId || session?.teamTurn),
 }) {
   mode = accountPoolMode(mode)
   const enabled = mode !== 'off', enforcing = ['manual', 'auto'].includes(mode), flights = new Map(), switching = new Set()
@@ -95,7 +180,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
   // channel is reconciled, so a systematic failure strands one session, not all.
   // The journal is the record, so the halt also survives a daemon restart.
   // Scoped by provider: a Codex path that ends uncertain never halts Claude's.
-  const usageLimitHalt = provider => Object.values(poolState().switches).find(journal => journal?.usageLimit &&
+  const usageLimitHalt = provider => Object.values(poolState().switches).find(journal => journal?.usageLimit && journal.automatic &&
     journal.phase === 'interrupted' && authoritative(state.sessions?.[journal.sessionId]) &&
     providerOf(state.sessions[journal.sessionId]) === provider) || null
   let haltLogged = null
@@ -169,6 +254,142 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     }
     return result
   }
+  // Launch evidence per account, for the credential reference a move would use.
+  // An upgrade starts from the committed, identity-verified switches onto each
+  // account at the current revision, whose credential references cannot have
+  // changed since.
+  const launchChecks = () => {
+    const pools = poolState()
+    if (!pools.launchChecks || typeof pools.launchChecks !== 'object' || Array.isArray(pools.launchChecks)) {
+      pools.launchChecks = {}
+      try {
+        const { record, view } = registry()
+        for (const receipt of Object.values(pools.receipts)) {
+          if (!['committed', 'reconciled'].includes(receipt?.phase) || !receipt.identityVerified || receipt.registryRevision !== record.revision) continue
+          const account = view.accounts.find(a => a.id === receipt.targetAccountId)
+          const at = Number(receipt.completedAt || receipt.reconciledAt || receipt.at) || 0
+          if (account && !(pools.launchChecks[account.id]?.at >= at)) {
+            pools.launchChecks[account.id] = { credential: credentialKey(accountCredentialReference(account)), ok: true, at, source: 'switch' }
+          }
+        }
+      } catch { /* no registry: no evidence */ }
+    }
+    return pools.launchChecks
+  }
+  const launchCheck = account => {
+    const check = account && launchChecks()[account.id]
+    return check && check.credential === credentialKey(accountCredentialReference(account)) ? check : null
+  }
+  // Only a Claude profile or native login can be checked by a hidden launch,
+  // so only their evidence goes stale; a Codex login keeps what real starts
+  // proved until something contradicts it.
+  const probeable = account => account?.provider === 'claude' && ['claude-profile', 'native-default'].includes(accountCredentialReference(account)?.kind)
+  const launchReady = account => {
+    const check = launchCheck(account)
+    return Boolean(check?.ok && (!probeable(account) || now() - check.at < LAUNCH_CHECK_TTL_MS))
+  }
+  const recordLaunch = (account, ok, source, reason = null) => {
+    const checks = launchChecks(), previous = checks[account.id], credential = credentialKey(accountCredentialReference(account))
+    const sameFailure = previous && !previous.ok && previous.credential === credential
+    checks[account.id] = ok ? { credential, ok: true, at: now(), source }
+      : { credential, ok: false, at: now(), source, reason, failures: (sameFailure ? previous.failures || 1 : 0) + 1,
+        ...(sameFailure && previous.notifiedAt ? { notifiedAt: previous.notifiedAt, notifiedReason: previous.notifiedReason || previous.reason } : {}) }
+  }
+  // The daemon reports each session start: a session that reached SessionStart
+  // on an account's own credential reference proves that login launches.
+  const noteLaunch = session => {
+    if (!enabled || persistenceFailed) return
+    try {
+      if (!authoritative(session) || !['claude', 'codex'].includes(providerOf(session))) return
+      const { view } = registry(), account = currentAccount(view, session), ref = account && accountCredentialReference(account)
+      if (!ref || credentialKey(ref) !== sessionCredentialKey(session)) return
+      // A legacy token's identity cannot be verified, so it never earns
+      // automatic moves; nor does a Mac login signed in to another account.
+      if (!['claude-profile', 'codex-profile', 'native-default'].includes(ref.kind) ||
+          ref.kind === 'native-default' && providerOf(session) === 'claude' && poolState().nativeIdentity) return
+      recordLaunch(account, true, 'session')
+      save()
+    } catch { /* evidence is best-effort */ }
+  }
+  let probing = null
+  const settleLaunchCheck = (account, result) => {
+    if (result?.skipped) return // the login was busy (a renewal or sign-in); the next tick tries again
+    try {
+      const { view } = registry(), current = view.accounts.find(a => a.id === account.id)
+      // A registry edit during the launch: the result may describe another reference.
+      if (!current || credentialKey(accountCredentialReference(current)) !== credentialKey(accountCredentialReference(account))) return
+      const ok = result?.ok === true, reason = ok ? null : /^[a-z-]{1,40}$/.test(result?.reason || '') ? result.reason : 'failed'
+      recordLaunch(current, ok, 'probe', reason)
+      save()
+      if (ok) { log('account launch check passed', current.key); return }
+      log('account launch check failed', current.key, reason)
+      const told = launchChecks()[current.id]
+      if (told?.notifiedAt && (told.notifiedReason === reason || now() - told.notifiedAt < 6 * 3600000) || noticesPosting.has(`launch:${current.id}`)) return
+      noticesPosting.add(`launch:${current.id}`)
+      Promise.resolve().then(() => notifyOwner(launchCheckNotice(current, reason))).then(() => {
+        const latest = launchChecks()[current.id]
+        if (latest && !latest.ok && latest.reason === reason) { latest.notifiedAt = now(); latest.notifiedReason = reason; save() }
+      }).catch(() => {}).finally(() => noticesPosting.delete(`launch:${current.id}`))
+    } catch { /* retried at the next due check */ }
+  }
+  // One hidden launch at a time, for an active Claude login whose reading works
+  // but whose launch evidence is missing or older than a day. Failures retry
+  // after 30 minutes. Codex logins earn evidence from real starts only.
+  const startDueLaunchCheck = view => {
+    if (!probeLaunch || probing || persistenceFailed) return
+    for (const account of view.accounts) {
+      if (account.lifecycle !== 'active' || account.provider !== 'claude') continue
+      const ref = accountCredentialReference(account)
+      if (!['claude-profile', 'native-default'].includes(ref?.kind) || launchReady(account)) continue
+      const check = launchCheck(account)
+      if (check && !check.ok && now() - check.at < LAUNCH_CHECK_RETRY_MS) continue
+      if (poolState().observations[account.id]?.observation?.status !== 'observed') continue
+      // The Mac's login is another account's: launching it proves nothing about this one.
+      if (ref.kind === 'native-default' && poolState().nativeIdentity) continue
+      probing = account.id
+      Promise.resolve().then(() => probeLaunch(account))
+        .then(result => settleLaunchCheck(account, result), () => settleLaunchCheck(account, { ok: false, reason: 'failed' }))
+        .finally(() => { probing = null })
+      return
+    }
+  }
+  const launchState = account => {
+    const check = launchCheck(account)
+    if (launchReady(account)) return { ready: true, at: check.at, source: check.source }
+    const unchecked = !probeable(account) ? accountCredentialReference(account || { credentials: [] })?.kind === 'legacy-claude' ? 'manual-only' : 'no-start-yet'
+      : probing === account?.id ? 'running' : check ? 'stale' : 'pending'
+    return { ready: false, at: check?.at || null, reason: check && !check.ok ? check.reason : unchecked }
+  }
+  // The monitor's move decision: status()'s own rules, among the current
+  // account and the accounts whose login is known to start. The best account
+  // by headroom may not be one; waiting on it would hold every move while its
+  // launch check keeps running, so it is chosen again once that passes.
+  const moveDecision = (session, source, view) => {
+    const { record } = registry(), binding = state.accountPools?.bindings?.[session.channel]
+    const readyView = { ...view, accounts: view.accounts.filter(a => a.id === source.id || launchReady(a)) }
+    const options = { channelId: session.channel, provider: providerOf(session), currentAccountId: source.id,
+      observations: data(record.revision), now: now(), preferredAccountId: binding?.preferredAccountId,
+      resetConfirmedAfter: binding?.preferredResetAt ?? Infinity, lastSwitchedAt: binding?.switchedAt || 0 }
+    const decision = choosePoolAccount(readyView, { ...options, reservations: reservations(view) })
+    const measured = decision.accountId ? null : choosePoolAccount(readyView, { ...options, reservations: {} })
+    return { decision, accountId: decision.accountId, measuredAccountId: measured?.accountId || null }
+  }
+  // When an account in the session's group regains real capacity: an account
+  // recovers once every window holding it at its limit has reset.
+  const nextCapacityAt = (view, session) => {
+    try {
+      const { record } = registry(), observations = data(record.revision)
+      const group = view.groups.find(g => g.id === (view.routing.channels[session.channel] || view.routing.defaultGroupId))
+      const usable = a => group?.members.includes(a.id) && a.provider === providerOf(session) && (!a.lifecycle || a.lifecycle === 'active') &&
+        !group.drainingMembers?.includes(a.id) && (a.allowedChannels === null || a.allowedChannels?.includes(session.channel)) &&
+        observations[a.id]?.identity?.email?.toLowerCase() === a.email.toLowerCase()
+      const times = view.accounts.filter(usable).map(account => {
+        const blocking = (observations[account.id]?.windows || []).filter(w => w.usedPercent >= 90 && Number.isFinite(w.resetsAt) && w.resetsAt > now())
+        return blocking.length ? Math.max(...blocking.map(w => w.resetsAt)) : null
+      }).filter(Boolean)
+      return times.length ? Math.min(...times) : null
+    } catch { return null }
+  }
   const status = channelId => {
     const { record, view } = registry()
     const session = state.sessions?.[state.channels?.[channelId]]
@@ -181,12 +402,31 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       reservations: state.accountPools ? reservations(view) : {},
     })
     const group = view.groups.find(g => g.id === decision.groupId)
+    // The reservation estimate balances accounts that can all still work. Once
+    // the current account's own usage is exhausted, the move goes by measured
+    // capacity, and the status says so instead of "no capacity".
+    const ownReason = current && quotaReadiness(snapshots[current.id], { now: now() }).reason
+    const exhausted = ownReason === 'headroom-exhausted' || ownReason === 'backend-denied' &&
+      snapshots[current.id]?.windows?.some(w => w.usedPercent >= 90)
+    const measured = exhausted && !decision.accountId ? choosePoolAccount(view, { channelId, provider: providerOf(session), currentAccountId: current.id,
+      observations: snapshots, now: now(), preferredAccountId: binding?.preferredAccountId, reservations: {} }) : null
+    // The monitor moves only to a login known to start; show the same choice.
+    let move = null
+    if (current && state.accountPools && mode === 'auto') {
+      try {
+        const choice = moveDecision(session, current, view), id = choice.accountId || (exhausted ? choice.measuredAccountId : null)
+        if (id && id !== current.id) move = { accountId: id, reason: choice.accountId ? choice.decision.reason : 'measured-capacity' }
+      } catch { /* the status still shows the estimate */ }
+    }
     return { mode, automaticSwitching: mode === 'auto' && !persistenceFailed, persistenceFailed, registryRevision: record.revision, group,
       currentAccount: current, decision, pendingSwitch: state.accountPools?.switches?.[channelId] || null,
+      measured: measured?.accountId ? { accountId: measured.accountId, reason: measured.reason } : null, move,
+      waiting: deferred.get(channelId) || null,
       accounts: view.accounts.filter(a => group.members.includes(a.id) && a.provider === providerOf(session)).map(account => ({
         id: account.id, email: account.email, observation: snapshots[account.id] || null,
         lastKnownQuota: state.accountPools?.observations?.[account.id]?.lastSuccessful || null,
         readiness: quotaReadiness(snapshots[account.id], { now: now() }),
+        launch: state.accountPools ? launchState(account) : null,
       })) }
   }
   const inventory = () => {
@@ -275,10 +515,15 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     if (!['manual', 'auto'].includes(mode)) fail('account_pool_read_only')
     if (!requestPattern.test(requestId || '')) fail('invalid_account_request')
     if (!authoritative(session, expectedSessionId)) fail('stale_account_session')
-    // Only the monitor declares a usage limit, for a Claude or Codex session it
-    // has just observed on an exhausted account. Owners keep the ordinary safe
-    // boundary.
-    if (usageLimit && (!automatic || preserveTask || !['claude', 'codex'].includes(providerOf(session)))) fail('account_switch_blocked')
+    // A usage limit is declared for a Claude or Codex session the pool measured
+    // on an exhausted account: by the monitor, or by the owner's own switch
+    // once the turn visibly ended at that limit. That switch then waives the
+    // same protections the automatic one does, instead of refusing as "busy".
+    if (usageLimit && (preserveTask || !['claude', 'codex'].includes(providerOf(session)))) fail('account_switch_blocked')
+    if (usageLimit && !automatic && !(measuredExhaustion(session) && await atUsageLimit(session))) {
+      failBlocked('the turn has not stopped at a measured usage limit')
+    }
+    if (!authoritative(session, expectedSessionId)) fail('stale_account_session')
     const channelId = session.channel
     if (switching.has(channelId)) fail('account_switch_in_progress')
     const { record, view } = registry()
@@ -298,6 +543,14 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     if (source?.id === target.id && (session.account || null) === alias &&
         poolState().switches[channelId]?.phase !== 'interrupted' &&
         (ref.kind !== 'claude-profile' || session.accountKind === 'claude-profile')) return { status: 'unchanged', accountId: target.id, requestId }
+    // Held work moved at a usage limit goes only where an automatic move could
+    // go: a verified login known to start. A session holding nothing keeps
+    // the owner's ordinary choice.
+    const ownerMovesHeldWork = usageLimit && !automatic && holdsWork(session)
+    if (ownerMovesHeldWork && (ref?.kind === 'legacy-claude' || !launchReady(target))) {
+      failBlocked(ref?.kind === 'legacy-claude' ? 'held work cannot move to a legacy token login'
+        : `SAB has not yet confirmed that ${target.email}'s login starts`)
+    }
     if (Object.keys(poolState().receipts).length >= 4096) fail('account_receipt_history_full')
     if (automatic && preserveTask) fail('account_task_maintenance_blocked')
     const taskMaintenance = preserveTask ? captureTaskMaintenance(state, session, preserveTask)
@@ -308,19 +561,23 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       switching.add(channelId)
       let reason
       try { reason = await usageLimitBlockReason(session, taskMaintenance) } finally { switching.delete(channelId) }
-      if (reason || !authoritative(session, expectedSessionId) || switching.has(channelId) || poolState().receipts[key] ||
+      if (reason) failBlocked(reason)
+      if (!authoritative(session, expectedSessionId) || switching.has(channelId) || poolState().receipts[key] ||
           currentAccount(registry().view, session)?.id !== source?.id || readRegistry()?.revision !== record.revision) fail('account_switch_blocked')
       if (taskMaintenance) assertTaskMaintenance(state, session, taskMaintenance)
     }
     const blocked = usageLimit ? null : maintenanceBlockReason(session, taskMaintenance)
     const dormant = !session.pid || blocked === 'provider is dormant'
     if (taskMaintenance && dormant) fail('account_task_maintenance_blocked')
-    if (blocked && !(dormant && blocked === 'provider is dormant') || (!dormant && (!session.pid || !session.tmux))) fail('account_switch_blocked')
+    if (blocked && !(dormant && blocked === 'provider is dormant')) failBlocked(blocked)
+    if (!dormant && (!session.pid || !session.tmux)) failBlocked('the provider process is not running')
     if (automatic) {
-      if (mode !== 'auto' || !source || !poolState().proofs[proofKey(source.id, target.id)] ||
-          poolState().proofs[proofKey(source.id, target.id)].registryRevision !== record.revision ||
-          poolState().observations[target.id]?.registryRevision !== record.revision ||
+      // Fresh measured capacity on the target, and evidence its login starts.
+      // No per-pair proof: the identity of the target login is checked before
+      // teardown and again on the replacement, as for any switch.
+      if (mode !== 'auto' || !source || poolState().observations[target.id]?.registryRevision !== record.revision ||
           !quotaReadiness(poolState().observations[target.id]?.observation, { now: now() }).ready) fail('automatic_handover_unproven')
+      if (!launchReady(target)) fail('account_launch_unchecked')
     }
     if (!ref || (ref.kind !== 'native-default' && !(target.provider === 'claude' && ['legacy-claude', 'claude-profile'].includes(ref.kind)) && !(target.provider === 'codex' && ref.kind === 'codex-profile'))) fail('account_credential_unsupported')
     const before = { id: session.id, channel: session.channel, cwd: session.cwd, provider: providerOf(session),
@@ -352,7 +609,7 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         return { status: 'selected', accountId: target.id, requestId }
       }
       const identityBefore = await verifyIdentity(session, target, { stage: 'credential' })
-      const legacyUnverified = !automatic && ref.kind === 'legacy-claude' && identityBefore === 'scope-unavailable'
+      const legacyUnverified = !automatic && !ownerMovesHeldWork && ref.kind === 'legacy-claude' && identityBefore === 'scope-unavailable'
       if (identityBefore !== 'verified' && !legacyUnverified) fail('account_identity_unverified')
       if (taskMaintenance) assertTaskMaintenance(state, session, taskMaintenance)
       // The callback reserves the daemon's input fence synchronously, then
@@ -381,6 +638,8 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         preferredResetAt: limitingResets.length ? Math.max(...limitingResets) : oldBinding?.preferredResetAt || null, switchedAt: now() }
       journal.phase = 'committed'; journal.completedAt = now()
       if (source && source.id !== target.id && !automatic && journal.identityVerified && !taskMaintenance) poolState().proofs[proofKey(source.id, target.id)] = { registryRevision: record.revision, at: now() }
+      // A verified replacement started on the target's own reference: its login launches.
+      if (journal.identityVerified) recordLaunch(target, true, 'switch')
       save()
       try { onSettled(session, { journal, source, target }) } catch { /* input recovery is separately fenced */ }
       const limit = usageLimit ? ` ${source?.email || 'The previous account'} had reached its usage limit${taskMaintenance
@@ -478,11 +737,19 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
     const { record, view } = registry()
     const native = view.accounts.find(a => a.provider === provider && a.credentials.some(ref => ref.kind === 'native-default'))
     if (!native) return null
-    const decision = choosePoolAccount(view, { channelId, provider, currentAccountId: native.id,
+    // The Mac's login is signed in to another account than the registry says,
+    // so a native launch would run somewhere SAB cannot account for. Start on
+    // the best account reachable through its own profile instead.
+    const mismatch = Boolean(poolState().nativeIdentity)
+    // A profile whose launch check failed, or has not run, would stop the new session before SessionStart.
+    const usable = { ...view, accounts: view.accounts.filter(a => (a.id === native.id && !mismatch) ||
+      (!(mismatch && accountCredentialReference(a)?.kind === 'native-default') && (!probeable(a) || launchReady(a)))) }
+    const decision = choosePoolAccount(usable, { channelId, provider, currentAccountId: mismatch ? null : native.id,
       observations: data(record.revision), now: now(), reservations: {}, newChannel })
-    const target = decision.reason === 'capacity-handover' && decision.accountId !== native.id
+    const target = decision.reason === 'capacity-handover' && (mismatch || decision.accountId !== native.id)
       ? view.accounts.find(a => a.id === decision.accountId) : null
     const ref = target && accountCredentialReference(target)
+    if (mismatch && !ref) log('new session starts on the Mac login: no profile account is ready', native.key)
     if (!ref || !['legacy-claude', 'claude-profile'].includes(ref.kind) || target.lifecycle !== 'active') return null
     if (!newChannel) previewPoolAccountSelection(record, { channelId, provider, account: target.id })
     return { account: ref.kind === 'legacy-claude' ? ref.alias : ref.profile, accountKind: ref.kind, accountId: target.id, email: target.email }
@@ -525,6 +792,81 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       if (current && !current.ownerNotifiedAt) { current.ownerNotifiedAt = now(); save() }
     }).catch(() => {}).finally(() => noticesPosting.delete('native-login'))
   }
+  // Signed in or out says nothing about which account the Mac's own login
+  // holds. Claude records that in its config; compare it with the registry.
+  const watchNativeIdentity = async view => {
+    const pools = poolState()
+    const account = view.accounts.find(a => a.provider === 'claude' && a.credentials?.some(ref => ref.kind === 'native-default'))
+    if (!account) { if (pools.nativeIdentity) { delete pools.nativeIdentity; save() } return }
+    let identity = null
+    try { identity = await nativeLoginIdentity() } catch { return }
+    const observed = typeof identity?.email === 'string' && /^[^\s@]{1,128}@[^\s@]{1,128}$/.test(identity.email) ? identity.email.toLowerCase() : null
+    if (!observed) return // nothing read: change nothing
+    const expected = account.email.toLowerCase()
+    if (observed === expected) {
+      if (pools.nativeIdentity) { delete pools.nativeIdentity; save(); log('native Claude login matches the registry again', account.key) }
+      return
+    }
+    if (pools.nativeIdentity?.observed !== observed || pools.nativeIdentity?.expected !== expected) {
+      pools.nativeIdentity = { observed, expected, since: now() }
+      save()
+      log('native Claude login is signed in to another account than the registry says', account.key)
+    }
+    if (pools.nativeIdentity.ownerNotifiedAt || noticesPosting.has('native-identity')) return
+    noticesPosting.add('native-identity')
+    Promise.resolve().then(async () => {
+      await notifyOwner(nativeIdentityNotice(pools.nativeIdentity))
+      const current = poolState().nativeIdentity
+      if (current && current.observed === observed && !current.ownerNotifiedAt) { current.ownerNotifiedAt = now(); save() }
+    }).catch(() => {}).finally(() => noticesPosting.delete('native-identity'))
+  }
+  // Every session at a usage limit that did not move gets its reason logged
+  // once per change, and the owner hears about each stuck account once per
+  // episode. A turn still running on an account below 100% is a normal wait.
+  const blockedText = {
+    account_task_maintenance_blocked: 'its team task is mid-delivery',
+    account_task_maintenance_changed: 'its team task changed during the check',
+    account_switch_in_progress: 'a handover is already running',
+    stale_account_session: 'the session changed',
+    account_switch_blocked: 'work or input was pending',
+  }
+  const reportWaiting = (waiting, view) => {
+    for (const item of waiting) {
+      if (deferred.get(item.session.channel) !== item.reason) log('usage-limit move waiting', item.session.channel, item.reason)
+      deferred.set(item.session.channel, item.reason)
+    }
+    for (const channel of [...deferred.keys()]) if (!waiting.some(item => item.session.channel === channel)) deferred.delete(channel)
+    const atHardLimit = account => poolState().observations[account.id]?.observation?.windows?.some(w => w.usedPercent >= 100)
+    const groups = new Map()
+    for (const item of waiting) {
+      const kind = String(item.reason).split(':')[0]
+      if (item.reason === 'blocked:turn in progress' && !atHardLimit(item.source)) continue
+      const group = ['blocked', 'rejected', 'stale-reading'].includes(kind) ? 'blocked' : kind
+      const key = `${item.source.id}|${group}${group === 'launch-check' ? `|${item.target}` : ''}`
+      const entry = groups.get(key) || { kind: group, source: item.source, target: view.accounts.find(a => a.id === item.target) || null, items: [], nextCapacityAt: item.nextCapacityAt }
+      entry.items.push(item)
+      groups.set(key, entry)
+    }
+    const pools = poolState()
+    if (!pools.waitingNotices || typeof pools.waitingNotices !== 'object' || Array.isArray(pools.waitingNotices)) pools.waitingNotices = {}
+    const episodes = pools.waitingNotices
+    let changed = false
+    for (const key of Object.keys(episodes)) {
+      if (!groups.has(key) && now() - (episodes[key].seen || episodes[key].since) > WAITING_EPISODE_GRACE_MS) { delete episodes[key]; changed = true }
+    }
+    for (const [key, group] of groups) {
+      if (!episodes[key]) { episodes[key] = { since: now(), seen: now() }; changed = true }
+      const episode = episodes[key]
+      if (now() - (episode.seen || 0) >= 5 * 60000) { episode.seen = now(); changed = true }
+      if (episode.notifiedAt || noticesPosting.has(`waiting:${key}`) || now() - episode.since < (WAITING_NOTICE_AFTER_MS[group.kind] ?? 15 * 60000)) continue
+      noticesPosting.add(`waiting:${key}`)
+      Promise.resolve().then(() => notifyOwner(waitingNotice(group))).then(() => {
+        const latest = poolState().waitingNotices?.[key]
+        if (latest && !latest.notifiedAt) { latest.notifiedAt = now(); save() }
+      }).catch(() => {}).finally(() => noticesPosting.delete(`waiting:${key}`))
+    }
+    if (changed) save()
+  }
   const tick = async () => {
     if (!enabled || tickRunning || persistenceFailed) return
     tickRunning = true
@@ -533,7 +875,10 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
       await recover()
       for (const account of view.accounts) await refresh(account.id)
       await watchNativeLogin(view)
+      await watchNativeIdentity(view)
       if (mode !== 'auto') return
+      startDueLaunchCheck(view)
+      const waiting = []
       for (const session of Object.values(state.sessions || {})) {
         if (!authoritative(session) || !session.pid || !session.tmux || switching.has(session.channel) || !['claude', 'codex'].includes(providerOf(session))) continue
         const blocked = blockReason(session)
@@ -566,47 +911,81 @@ export function createAccountPoolRuntime({ state, mode = 'off', readRegistry, pe
         // The reservation estimate balances accounts that can all still work. An
         // account whose own usage is exhausted cannot run the next turn at all,
         // so measured capacity elsewhere is enough.
-        const target = info.decision.accountId || (measuredExhausted ? measuredCapacityTarget(session, source) : null)
-        if (!target || source.id === target) continue
+        const best = info.decision.accountId || (measuredExhausted ? measuredCapacityTarget(session, source) : null)
+        const ready = moveDecision(session, source, view)
+        const target = ready.accountId || (measuredExhausted ? ready.measuredAccountId : null)
+        // Only a session at its own account's usage limit waits visibly: the
+        // others have an account that still works.
+        const wait = reason => {
+          if (!measuredExhausted) return
+          const named = target && target !== source.id ? target : best && best !== source.id ? best : null
+          waiting.push({ session, source, target: named, reason, nextCapacityAt: nextCapacityAt(view, session) })
+        }
         // Only a measured usage limit moves a session whose own work is held:
         // that turn cannot progress on the exhausted account anyway. A
         // preference return, a drain or a manual switch waits for a safe boundary.
         const usageLimit = measuredExhausted && ['claude', 'codex'].includes(providerOf(session))
-        if (blocked && !usageLimit) continue
+        // An uncertain handover comes first, here or elsewhere: only the owner's
+        // reconcile ends it, so no capacity reason may hide it.
+        const last = poolState().switches[session.channel]
+        if (last?.phase === 'interrupted') { wait('interrupted'); continue }
         if (usageLimit) {
           const halt = usageLimitHalt(providerOf(session))
           if (halt) {
             if (haltLogged !== halt.requestId) log('usage-limit handovers halted until this channel is reconciled', halt.channelId)
             haltLogged = halt.requestId
+            wait(`halted:${halt.channelId}`) // this channel's own uncertain handover was reported above
             continue
           }
         }
+        if (!target || source.id === target) {
+          // Capacity exists, but only on a login not yet known to start.
+          const unready = best && best !== source.id ? view.accounts.find(a => a.id === best) : null
+          wait(unready ? `launch-check:${launchState(unready).reason}` : 'no-capacity')
+          continue
+        }
+        if (blocked && !usageLimit) continue
         const draining = source.lifecycle === 'draining' || info.group.drainingMembers.includes(source.id)
-        if (!quotaExhausted && !draining && info.decision.reason !== 'preferred-recovered') continue
-        const last = poolState().switches[session.channel]
-        if (last?.phase === 'interrupted') continue
+        if (!quotaExhausted && !draining && ready.decision.reason !== 'preferred-recovered') continue
         // A rejection left the provider untouched. Do not announce another
         // attempt, and keep another receipt, on every tick.
-        if (last?.automatic && last.phase === 'rejected' && last.sessionId === session.id && now() - last.at < automaticRetryDelay(last)) continue
+        if (last?.automatic && last.phase === 'rejected' && last.sessionId === session.id && now() - last.at < automaticRetryDelay(last)) {
+          wait(`rejected:${rejectionCauses[last.reason] || 'see the channel'}`)
+          continue
+        }
+        const targetAccount = view.accounts.find(a => a.id === target)
         const requestId = `automatic-${crypto.randomUUID()}`
         try {
           await switchAccount(session, target, { requestId, automatic: true, usageLimit })
           deferred.delete(session.channel)
         } catch (error) {
           // A journaled outcome was already explained by switchAccount.
-          if (poolState().switches[session.channel]?.requestId === requestId || error.message === 'automatic_handover_unproven') continue
+          const journal = poolState().switches[session.channel]
+          if (journal?.requestId === requestId) {
+            wait(journal.phase === 'interrupted' ? 'interrupted' : `rejected:${rejectionCauses[journal.reason] || 'see the channel'}`)
+            continue
+          }
+          if (error.message === 'account_launch_unchecked') { wait(`launch-check:${launchState(targetAccount).reason}`); continue }
+          if (error.message === 'automatic_handover_unproven') { wait('stale-reading:the target account has no fresh reading'); continue }
           // Held work that is not yet at a safe point for usage-limit maintenance
-          // is retried on the next tick, not announced on every one.
-          if (usageLimit) {
-            if (deferred.get(session.channel) !== error.message) log('usage-limit handover deferred', session.channel, error.message)
-            deferred.set(session.channel, error.message)
-          } else await notify(session.channel, 'Automatic account handover is blocked; inspect /sab-account.').catch(() => {})
+          // is retried on the next tick; its reason is logged and, if it lasts,
+          // reported to the owner.
+          if (usageLimit) wait(`blocked:${error.blockReason || blockedText[error.message] || error.message}`)
+          else await notify(session.channel, 'Automatic account handover is blocked; inspect /sab-account.').catch(() => {})
         }
       }
+      reportWaiting(waiting, view)
     } finally { tickRunning = false }
+  }
+  // An owner's own switch: the usage-limit rules apply when the pool measured
+  // the session's account exhausted and its turn visibly stopped at the limit.
+  const ownerSwitch = async (session, selector, options = {}) => {
+    const usageLimit = !options.preserveTask && Boolean(measuredExhaustion(session)) && await atUsageLimit(session)
+    return switchAccount(session, selector, { ...options, automatic: false, usageLimit })
   }
   const accountIdFor = session => {
     try { return enabled && authoritative(session) ? currentAccount(registry().view, session)?.id || null : null } catch { return null }
   }
-  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, reconcile, tick, recover, assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed, launchSelection, measuredExhaustion, accountIdFor })
+  return Object.freeze({ enabled, enforcing, mode, status, inventory, manage, refresh, switchAccount, ownerSwitch, reconcile, tick, recover,
+    assertLaunchAllowed, assertInputAllowed, assertProviderLaunchAllowed, launchSelection, measuredExhaustion, accountIdFor, noteLaunch })
 }

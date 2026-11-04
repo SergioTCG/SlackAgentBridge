@@ -86,3 +86,24 @@ test('owner group CLI sends a quoted name as JSON and management rejects browser
     assert.equal(calls.length, 1)
   } finally { await server.close() }
 })
+
+test('owners switch through the owner rules, and a refusal returns the safe-boundary rule it hit', async () => {
+  const calls = []
+  const runtime = { enabled: true, status: channel => ({ channel }), refresh: async () => ({}),
+    switchAccount: async () => { calls.push('switchAccount'); return { status: 'committed' } },
+    ownerSwitch: async (session, account, options) => {
+      calls.push(['ownerSwitch', options.requestId])
+      if (options.requestId === 'refused') throw Object.assign(new Error('account_switch_blocked'), { blockReason: 'turn in progress' })
+      return { status: 'committed' }
+    } }
+  const server = await serverFor(runtime)
+  const post = requestId => fetch(`${server.base}/account-pools/switch`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: 'CWORK', session: 'native-id', account: 'owner@example.test', requestId }) })
+  try {
+    assert.equal((await post('fine')).status, 200)
+    const refused = await post('refused')
+    assert.equal(refused.status, 409)
+    assert.deepEqual(await refused.json(), { ok: false, error: 'account_switch_blocked', reason: 'turn in progress' })
+    assert.deepEqual(calls, [['ownerSwitch', 'fine'], ['ownerSwitch', 'refused']])
+  } finally { await server.close() }
+})

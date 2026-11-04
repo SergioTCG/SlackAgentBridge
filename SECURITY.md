@@ -494,8 +494,11 @@ The experimental runtime is off by default. Shadow mode only samples; manual
 and automatic handovers require exact channel/group/account policy and the
 ordinary maintenance fence. They never stop an active turn, delegated task,
 question/permission, automation-owned session, or provider switch. Automatic
-selection also requires fresh identity-bound quota and a successful manual
-resume proof for that account pair/registry revision. Unknown quota, auth
+selection also requires fresh identity-bound quota and evidence, less than a
+day old, that the target login starts: a session start or committed verified
+switch on it, or SAB's own hidden launch check. That check starts Claude with a
+clean environment, no prompt and no `CCS_BRIDGE` in a throwaway terminal,
+trusts only its own folder, and answers no other dialog. Unknown quota, auth
 failures, limited scopes, capacity banners, and provider errors are not evidence
 of exhausted subscription quota. An ambiguous restart is never replayed;
 disk-write failure disables further pool mutations. Requested model/effort is

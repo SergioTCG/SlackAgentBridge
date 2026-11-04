@@ -655,8 +655,8 @@ activates runtime policy. The daemon keeps legacy behavior by default.
 The experimental runtime is opt-in with `CCS_ACCOUNT_POOLS=shadow|manual|auto`
 (`off` by default). Shadow mode samples subscription quotas without switching;
 manual mode permits exact idle-session handovers; auto additionally requires
-fresh eligible quota and a successful manual resume proof for that account
-pair. `/sab-account` then shows email identities, group, and quota freshness for
+fresh eligible quota and fresh evidence that the target login starts, which SAB
+checks itself with a hidden launch. `/sab-account` then shows email identities, group, and quota freshness for
 Claude and Codex; `/sab-usage limits` uses the same observations. Unknown,
 expired, scope-limited, or stale evidence never grants capacity. Active turns,
 delegated work, questions, permissions, automations, and maintenance block
@@ -709,8 +709,9 @@ manage <JSON>`) handles account enrollment, credential attachment, drain/retire/
 enable, and channel routing. In-use removal fails closed; explicit draining
 never kills a turn or deletes credentials. Isolated inactive profiles use native
 provider refresh under an exclusive lease; the default machine login is never
-refreshed by SAB. Full-scope enrollment and controlled native resume proofs are
-still required before unattended rotation.
+refreshed by SAB. A session that cannot move at its usage limit is reported to
+the owner with the reason, and so is a Mac login signed in to an account the
+registry does not expect.
 
 The enrollment schema, staged design, evidence limits, and remaining
 maintenance proofs are in
