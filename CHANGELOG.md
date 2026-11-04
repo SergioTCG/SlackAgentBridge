@@ -8,6 +8,11 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
+- A task's release now delivers the worker's answer, the first report after it
+  declared completion. A later turn in the same generation, such as one a background
+  notification started, could replace that result, turn a clean task into
+  `completed_with_warning`, or push the answer out of the journal once reports hit
+  their cap.
 - A Claude worker's final answer now reaches its channel and the coordinator's
   report. Once a task had more than one generation, or the worker had held an
   earlier task, the first tool call in a turn let the streaming reader pass the
@@ -34,7 +39,7 @@ Notable changes to this project. Format based on
     task's output.
   - A turn one of these prompts starts on an idle worker reports like any later
     turn: the coordinator sees its reply, and that reply becomes the task's latest
-    result, which a later release delivers.
+    result until release.
   - A message from another Claude session still fails a worker's active task and
     ends the team turn, because nothing yet stops that session steering a worker to
     complete its task. The failure now names it instead of a terminal prompt. A

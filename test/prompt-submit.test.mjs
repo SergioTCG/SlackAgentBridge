@@ -580,13 +580,12 @@ for (const [what, message] of Object.entries(OWN_WORK_PROMPTS)) {
     assert.equal(bridge.task(task.id).reports.length, 2, 'the earlier report is kept')
     assert.equal(JSON.stringify(bridge.task(task.id).completionRequest), declared)
 
-    // Known limit: a later release delivers that reply, as it does for a background
-    // notification's turn.
+    // A release still delivers the worker's answer.
     releaseTeamTask(bridge.state, task.id, {
       sourceChannel: bridge.task(task.id).sourceChannel, requestId: 'release-lane3', now: bridge.now(),
     })
     assert.equal(bridge.task(task.id).status, 'completed')
-    assert.equal(bridge.task(task.id).result, 'Noted.')
+    assert.equal(bridge.task(task.id).result, 'Core source done.')
   })
 }
 
