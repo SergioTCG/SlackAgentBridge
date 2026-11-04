@@ -404,6 +404,7 @@ const accountPools = createAccountPoolRuntime({
   nativeLoginState: () => claudeLoginState({ env: process.env }),
   nativeLoginIdentity: async () => readNativeClaudeIdentity(),
   probeLaunch: account => probeClaudeLaunch(account),
+  holdsWork: session => holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) }),
   // An owner's switch takes the usage-limit path only for a turn visibly
   // stopped at the limit: a pause marker, or the limit notice as its pane's latest output.
   atUsageLimit: async session => Boolean(session.pid && pidAlive(session.pid) && session.tmux) && (Boolean(session.usageLimitPause) ||
@@ -1021,15 +1022,19 @@ function startPoller(session) {
     // reported, as Codex's is: the handover, or the limit's reset, resumes it.
     // Any other turn is simply over.
     const limit = line || form || holdAnsweredForm ? null : claudeUsageLimitSurface(pane)
-    if (limit === 'ended') {
-      if (holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) })) {
-        // Claude continues held work itself at the reset, so the turn is not
-        // over. Pause it when the pool can move it; otherwise keep watching,
-        // and report nothing early.
-        const exhaustion = accountPools.measuredExhaustion(session)
-        const heldTask = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
-        if (!exhaustion || session.teamProviderTurnPending || heldTask?.status === 'dispatching' || restarting.has(session.id)) return
-        if (!teamProviderPollerObservationCurrent(p, observation)) return
+    if (limit) {
+      // The limit proves the turn ran: once nothing below holds it open, the
+      // idle rule finalizes it, even if no spinner was ever seen.
+      p.sawSpinner = true
+      const heldTask = session.teamActiveTaskId ? state.teamTasks?.[session.teamActiveTaskId] : null
+      const settled = !session.teamProviderTurnPending && heldTask?.status !== 'dispatching'
+      const exhaustion = settled && holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) })
+        ? accountPools.measuredExhaustion(session) : null
+      if (exhaustion) {
+        // Held work the pool can move: pause it, as Codex turns are; the
+        // handover, or the reset, resumes it. A handover already underway
+        // stops this poller itself.
+        if (restarting.has(session.id) || !teamProviderPollerObservationCurrent(p, observation)) return
         p.stopped = true
         stopPoller(session)
         session.usageLimitPause = { at: Date.now(), accountId: exhaustion.accountId }
@@ -1044,7 +1049,19 @@ function startPoller(session) {
         }
         return
       }
-      p.sawSpinner = true // nothing is held: the turn is over
+      // Claude 2.1.318 schedules its own continuation ("Continuing automatically
+      // at …"), so held work it shows that for is not over: report nothing
+      // early. Without that promise (an older notice, the chooser, or a
+      // continuation the owner cancelled) the turn ends as it always did.
+      if (settled && limit === 'ended' && /Continuing automatically\b/i.test(pane) &&
+          holdsUsageLimitWork(session, { automationOwned: ownsAutomationRecord(session) })) {
+        if (Date.now() - (limitPauseNotices.get(session.id) || 0) > 30 * 60000) {
+          limitPauseNotices.set(session.id, Date.now())
+          await clearStatus(session)
+          await post(session.channel, '⏳ Claude hit its usage limit and continues this turn by itself when the limit resets. SAB reports nothing for it until then.').catch(() => {})
+        }
+        return
+      }
     }
     const decision = claudePollerDecision({
       spinner: Boolean(line), newAssistantText, hasForm: Boolean(form) || holdAnsweredForm,
@@ -1635,6 +1652,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     }
     clearStatusDeferred(session)
     void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
+    delete session.usageLimitPause // a turn that completed is past any pause before it
     const older = []
     const rawText = readNewAssistantText(session, teamTaskTurn, {
       onSkipped: skipped => older.push(skipped), stopObservedAt: reportObservedAt,
@@ -4028,7 +4046,8 @@ function bulkUpdateContext() {
     internalSessionIds: new Set(internalTurns.keys()),
     restartingSessionIds: new Set([...restarting, ...updatingSessions]),
     wakingSessionIds: new Set(resurrectInFlight.keys()),
-    pausedSessionIds: new Set(Object.values(state.sessions || {}).filter(s => s.usageLimitPause && s.pid && pidAlive(s.pid)).map(s => s.id)),
+    pausedSessionIds: new Set(Object.values(state.sessions || {}).filter(s => s.usageLimitPause && s.pid && pidAlive(s.pid) &&
+      holdsUsageLimitWork(s, { automationOwned: ownsAutomationRecord(s) })).map(s => s.id)),
     conversationMissing: claudeConversationGone,
   }
 }
@@ -7546,11 +7565,20 @@ function accountSwitchBlockedNotice(error) {
     'A session stopped at its usage limit can always be switched; otherwise wait for it to finish, or stop it with `/sab-kill`, then switch.'
 }
 
+// Plain wording for a login's launch state in /sab-account.
+function accountLaunchText(reason) {
+  return reason === 'running' ? 'checking now' : ['pending', 'stale'].includes(reason) ? 'not checked yet'
+    : reason === 'manual-only' ? 'legacy token, never moved to automatically'
+      : reason === 'no-start-yet' ? 'no session has started on it yet' : `check failed (${reason})`
+}
+
 // Plain wording for the account pool's wait reasons in /sab-account.
 function accountWaitingText(reason) {
   const [kind, ...rest] = String(reason || '').split(':'), detail = rest.join(':')
   return kind === 'no-capacity' ? 'no account in the group has capacity'
-    : kind === 'launch-check' ? `the target login's launch check is ${detail === 'running' ? 'running' : detail === 'pending' || detail === 'stale' ? 'still to run' : `failing (${detail})`}`
+    : kind === 'launch-check' ? `the target login ${detail === 'running' ? 'is being checked now' : detail === 'pending' || detail === 'stale' ? 'is still to be checked'
+      : detail === 'manual-only' ? 'is a legacy token, which SAB never moves sessions to by itself'
+        : detail === 'no-start-yet' ? 'has had no session start on it yet' : `fails its launch check (${detail})`}`
       : kind === 'halted' ? 'usage-limit moves are halted by an uncertain handover elsewhere'
         : kind === 'interrupted' ? 'an earlier handover here ended uncertain'
           : detail || kind.replace(/_/g, ' ')
@@ -7564,13 +7592,13 @@ async function postAccountPoolStatus(channel) {
     const windows = known?.windows?.map(w => `${Math.round(w.usedPercent)}% (${w.inactive ? 'unused window; reset not started' : `resets ${new Date(w.resetsAt).toISOString()}`})`).join(' · ') || 'unknown'
     const age = sample ? `${Math.max(0, Math.floor((Date.now() - sample.observedAt) / 1000))}s old` : 'not sampled'
     const reason = /^[a-z-]{1,20}$/.test(sample?.reason || '') ? ` (${sample.reason})` : ''
-    const launch = !account.launch ? '' : account.launch.ready ? ' · starts: checked' : ` · starts: ${account.launch.reason === 'running' ? 'checking now'
-      : ['pending', 'stale'].includes(account.launch.reason) ? 'not checked yet' : `check failed (${account.launch.reason})`}`
+    const launch = !account.launch ? '' : account.launch.ready ? ' · starts: checked' : ` · starts: ${accountLaunchText(account.launch.reason)}`
     return `• ${account.email}: ${sample?.status || 'unknown'}${reason} · ${known && known !== sample ? 'last known (not eligible): ' : ''}${windows} · ${age}${launch}`.slice(0, 2900)
   })
-  // Once the current account is out, the move goes by measured capacity.
-  const measured = info.measured && info.accounts.find(a => a.id === info.measured.accountId)
-  const selection = measured ? `moves to ${measured.email} (its own usage has room; the reservation estimate is spent)` : info.decision.reason
+  // The move the monitor would make: only to a login known to start, and by
+  // measured capacity once the current account is out.
+  const measured = info.move && info.accounts.find(a => a.id === info.move.accountId)
+  const selection = measured ? `moves to ${measured.email}${info.move.reason === 'measured-capacity' ? ' (its own usage has room; the reservation estimate is spent)' : ''}` : info.decision.reason
   const text = `*Account group: ${info.group.name}* · mode: ${info.mode}\n` +
     `Current: ${info.currentAccount?.email || 'unresolved legacy binding'}\n${rows.join('\n')}\n` +
     `Selection: ${selection}${info.decision.nextResetAt ? ` · next reset ${new Date(info.decision.nextResetAt).toISOString()}` : ''}.\n` +

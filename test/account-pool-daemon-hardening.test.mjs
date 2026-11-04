@@ -51,6 +51,15 @@ test('a held Claude turn that a usage limit ended at once is paused instead of r
   assert.match(calls.at(-1), /^post CWORK: ⏸️ Claude hit the usage limit on out@example\.test\. SAB paused this turn/)
 })
 
+test("held work at Claude's limit chooser is paused like the notice, for the handover to close the chooser", async () => {
+  const CHOOSER = ['⏺ Working on it', "  ⎿  You've hit your weekly limit · resets 8am", '', '  What do you want to do?', '',
+    '❯ 1. Stop and wait for limit to reset', '  2. Switch to usage credits', '', 'Enter to confirm · Esc to cancel'].join('\n')
+  assert.equal(claudeUsageLimitSurface(CHOOSER), 'menu')
+  const { result, session } = await pollerAtLimit({ pane: CHOOSER })
+  assert.equal(result, undefined)
+  assert.equal(session.usageLimitPause.accountId, 'acct-out')
+})
+
 test('a pause is announced once per half hour, however often the limit ends a turn', async () => {
   const notices = new Map()
   const first = await pollerAtLimit({ notices }), second = await pollerAtLimit({ notices })
@@ -59,19 +68,35 @@ test('a pause is announced once per half hour, however often the limit ends a tu
   assert.ok(second.session.usageLimitPause, 'but still recorded')
 })
 
-test('a limit-ended turn with nothing held simply ends; held work the pool cannot move yet keeps waiting, unreported', async () => {
+test('a limit-ended turn ends unless it is held work the pool can move, or Claude scheduled its own continuation of it', async () => {
   const free = await pollerAtLimit({ held: false })
   assert.equal(free.result, 'continued')
   assert.equal(free.p.sawSpinner, true, 'the limit counts as the turn having run, so the poller finalizes it')
   assert.equal(free.session.usageLimitPause, undefined)
-  for (const options of [{ exhausted: false }, { pending: true }, { dispatching: true }, { restartingNow: true }]) {
-    const { result, calls, p, session } = await pollerAtLimit(options)
-    assert.equal(result, undefined, `${JSON.stringify(options)}: the poller keeps watching this tick`)
-    assert.equal(p.sawSpinner, false, 'never finalized early: Claude continues it at the reset')
-    assert.equal(p.stopped, false)
-    assert.equal(session.usageLimitPause, undefined)
-    assert.deepEqual(calls, [])
+  // Held work the pool cannot move yet, which Claude says it continues by itself: wait, once announced.
+  const notices = new Map()
+  const waiting = await pollerAtLimit({ exhausted: false, notices })
+  assert.equal(waiting.result, undefined, 'the poller keeps watching')
+  assert.equal(waiting.p.stopped, false)
+  assert.equal(waiting.session.usageLimitPause, undefined)
+  assert.match(waiting.calls.at(-1), /^post CWORK: ⏳ Claude hit its usage limit and continues this turn by itself when the limit resets/)
+  assert.ok(!(await pollerAtLimit({ exhausted: false, notices })).calls.some(call => call.startsWith('post ')), 'announced once')
+  // No such promise (an older notice, or a cancelled continuation): the turn ends as it always did.
+  const OLD_NOTICE = ['⏺ Working on it', "  ⎿  You've hit your weekly limit · resets 8am", '', BOX, '❯ ', BOX, FOOTER].join('\n')
+  const ended = await pollerAtLimit({ exhausted: false, pane: OLD_NOTICE })
+  assert.equal(ended.result, 'continued')
+  assert.equal(ended.p.sawSpinner, true)
+  // A delivery still settling, or a dispatch, is never paused or held open here.
+  for (const options of [{ pending: true }, { dispatching: true }]) {
+    const unsettled = await pollerAtLimit(options)
+    assert.equal(unsettled.result, 'continued', JSON.stringify(options))
+    assert.equal(unsettled.session.usageLimitPause, undefined)
   }
+  // A handover already underway stops the poller itself: wait, never pause on top of it.
+  const handover = await pollerAtLimit({ restartingNow: true })
+  assert.equal(handover.result, undefined)
+  assert.equal(handover.session.usageLimitPause, undefined)
+  assert.deepEqual(handover.calls, [])
   const idle = await pollerAtLimit({ pane: IDLE_PANE })
   assert.equal(idle.result, 'continued')
   assert.equal(idle.p.sawSpinner, false, 'an idle pane without the limit proves nothing')
@@ -207,6 +232,8 @@ test('the daemon wires the launch check, the Mac login reader and the owner limi
   assert.match(daemon, /atUsageLimit: async session => Boolean\(session\.pid && pidAlive\(session\.pid\) && session\.tmux\) && \(Boolean\(session\.usageLimitPause\) \|\|\n\s*Boolean\(usageLimitSurface\(providerOf\(session\), await tmuxCapture\(session\.tmux\)\)\)\),/,
     'a dormant session is never at a limit, whatever marker it kept')
   assert.match(between("if (ev === 'SessionEnd') {", 'clearTeamInputReservation(session)'), /delete session\.usageLimitPause/)
+  assert.match(declaration('finalizeTurn'), /delete session\.usageLimitPause \/\/ a turn that completed is past any pause before it/)
+  assert.match(daemon, /holdsWork: session => holdsUsageLimitWork\(session, \{ automationOwned: ownsAutomationRecord\(session\) \}\),/)
   assert.match(daemon, /isProfileInactive: async \(provider, profile\) => \{\n\s*if \(provider === 'claude' && probingProfiles\.has\(profile\)\) return false/,
     'a renewal never runs on a profile a launch check is using')
   const boot = between('await recoverProviderSwitches()', 'startAutomationReconciler()')
@@ -218,8 +245,13 @@ test('the daemon wires the launch check, the Mac login reader and the owner limi
 test('/sab-account words the wait reasons and refusals plainly', () => {
   const text = new Function(`${declaration('accountWaitingText')}\n${declaration('accountSwitchBlockedNotice')}\nreturn { accountWaitingText, accountSwitchBlockedNotice }`)()
   assert.equal(text.accountWaitingText('no-capacity'), 'no account in the group has capacity')
-  assert.equal(text.accountWaitingText('launch-check:terms'), "the target login's launch check is failing (terms)")
-  assert.equal(text.accountWaitingText('launch-check:pending'), "the target login's launch check is still to run")
+  assert.equal(text.accountWaitingText('launch-check:terms'), 'the target login fails its launch check (terms)')
+  assert.equal(text.accountWaitingText('launch-check:pending'), 'the target login is still to be checked')
+  assert.equal(text.accountWaitingText('launch-check:manual-only'), 'the target login is a legacy token, which SAB never moves sessions to by itself')
+  const launch = new Function(`${declaration('accountLaunchText')}\nreturn accountLaunchText`)()
+  assert.equal(launch('no-start-yet'), 'no session has started on it yet', 'not a failed check')
+  assert.equal(launch('manual-only'), 'legacy token, never moved to automatically')
+  assert.equal(launch('terms'), 'check failed (terms)')
   assert.equal(text.accountWaitingText('blocked:question awaiting an answer'), 'question awaiting an answer')
   assert.match(text.accountSwitchBlockedNotice({ blockReason: 'turn in progress' }), /^❌ Can't switch accounts right now: turn in progress\. Nothing was changed\./)
 })

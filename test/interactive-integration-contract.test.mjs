@@ -360,5 +360,7 @@ test("a session's own usage-limit pause never blocks the handover or the resume 
     blockReason.indexOf('context.pausedSessionIds.delete(session.id)') < blockReason.indexOf('return bulkUpdateBlockReason('))
   const resume = /async function resumeSessionAfterLimit\([\s\S]*?\n\}\n/.exec(daemon)?.[0] || ''
   assert.match(resume, /context\.pausedSessionIds\.delete\(session\.id\)/)
-  assert.match(/function bulkUpdateContext\(\) \{[\s\S]*?\n\}/.exec(daemon)?.[0] || '', /pausedSessionIds: new Set\(Object\.values\(state\.sessions \|\| \{\}\)\.filter\(s => s\.usageLimitPause && s\.pid && pidAlive\(s\.pid\)\)/)
+  assert.match(/function bulkUpdateContext\(\) \{[\s\S]*?\n\}/.exec(daemon)?.[0] || '',
+    /pausedSessionIds: new Set\(Object\.values\(state\.sessions \|\| \{\}\)\.filter\(s => s\.usageLimitPause && s\.pid && pidAlive\(s\.pid\) &&\n\s*holdsUsageLimitWork\(s, \{ automationOwned: ownsAutomationRecord\(s\) \}\)\)/,
+    'a marker counts only while the session still holds the work it paused')
 })

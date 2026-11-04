@@ -475,10 +475,22 @@ capacity rather than the reservation estimate.
 session's own account exhausted and its turn visibly stopped at the limit (the
 pane's limit notice, or a pause marker), `/sab-account`, the account picker and
 `sab account pool switch` take the usage-limit path. So a session sitting at
-its limit can be switched without `/sab-kill` first. That path goes only where
-an automatic move could: a verified login known to start, never a legacy token.
-If it ends uncertain, only its own channel is fenced; automatic moves elsewhere
-carry on. Any other refusal names the safe-boundary rule it hit.
+its limit can be switched without `/sab-kill` first. For a session holding a
+team task, a team turn or an automation, that path goes only where an automatic
+move could: a verified login known to start, never a legacy token. A session
+holding nothing keeps the owner's ordinary choice. If the switch ends uncertain,
+only its own channel is fenced; automatic moves elsewhere carry on. Any other
+refusal names the safe-boundary rule it hit.
+
+**Claude turns that end at a limit.** A turn can end at a usage limit before
+the poller saw a spinner, with no Stop, in every pool mode. Held work on an
+account the pool measured exhausted is paused (a marker, a ⏸️ notice) for the
+handover or the reset to resume. Held work that Claude itself continues at the
+reset ("Continuing automatically at …") waits for that, with one notice, rather
+than being reported early. Any other limit-ended turn, including one whose
+continuation was cancelled, ends as it always did. A paused held turn counts as
+occupied for bulk updates and ordinary switches until a new turn, its
+SessionEnd, the handover or the resume ends the pause.
 
 **The Mac's own login.** Claude records which account the Mac's own login holds
 in `~/.claude.json`. SAB compares it with the account that lists `native-default`

@@ -360,7 +360,7 @@ test("an owner's switch at a limit goes only where an automatic move could: a ve
   await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'unchecked' }),
     error => error.blockReason === "SAB has not yet confirmed that spare@example.test's login starts")
   await assert.rejects(f.runtime.ownerSwitch(f.session, 'token', { requestId: 'legacy' }),
-    error => error.blockReason === 'a legacy token login cannot take held work at a usage limit')
+    error => error.blockReason === 'held work cannot move to a legacy token login')
   assert.equal(f.restarts.length, 0)
 })
 
@@ -410,8 +410,11 @@ test('a missed reading does not start a new wait episode or repeat its notice', 
   await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
   assert.equal(g.owner.length, 1)
   failing = true; g.advance(6 * 60000); await g.runtime.tick(); await settle()
-  failing = false; g.advance(6 * 60000); await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
-  assert.equal(g.owner.length, 1, 'still the same wait')
+  assert.equal(g.runtime.status('CMINE').waiting, null, 'the failed reading dropped the wait')
+  failing = false
+  for (let i = 0; i < 4; i++) { g.advance(4 * 60000); await g.runtime.tick(); await settle() }
+  assert.equal(g.runtime.status('CMINE').waiting, 'no-capacity', 'the wait came back with the next reading')
+  assert.equal(g.owner.length, 1, 'and is still the same episode')
 })
 
 test('the "no capacity" notice gives the time an account really regains capacity', async () => {
@@ -453,4 +456,60 @@ test('a Claude Mac-login mismatch says nothing about Codex\'s own native login',
   runtime.noteLaunch(codex)
   const account = runtime.inventory().registry.accounts.find(a => a.key === 'codex')
   assert.equal(state.accountPools.launchChecks[account.id]?.ok, true)
+})
+
+test("an owner's switch at a limit of a session that holds nothing keeps the ordinary choice", async () => {
+  const f = setup({ atUsageLimit: async () => true })
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  const result = await f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'idle-at-limit' })
+  assert.equal(result.status, 'committed', 'no launch evidence needed for a session holding nothing')
+  assert.equal(f.restarts[0].usageLimit, true)
+})
+
+test('an uncertain handover is reported before any capacity reason', async () => {
+  const f = setup({ quota: { busy: 100, spare: 10, token: 5 } })
+  f.state.accountPools = { schemaVersion: 1, observations: {}, bindings: {}, receipts: {}, proofs: {},
+    switches: { CMINE: { channelId: 'CMINE', sessionId: f.session.id, phase: 'interrupted', usageLimit: true, automatic: true, requestId: 'old' } } }
+  await f.runtime.tick()
+  assert.equal(f.runtime.status('CMINE').waiting, 'interrupted', 'not a launch-check wait')
+})
+
+test('/sab-account shows the move the monitor makes, not the unconfirmed account with more headroom', async () => {
+  const registry = compileAccountRegistry({ ...enrollment(), accounts: [...enrollment().accounts,
+    { key: 'third', provider: 'claude', email: 'third@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'third' }] }],
+  groups: [{ key: 'mine', name: 'Mine', members: ['busy', 'spare', 'token', 'third'], preferred: { claude: 'busy' } }] }, { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+  const f = setup({ quota: { busy: 100, spare: 10, token: 100, third: 40 }, readRegistry: () => registry })
+  const third = { id: 'native-third', channel: 'CTHIRD', cwd: '/t', tmux: 'sab-t', pid: null, model: 'opus', effort: 'max', launchFlags: '--dsp',
+    account: 'third', accountKind: 'claude-profile' }
+  f.state.sessions[third.id] = third; f.state.channels.CTHIRD = third.id
+  f.runtime.noteLaunch(third)
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare'); await f.runtime.refresh('third')
+  assert.equal(f.runtime.status('CMINE').move.accountId, f.account('third').id)
+})
+
+test('a launch check that fails differently is announced again, but not within six hours', async () => {
+  let reason = 'terms'
+  const f = setup({ probeLaunch: async account => account.key === 'spare' ? { ok: false, reason } : { ok: true } })
+  for (let i = 0; i < 3; i++) { await f.runtime.tick(); await settle() }
+  const failures = () => f.owner.filter(message => message.startsWith("⚠️ SAB couldn't start Claude"))
+  assert.equal(failures().length, 1)
+  reason = 'login'
+  f.advance(31 * 60000); await f.runtime.tick(); await settle()
+  assert.equal(failures().length, 1, 'a different failure within six hours stays quiet')
+  f.advance(6 * 3600000); await f.runtime.tick(); await settle()
+  assert.equal(failures().length, 2)
+  assert.match(failures()[1], /asked for a sign-in/)
+})
+
+test('only an account that could take the session counts toward the time capacity returns', async () => {
+  const registry = compileAccountRegistry({ ...enrollment(), accounts: [...enrollment().accounts,
+    { key: 'elsewhere', provider: 'claude', email: 'elsewhere@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'elsewhere' }],
+      allowedChannels: ['COTHER'] }],
+  groups: [{ key: 'mine', name: 'Mine', members: ['busy', 'spare', 'token', 'elsewhere'], preferred: { claude: 'busy' } }] }, { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+  const g = setup({ quota: undefined, readRegistry: () => registry, readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: g.at(),
+    identity: { email: account.email, principalId: account.id }, quota: {
+      seven_day: { utilization: 100, resets_at: new Date(g.at() + (account.key === 'elsewhere' ? 2 : account.key === 'spare' ? 50 : 96) * 3600000).toISOString() } } }) })
+  await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  const seconds = Number(/<!date\^(\d+)\^/.exec(g.owner[0])[1])
+  assert.ok(Math.abs(seconds * 1000 - (start + 50 * 3600000)) < 10 * 60000, 'an account allowlisted to other channels is not counted')
 })
