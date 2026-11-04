@@ -92,3 +92,54 @@ Then stop the daemon, return the live checkout to `v2.4.0`, run
 backup only when the newer state itself is known to be damaged.
 
 Never run the old and new daemons concurrently.
+
+## 2.5.1
+
+Version 2.5.1 is a compatible fix release from 2.5.0. The Slack manifest and
+hooks are unchanged, and no session state is migrated. It adds optional fields
+only: `session.teamPeerTurn`, `peerMessage` on a task report, and `origin` of
+kind `peer` on a task reply.
+
+What you will notice:
+
+- **Reports carry the answer.** A coordinator gets a Claude worker's final answer
+  in every generation of a task, so reports are longer and fewer tasks finish
+  `completed_with_warning`.
+- **Provider failures.** A provider failure the poller detects, such as an
+  overload Claude Code ends with no Stop, now fails the task in later generations
+  too, as it already did in the first. `sab team continue` recovers it.
+- **Messages from other Claude sessions.** A worker keeps its task when one
+  arrives. Until that turn ends or the coordinator speaks, gate changes and
+  completion are refused with `peer_turn_denied`, and the worker's replies carry
+  `origin` `peer` and wake no one.
+- **Sign-in notices.** The control channel now hears about every Claude login
+  whose renewal fails, including the Mac's own. A login that needs a new sign-in
+  reads `needs-login`, where it used to read `credential-unavailable`, and its
+  notice names the command to run.
+
+To upgrade:
+
+- Installations that follow `main` with the default self-update receive this code
+  within six hours. The version change makes that update run
+  `npm ci --omit=dev`, which also brings in the `@hono/node-server` fix.
+- To upgrade deliberately, follow the controlled upgrade above, and run
+  `npm ci --omit=dev` after the fast-forward because the lockfile moved.
+
+After the upgrade:
+
+- **A worker that already held a task.** It can keep reporting empty turns, with a
+  warning, until its coordinator next messages it, because 2.5.0 could leave its
+  transcript position behind the task's latest generation. Its answer stays unread
+  and reaches the channel once that message arrives, or with its next turn after
+  the task is released. A daemon restart while the worker is idle skips it, as it
+  does any unread text.
+- **The daemon log.** It moves to `~/.config/ccs/daemon.log` only when `install.sh`
+  runs with a daemon reload. A self-update leaves it where it is. A checkout on an
+  external disk needs that run if the LaunchAgent exits with code 78.
+
+To roll back, stop the daemon, return the live checkout to `v2.5.0`, run
+`npm ci --omit=dev` and start the daemon again. That brings back what 2.5.1 fixes,
+including the renewal that loses an idle Claude profile's sign-in after one
+refresh. A 2.5.0 daemon ignores the fields above, so a reply labelled `peer` reads
+as `worker`, and a report flagged for another session's message can be
+auto-released.
