@@ -6,6 +6,8 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [2.5.2] — 2026-11-04
+
 ### Fixed
 
 - SAB recognizes a Claude usage limit again in Claude Code 2.1.318, which ends
@@ -62,6 +64,8 @@ Notable changes to this project. Format based on
   kill `launchctl` with SIGPIPE, and that or a failed `lsof` ended the installer
   before its refusal. It changed nothing either way; now it says why it refuses.
   This was also the cause of occasional CI failures with no output.
+
+[2.5.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v2.5.2
 
 ## [2.5.1] — 2026-11-04
 
