@@ -20,6 +20,16 @@ Notable changes to this project. Format based on
     coordinator sees its reply, and that reply becomes the task's latest result.
   - Typed and pasted input, and Codex and Pi prompts, still fail or revoke as
     before.
+- A checkout on an external disk no longer stops the daemon from starting.
+  launchd opens the log file itself before it starts the daemon, and macOS can
+  refuse that on an external disk, so the LaunchAgent exited with code 78 and
+  retried every 10 seconds. `install.sh` now puts the log at
+  `~/.config/ccs/daemon.log`, the path the README already gave, instead of
+  `daemon.log` in the checkout.
+  - An existing install moves the next time `install.sh` runs with a daemon
+    reload. A `--no-daemon-reload` run leaves the live agent and its log alone,
+    and no longer prints a log path.
+  - The old `daemon.log` stays in the checkout, where Git ignores it.
 - Messages between Claude sessions no longer appear in a channel as terminal
   typing. Claude Code submits them as prompts, to an idle session and mid-turn
   alike, so the mirror posted them in full as `You (terminal)`. The mirror now
