@@ -126,7 +126,7 @@ function reportCoversCompletion(task, report, requiredGeneration = teamTaskWorkG
 }
 
 // The worker's answer: the first turn to end after it declared completion. A declaration
-// needs its gates clear and there is one per generation, so anything later in the generation
+// needs its gates clear, and reopening them withdraws it, so anything later in the generation
 // is a turn something else started, such as a provider notification. It never replaces this.
 function completionReport(task, requiredGeneration = teamTaskWorkGeneration(task)) {
   let answer = null
