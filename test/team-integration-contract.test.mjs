@@ -603,8 +603,8 @@ test('Claude interim streaming persists and reuses its exact transcript generati
     daemon.indexOf("if (ev === 'Stop')"),
   )
   assert.match(preTool,
-    /currentTeamTaskProviderTurn\(session, body\)[\s\S]*readNewAssistantText\(session, teamTaskTurn\)/,
-  'PreToolUse must stream only the exact provider work generation')
+    /interimTeamTaskProviderTurn\(state, session, body, observedAt\)[\s\S]*session\.teamActiveTaskId && !teamTaskTurn \? '' : readNewAssistantText\(session, teamTaskTurn\)/,
+  'PreToolUse must stream only the exact provider work generation, and never read a task it cannot place')
   assert.match(preTool,
     /claudeTranscriptOffsetTurn[\s\S]*saveStateNow\(state\)/,
   'the transcript generation at the advanced offset must survive daemon restart')

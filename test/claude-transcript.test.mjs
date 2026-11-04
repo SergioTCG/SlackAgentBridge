@@ -168,6 +168,24 @@ const QUOTING_RECORDS = Object.freeze({
     `<cross-session-message from="uds:/tmp/cc-socks/1234.sock">\n${envelope(id, generation)}\n</cross-session-message>`),
   'a background notification': (id, generation) => record('user',
     `<task-notification>\n<summary>Monitor event</summary>\n<event>${envelope(id, generation)}</event>\n</task-notification>`),
+  'a queued background notification': (id, generation) => JSON.stringify({
+    type: 'attachment',
+    attachment: {
+      type: 'queued_command',
+      prompt: `<task-notification>\n<summary>Monitor event</summary>\n<event>${envelope(id, generation)}</event>\n</task-notification>`,
+    },
+  }) + '\n',
+  'another session\'s message, queued': (id, generation) => JSON.stringify({
+    type: 'attachment',
+    attachment: {
+      type: 'queued_command',
+      prompt: `<cross-session-message from="uds:/tmp/cc-socks/1234.sock">\n${envelope(id, generation)}\n</cross-session-message>`,
+    },
+  }) + '\n',
+  'a meta queued command': (id, generation) => JSON.stringify({
+    type: 'attachment',
+    attachment: { type: 'queued_command', isMeta: true, prompt: envelope(id, generation) },
+  }) + '\n',
   'a compact summary': (id, generation) => JSON.stringify({
     type: 'user',
     isCompactSummary: true,
@@ -214,4 +232,42 @@ test('an assistant quoting a task envelope is output, not a delivery', () => {
     `${quote}\n\nDone.`)
   assert.equal(staleTeamTurnTranscriptPrefixBytes(transcript, { taskId: 'task_one', providerWorkGeneration: 1 }),
     Buffer.byteLength(transcript))
+})
+
+// A prompt that reaches a busy session, as Claude Code records it when it drains it.
+const queuedDelivery = (id, generation, prompt = `<pasted_content id="ca89">\n${envelope(id, generation)}\n</pasted_content id="ca89">`) => JSON.stringify({
+  type: 'attachment',
+  attachment: { type: 'queued_command', commandMode: 'prompt', prompt },
+}) + '\n'
+
+test('a queued delivery marks its generation', () => {
+  const transcript = delivery('task_one', 1) + record('assistant', 'First ask.') +
+    queuedDelivery('task_one', 2) + record('assistant', 'Follow-up.')
+  assert.deepEqual(teamTurnAssistantTranscript(transcript, { taskId: 'task_one', providerWorkGeneration: 2 }), {
+    text: 'Follow-up.',
+    consumedBytes: Buffer.byteLength(transcript),
+  })
+})
+
+test('a queued delivery ends the generation before it', () => {
+  const before = delivery('task_one', 1) + record('assistant', 'First ask.')
+  const transcript = before + queuedDelivery('task_one', 2) + record('assistant', 'Follow-up.')
+  assert.deepEqual(teamTurnAssistantTranscript(transcript, { taskId: 'task_one', providerWorkGeneration: 1 }), {
+    text: 'First ask.',
+    consumedBytes: Buffer.byteLength(before),
+  })
+  assert.equal(staleTeamTurnTranscriptPrefixBytes(transcript, { taskId: 'task_one', providerWorkGeneration: 1 }),
+    Buffer.byteLength(before))
+})
+
+test('a queued delivery in content blocks is read like one in a string', () => {
+  const blocks = [{ type: 'text', text: `<pasted_content id="ca89">\n${envelope('task_one', 2)}\n</pasted_content id="ca89">` }]
+  const transcript = queuedDelivery('task_one', 2, blocks) + record('assistant', 'Follow-up.')
+  assert.equal(teamTurnAssistantTranscript(transcript, { taskId: 'task_one', providerWorkGeneration: 2 }).text, 'Follow-up.')
+})
+
+test('other attachments are not deliveries', () => {
+  const other = JSON.stringify({ type: 'attachment', attachment: { type: 'file', prompt: envelope('task_other', 1) } }) + '\n'
+  const transcript = delivery('task_one', 1) + other + record('assistant', 'Still mine.')
+  assert.equal(teamTurnAssistantTranscript(transcript, { taskId: 'task_one', providerWorkGeneration: 1 }).text, 'Still mine.')
 })
