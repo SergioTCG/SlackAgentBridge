@@ -1,3 +1,4 @@
+import { isPeerMessagePrompt, isProviderInternalPrompt } from './providers.mjs'
 import { providerPromptTurnMarker } from './team-provider-turn.mjs'
 
 function transcriptMessageText(record) {
@@ -11,12 +12,16 @@ function transcriptMessageText(record) {
   }).filter(Boolean).join('\n')
 }
 
-// A task envelope marks a delivery only in a prompt the bridge submitted. Claude Code
-// records its own prompts as meta (a subagent's or another session's message, with its
-// full body), and those can quote an envelope without being one.
+// A task envelope marks a delivery only in a prompt the bridge submitted. Claude Code's
+// own records can quote one without being one: a meta record holds a subagent's or another
+// session's message in full, a notification can quote team output, and a compact summary
+// can quote the conversation. This refuses what the prompt hook refuses and leaves the rest
+// alone, so a new delivery wrapper can't hide a real boundary.
 function deliveredTeamTurnMarker(record) {
-  if (record?.type !== 'user' || record.isMeta === true) return null
-  return providerPromptTurnMarker(transcriptMessageText(record))
+  if (record?.type !== 'user' || record.isMeta === true || record.isCompactSummary === true) return null
+  const text = transcriptMessageText(record)
+  if (isProviderInternalPrompt('claude', text) || isPeerMessagePrompt('claude', text)) return null
+  return providerPromptTurnMarker(text)
 }
 
 function sameTeamTurn(marker, expected) {

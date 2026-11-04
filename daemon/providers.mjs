@@ -102,8 +102,9 @@ export const isSupersededHook = (event, storedPid, eventPid) =>
 // Three more report on this session's own work in the same way:
 // - `<agent-message>`: a message from this session's own subagent;
 // - `[Cross-session delivery notice]`: what became of a message this session sent;
-// - the prompt that resumes a turn when its usage limit resets. It has no envelope, so
-//   only its exact text identifies it. Other wording stays local input and fails visibly.
+// - the prompt it submits when a usage limit resets, telling the session to continue. It
+//   has no envelope, so only its exact text identifies it, and other wording stays local
+//   input and fails visibly. It can reach a session that has since moved on.
 const CLAUDE_INTERNAL_PROMPT = /^(?:<(?:task-notification|system-reminder)>|<agent-message(?:\s[^>]*)?>|\[Cross-session delivery notice\])/
 const CLAUDE_USAGE_LIMIT_RESET_PROMPT = 'Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.'
 export function isProviderInternalPrompt(provider, prompt) {
@@ -117,9 +118,10 @@ export function isProviderInternalPrompt(provider, prompt) {
 // envelope attribute is optional, so only the marker identifies it. Text that merely quotes
 // one, or pastes it inside `<pasted_content>`, is still someone's input. It isn't typing, so
 // the terminal mirror skips it, and a task envelope quoted in it is never a delivery. It is
-// deliberately not provider-internal: it counts as local input, failing a delegated task and
-// ending a team turn. Nothing marks a turn it starts, so if the task survived, that session
-// could steer the worker to complete it, and the turn's report could wake a coordinator.
+// deliberately not provider-internal: it counts as local input, failing a worker's active
+// delegated task and ending a team turn. Nothing marks a turn it starts, so if that task
+// survived, that session could steer the worker to complete it, and the turn's report could
+// wake a coordinator. A standing task stays bound, so that gap remains there.
 const CLAUDE_PEER_PROMPT = /^<cross-session-message(?:\s[^>]*)?>/
 export function isPeerMessagePrompt(provider, prompt) {
   return normalizeProvider(provider) === 'claude' &&

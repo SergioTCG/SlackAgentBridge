@@ -22,6 +22,7 @@ import {
 // persistence are recorded instead of performed.
 
 const LOCAL_REPLACEMENT = 'A local terminal prompt replaced the delegated worker turn.'
+const PEER_REPLACEMENT = 'A message from another Claude session replaced the delegated worker turn.'
 const CACHE_TTL_MS = 120_000
 const INCIDENT_DELAY_MS = 123_331
 
@@ -596,7 +597,7 @@ for (const [what, message] of Object.entries(ANOTHER_SESSION_PROMPTS)) {
     const task = await runningTask(bridge)
     await bridge.hook(message, { pasted: false, turnId: 'turn-lane' })
 
-    assert.deepEqual(bridge.effects.failures, [LOCAL_REPLACEMENT])
+    assert.deepEqual(bridge.effects.failures, [PEER_REPLACEMENT], 'the failure names what really happened')
     assert.equal(bridge.task(task.id).status, 'failed')
     assert.equal(bridge.worker.teamActiveTaskId, undefined, 'the worker no longer holds it, so its gates and completion are out of reach')
     assert.deepEqual(bridge.effects.mirrored, [])
@@ -611,7 +612,7 @@ for (const [what, message] of Object.entries(ANOTHER_SESSION_PROMPTS)) {
     })
     assert.equal(bridge.task(task.id).status, 'awaiting_release', 'precondition: the turn was reported')
     await bridge.hook(message, { pasted: false })
-    assert.deepEqual(bridge.effects.failures, [LOCAL_REPLACEMENT])
+    assert.deepEqual(bridge.effects.failures, [PEER_REPLACEMENT])
     assert.equal(bridge.task(task.id).status, 'failed')
     assert.equal(bridge.worker.teamActiveTaskId, undefined)
     assert.deepEqual(bridge.effects.mirrored, [])
@@ -734,11 +735,11 @@ test('a prompt that quotes a task envelope is never that task\'s delivery', asyn
   await own.hook(agentMessage(undefined, quotedTask), { pasted: false, turnId: 'turn-lane' })
   assertStillDelegated(own, ownTask.id, 1, 'a subagent quoting another task')
 
-  // Another session's message fails the task as local input, not as a task identity mismatch.
+  // Another session's message fails the task for what it is, not as a task identity mismatch.
   const peer = createBridge({ provider: 'claude' })
   await runningTask(peer)
   await peer.hook(peerMessage(undefined, quotedTask), { pasted: false, turnId: 'turn-lane' })
-  assert.deepEqual(peer.effects.failures, [LOCAL_REPLACEMENT])
+  assert.deepEqual(peer.effects.failures, [PEER_REPLACEMENT])
 
   // An exact copy of a coordinator message still in flight doesn't settle it.
   const bridge = createBridge({ provider: 'claude' })
@@ -754,11 +755,23 @@ test('a prompt that quotes a task envelope is never that task\'s delivery', asyn
   await bridge.hook(inFlight.prompt, { turnId: 'turn-lane' })
   assertStillDelegated(bridge, task.id, 2, 'the real delivery after the quote')
 
+  // From another session it's that session's input too, and fails the task as such.
   const quotingPeer = createBridge({ provider: 'claude' })
   const peerTask = await runningTask(quotingPeer)
   const stillFlying = quotingPeer.deliverMessage(peerTask.id, 'Continue with the core source.', { submitted: false })
   await quotingPeer.hook(peerMessage(undefined, stillFlying.prompt), { pasted: false, turnId: 'turn-lane' })
-  assert.notEqual(quotingPeer.task(peerTask.id).messages[0].deliveryStatus, 'delivered', 'another session can\'t settle it either')
+  assert.deepEqual(quotingPeer.effects.failures, [PEER_REPLACEMENT])
+  assert.deepEqual(quotingPeer.effects.reservations, ['provider'], 'it is its own provider input, not the delivery')
+})
+
+test('the usage limit reset prompt supersedes the pause and keeps the worker\'s task', async () => {
+  const bridge = createBridge({ provider: 'claude' })
+  const task = await runningTask(bridge)
+  bridge.worker.usageLimitPause = { at: bridge.now(), accountId: 'acct_test' }
+  await bridge.hook(USAGE_LIMIT_RESET, { pasted: false, turnId: 'turn-lane' })
+  assert.equal(bridge.worker.usageLimitPause, undefined, 'the turn is running again, so no handover may resume it')
+  assertStillDelegated(bridge, task.id, 1, 'after the reset')
+  assert.deepEqual(bridge.effects.pollerStarts.at(-1), 'sid-worker', 'and the working status follows it')
 })
 
 test('a provider notification keeps the task once state is reloaded, and touches no other session', async () => {

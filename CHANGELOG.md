@@ -16,15 +16,20 @@ Notable changes to this project. Format based on
 - A subagent's message to its parent and a delivery notice no longer fail a
   delegated task, or end a coordinator's team turn when they arrive mid-turn.
   - A task envelope quoted inside one is never treated as a delivery, in the
-    prompt hook or when reading the transcript.
+    prompt hook or when reading the transcript. The reader also ignores one quoted
+    in a background notification or a compact summary, which could stall that
+    task's output.
   - A turn one of these prompts starts on an idle worker reports like any later
     turn: the coordinator sees its reply, and that reply becomes the task's latest
     result, which a later release delivers.
-  - A message from another Claude session still fails the task and ends the team
-    turn, because nothing yet stops that session steering a worker to complete its
-    task. A task envelope quoted inside it is no longer treated as a delivery.
-  - Typed and pasted input, and Codex and Pi prompts, still fail or revoke as
-    before.
+  - A message from another Claude session still fails a worker's active task and
+    ends the team turn, because nothing yet stops that session steering a worker to
+    complete its task. The failure now names it instead of a terminal prompt. A
+    standing task stays bound, as before. A task envelope quoted inside it is no
+    longer treated as a delivery.
+  - Other typed and pasted input, and Codex and Pi prompts, still fail or revoke as
+    before. Typing one of these markers or the exact reset text at the start of a
+    prompt counts as a notification, as typing `<task-notification>` already does.
 - A checkout on an external disk no longer stops the daemon from starting.
   launchd opens the log file itself before it starts the daemon, and macOS can
   refuse that on an external disk, so the LaunchAgent exited with code 78 and

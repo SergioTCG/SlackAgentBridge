@@ -217,7 +217,7 @@ test('the prompt hook routes provider notifications through the shared guard', (
   assert.match(promptHook,
     /const localPromptEffect = unacknowledgedPromptTeamEffect\(\{\s*prompt: p, activeTaskId: session\.teamActiveTaskId, injected, automationEcho, providerInternal,\s*\}\)/)
   assert.match(promptHook,
-    /if \(localPromptEffect === 'fail_task'\) \{\s*await failTeamTaskForSession\(session, 'A local terminal prompt replaced the delegated worker turn\.'\)/)
+    /if \(localPromptEffect === 'fail_task'\) \{\s*await failTeamTaskForSession\(session, peerMessage\s*\? 'A message from another Claude session replaced the delegated worker turn\.'\s*: 'A local terminal prompt replaced the delegated worker turn\.'\)/)
   assert.match(promptHook,
     /else if \(localPromptEffect === 'revoke_turn'\) \{[\s\S]*?clearTeamTurn\(session\)\s*saveStateNow\(state\)/)
   // No second, unguarded path may fail the task or revoke the turn.

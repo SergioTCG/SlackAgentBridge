@@ -231,7 +231,9 @@ export function createPromptSubmitHandler({
         prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal,
       })
       if (localPromptEffect === 'fail_task') {
-        await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
+        await failTeamTaskForSession(session, peerMessage
+          ? 'A message from another Claude session replaced the delegated worker turn.'
+          : 'A local terminal prompt replaced the delegated worker turn.')
       } else if (localPromptEffect === 'revoke_turn') {
         // Local terminal input, uncorrelated prompts and another session's message
         // do not inherit a prior Slack owner's lateral team authority. Provider

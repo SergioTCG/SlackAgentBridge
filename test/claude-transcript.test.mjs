@@ -138,52 +138,80 @@ test('a new Claude generation does not inherit an earlier terminal failure', () 
   })
 })
 
-// Claude Code records its own prompts as meta, with the full body after a preamble.
-const metaPrompt = text => JSON.stringify({
-  type: 'user',
-  isMeta: true,
-  message: { role: 'user', content: text },
-}) + '\n'
 const delivery = (id, generation) => record('user', [
   `<pasted_content id="ca89">\n<sab-team-task id="${id}" generation="${generation}" source="coordinator">`,
   'Instruction.',
   '</sab-team-task>\n</pasted_content id="ca89">',
 ].join('\n'))
-const quoting = (id, generation) => metaPrompt([
-  'A subagent sent a message:',
-  '<agent-message from="a0123456789abcdef">',
-  `<sab-team-task id="${id}" generation="${generation}" source="coordinator">`,
-  'Quoted, not delivered.',
-  '</sab-team-task>',
-  '</agent-message>',
-].join('\n'))
+const envelope = (id, generation) =>
+  `<sab-team-task id="${id}" generation="${generation}" source="coordinator">\nQuoted, not delivered.\n</sab-team-task>`
 
-test('a provider prompt quoting another task does not end the current generation', () => {
-  const transcript = delivery('task_one', 1) + record('assistant', 'Before the message.') +
-    quoting('task_other', 1) + record('assistant', 'After the message.')
-  assert.deepEqual(teamTurnAssistantTranscript(transcript, {
-    taskId: 'task_one', providerWorkGeneration: 1,
-  }), {
-    text: 'Before the message.\n\nAfter the message.',
-    consumedBytes: Buffer.byteLength(transcript),
+// Claude Code's own records that can quote an envelope, in the shapes it writes them.
+const QUOTING_RECORDS = Object.freeze({
+  'a subagent message, recorded as meta': (id, generation) => JSON.stringify({
+    type: 'user',
+    isMeta: true,
+    message: {
+      role: 'user',
+      content: `Another Claude session sent a message while you were working:\n<agent-message from="a0123456789abcdef">\n${envelope(id, generation)}\n</agent-message>`,
+    },
+  }) + '\n',
+  'another session\'s message, recorded as meta': (id, generation) => JSON.stringify({
+    type: 'user',
+    isMeta: true,
+    message: {
+      role: 'user',
+      content: `Another Claude session sent a message:\n<cross-session-message from="uds:/tmp/cc-socks/1234.sock">\n${envelope(id, generation)}\n</cross-session-message>`,
+    },
+  }) + '\n',
+  'another session\'s message at the start of a record': (id, generation) => record('user',
+    `<cross-session-message from="uds:/tmp/cc-socks/1234.sock">\n${envelope(id, generation)}\n</cross-session-message>`),
+  'a background notification': (id, generation) => record('user',
+    `<task-notification>\n<summary>Monitor event</summary>\n<event>${envelope(id, generation)}</event>\n</task-notification>`),
+  'a compact summary': (id, generation) => JSON.stringify({
+    type: 'user',
+    isCompactSummary: true,
+    message: { role: 'user', content: `This session is being continued from a previous conversation.\n${envelope(id, generation)}` },
+  }) + '\n',
+})
+
+for (const [what, quoting] of Object.entries(QUOTING_RECORDS)) {
+  test(`${what} quoting another task does not end the current generation`, () => {
+    const transcript = delivery('task_one', 1) + record('assistant', 'Before the message.') +
+      quoting('task_other', 1) + record('assistant', 'After the message.')
+    assert.deepEqual(teamTurnAssistantTranscript(transcript, {
+      taskId: 'task_one', providerWorkGeneration: 1,
+    }), {
+      text: 'Before the message.\n\nAfter the message.',
+      consumedBytes: Buffer.byteLength(transcript),
+    })
   })
-})
 
-test('a provider prompt quoting a generation does not deliver it', () => {
-  const quoted = record('assistant', 'Earlier output.') + quoting('task_one', 2) + record('assistant', 'Not generation two.')
-  assert.equal(teamTurnAssistantTranscript(quoted, { taskId: 'task_one', providerWorkGeneration: 2 }), null)
+  test(`${what} quoting a generation does not deliver it`, () => {
+    const quoted = record('assistant', 'Earlier output.') + quoting('task_one', 2) + record('assistant', 'Not generation two.')
+    assert.equal(teamTurnAssistantTranscript(quoted, { taskId: 'task_one', providerWorkGeneration: 2 }), null)
 
-  const real = quoted + delivery('task_one', 2) + record('assistant', 'Generation two.')
-  assert.equal(teamTurnAssistantTranscript(real, { taskId: 'task_one', providerWorkGeneration: 2 }).text, 'Generation two.')
-})
+    const real = quoted + delivery('task_one', 2) + record('assistant', 'Generation two.')
+    assert.equal(teamTurnAssistantTranscript(real, { taskId: 'task_one', providerWorkGeneration: 2 }).text, 'Generation two.')
+  })
 
-test('a provider prompt quoting a later task is not a stale transcript boundary', () => {
-  const expected = { taskId: 'task_one', providerWorkGeneration: 1 }
-  const quoted = delivery('task_one', 1) + record('assistant', 'Old final.') +
-    quoting('task_other', 1) + record('assistant', 'Still old.')
-  assert.equal(staleTeamTurnTranscriptPrefixBytes(quoted, expected), Buffer.byteLength(quoted))
+  test(`${what} quoting a later task is not a stale transcript boundary`, () => {
+    const expected = { taskId: 'task_one', providerWorkGeneration: 1 }
+    const quoted = delivery('task_one', 1) + record('assistant', 'Old final.') +
+      quoting('task_other', 1) + record('assistant', 'Still old.')
+    assert.equal(staleTeamTurnTranscriptPrefixBytes(quoted, expected), Buffer.byteLength(quoted))
 
-  const prefix = delivery('task_one', 1) + record('assistant', 'Old final.') + quoting('task_other', 1)
-  const real = prefix + delivery('task_other', 1) + record('assistant', 'New work.')
-  assert.equal(staleTeamTurnTranscriptPrefixBytes(real, expected), Buffer.byteLength(prefix), 'a real delivery still is')
+    const prefix = delivery('task_one', 1) + record('assistant', 'Old final.') + quoting('task_other', 1)
+    const real = prefix + delivery('task_other', 1) + record('assistant', 'New work.')
+    assert.equal(staleTeamTurnTranscriptPrefixBytes(real, expected), Buffer.byteLength(prefix), 'a real delivery still is')
+  })
+}
+
+test('an assistant quoting a task envelope is output, not a delivery', () => {
+  const quote = `The task said:\n${envelope('task_other', 1)}`
+  const transcript = delivery('task_one', 1) + record('assistant', quote) + record('assistant', 'Done.')
+  assert.equal(teamTurnAssistantTranscript(transcript, { taskId: 'task_one', providerWorkGeneration: 1 }).text,
+    `${quote}\n\nDone.`)
+  assert.equal(staleTeamTurnTranscriptPrefixBytes(transcript, { taskId: 'task_one', providerWorkGeneration: 1 }),
+    Buffer.byteLength(transcript))
 })
