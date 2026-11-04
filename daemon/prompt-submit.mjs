@@ -228,26 +228,25 @@ export function createPromptSubmitHandler({
       await failTeamTaskForSession(session, 'The provider acknowledged a different delegated task identity.')
     } else {
       const localPromptEffect = unacknowledgedPromptTeamEffect({
-        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal, peerMessage,
+        prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal,
       })
       if (localPromptEffect === 'fail_task') {
         await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
       } else if (localPromptEffect === 'revoke_turn') {
-        // Local terminal input, uncorrelated prompts and peer traffic do not
-        // inherit a prior Slack owner's lateral team authority. Provider
+        // Local terminal input, uncorrelated prompts and another session's message
+        // do not inherit a prior Slack owner's lateral team authority. Provider
         // notifications that Claude Code submits mid-turn keep the current turn's
-        // authority. Peer traffic leaves a delegated task in place.
+        // authority.
         clearTeamTurn(session)
         saveStateNow(state)
-        if (session.teamActiveTaskId) log('team task kept through a peer prompt', session.teamActiveTaskId)
       }
     }
     // Mirror only genuine typing: skip the bridge's own input, recognized by its
     // injected-text record or, once that expires, its persisted team journal,
-    // peer messages and their delivery notices, and system-injected content
-    // (task notifications, reminders, echoes).
+    // another session's messages, and system-injected content (task notifications,
+    // subagent messages, delivery notices, reminders, echoes).
     if (p && !automationEcho && !injected && !acknowledgedTurn && !journaledDelivery && !standingAck &&
-        !peerMessage &&
+        !peerMessage && !providerInternal &&
         !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }

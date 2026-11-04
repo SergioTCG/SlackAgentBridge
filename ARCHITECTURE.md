@@ -505,10 +505,12 @@ native session, active channel mapping, and local node. Agent-visible peers and
 tasks contain aliases and authorized envelopes rather than raw destination
 IDs. A short-lived bounded `session.teamTurn` gives only a current
 owner-initiated coordinator turn dispatch and task-control authority;
-collaborator and local terminal turns clear it. Claude Code's own
-background-command, subagent, and Monitor notifications do not clear it. They
-are recognized by their leading provider envelope, even when Claude Code
-submits them mid-turn. A delegated worker task is
+collaborator and local terminal turns clear it, and so does a message from
+another Claude session, which also fails a delegated task. Claude Code's own
+background-command, subagent, and Monitor notifications do not clear it, nor do
+a subagent's message, a delivery notice or the usage-limit reset prompt. They
+are recognized by their leading provider envelope, or the reset prompt by its
+exact text, even when Claude Code submits them mid-turn. A delegated worker task is
 narrower still: only its exact assigned live session may reply. The coordinator
 may cancel/replace its exact queued tasks and send an audited message to the
 exact authoritative session owning an active task; every operation is bounded,

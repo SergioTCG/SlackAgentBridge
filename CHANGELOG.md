@@ -8,16 +8,21 @@ Notable changes to this project. Format based on
 
 ### Fixed
 
-- A message from another Claude session, a subagent's message to its parent or
-  a delivery notice no longer fails a worker's delegated team task. Claude Code
-  submits these as prompts and SAB treated them as local terminal input, so the
-  task failed while the worker kept working.
-  - A task envelope quoted inside one is never treated as a delivery, so quoting
-    another task no longer fails the worker either.
-  - They still end a coordinator's team turn, so another session can't borrow
-    its authority.
-  - A turn one of them starts on an idle worker reports like any later turn: the
-    coordinator sees its reply, and that reply becomes the task's latest result.
+- The prompt Claude Code submits when a usage limit resets no longer fails a
+  worker's delegated team task, ends a coordinator's team turn or appears in the
+  channel as terminal typing. The task failed while the worker carried on, as
+  "A local terminal prompt replaced the delegated worker turn". Only its exact
+  text is recognized.
+- A subagent's message to its parent and a delivery notice no longer fail a
+  delegated task, or end a coordinator's team turn when they arrive mid-turn.
+  - A task envelope quoted inside one is never treated as a delivery, in the
+    prompt hook or when reading the transcript.
+  - A turn one of these prompts starts on an idle worker reports like any later
+    turn: the coordinator sees its reply, and that reply becomes the task's latest
+    result, which a later release delivers.
+  - A message from another Claude session still fails the task and ends the team
+    turn, because nothing yet stops that session steering a worker to complete its
+    task. A task envelope quoted inside it is no longer treated as a delivery.
   - Typed and pasted input, and Codex and Pi prompts, still fail or revoke as
     before.
 - A checkout on an external disk no longer stops the daemon from starting.
