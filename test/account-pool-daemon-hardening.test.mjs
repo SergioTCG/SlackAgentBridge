@@ -237,7 +237,8 @@ test('a launch check terminal a restart cut short is removed at boot, and nothin
     removed.push(args.at(-1)); return { stdout: '' }
   } })
   assert.deepEqual(removed, ['ccs-probe-0123456789'])
-  assert.ok(daemon.indexOf('await removeOrphanedLaunchProbes()') < daemon.indexOf('await readoptStatus() // recover live status'))
+  const cleanup = daemon.indexOf('await removeOrphanedLaunchProbes()'), readopt = daemon.indexOf('await readoptStatus() // recover live status')
+  assert.ok(cleanup > 0 && readopt > cleanup, 'boot removes them, before re-adoption')
 })
 
 test('the bypass-permissions dialog is a blocker even though it shows the prompt footer\'s words and a cursor', async () => {
