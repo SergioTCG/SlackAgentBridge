@@ -6,6 +6,20 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- SAB recognizes a Claude usage limit again in Claude Code 2.1.318, which ends
+  the turn with a `⚠ Usage limit reached` banner under the input box instead of
+  a notice under the turn. SAB missed the banner, so in auto mode the usage-limit
+  handover treated the turn as still running and never ran, the turn was never
+  marked paused, and a daemon restart failed a delegated task whose idle worker
+  showed only the banner.
+  - The banner counts only while the input box is empty and no newer turn is
+    running. A reply that quotes it, or the warning before a limit, does not.
+  - SAB sends it no key: its Escape would only cancel Claude's own automatic
+    continuation.
+  - The notice and chooser of earlier Claude Code versions are read as before.
+
 ## [2.5.1] — 2026-11-04
 
 ### Fixed

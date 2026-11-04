@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { automationOwnsSession } from '../daemon/automation.mjs'
+import { claudeUsageLimitSurface } from '../daemon/claude-terminal.mjs'
+import { codexUsageLimitSurface } from '../daemon/codex-terminal.mjs'
+import { providerOf, targetStartupState } from '../daemon/providers.mjs'
+import { bulkUpdateBlockReason, holdsUsageLimitWork } from '../daemon/session-update.mjs'
 
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 
@@ -121,6 +126,57 @@ test('a turn a usage limit paused is resumed, never reported, failed or released
   assert.match(pause, /!session\.teamProviderTurnPending && heldTask\?\.status !== 'dispatching'/)
   // New sessions start on an account with capacity.
   assert.equal((daemon.match(/const launch = account \? null : newSessionLaunchAccount\(provider\)/g) || []).length, 2)
+})
+
+// Claude Code 2.1.318 ends a limited turn with this banner under the input box,
+// and with no Stop, so the turn's poller never saw a spinner.
+const BOX_RULE = '─'.repeat(80)
+const LIMIT_BANNER_PANE = [BOX_RULE, '❯ ', BOX_RULE, '  ⚠ Usage limit reached · limit resets 8am',
+  '    Continuing automatically at 8am · Esc to cancel', '', '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
+const IDLE_PANE = [BOX_RULE, '❯ ', BOX_RULE, '', '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
+const AsyncFunction = (async () => {}).constructor
+
+test('daemon re-adoption keeps a delegated task whose idle Claude worker shows the limit banner', async () => {
+  const start = daemon.indexOf("if (accountPools.mode === 'auto' && claudeUsageLimitSurface(pane) || accountMaintenanceHoldsTask(s)) {")
+  const release = "await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Claude Code')"
+  const end = daemon.indexOf(release, start)
+  assert.ok(start > 0 && end > start)
+  const branch = daemon.slice(start, end + release.length)
+  const readopt = async pane => {
+    const calls = []
+    const deps = { accountPools: { mode: 'auto' }, claudeUsageLimitSurface, accountMaintenanceHoldsTask: () => false, log: () => {},
+      teamTurnProof: { add: id => calls.push(`proof ${id}`) }, markBootLimitPause: s => calls.push(`pause ${s.id}`),
+      releaseIdleReadoptedTeamTaskIfStillIdle: async s => calls.push(`release ${s.id}`),
+      s: { id: 'worker', teamActiveTaskId: 'task' }, idleTask: { taskId: 'task' }, pane }
+    await new AsyncFunction('deps', `const { ${Object.keys(deps).join(', ')} } = deps\n${branch}`)(deps)
+    return calls
+  }
+  assert.deepEqual(await readopt(LIMIT_BANNER_PANE), ['proof worker', 'pause worker'])
+  assert.deepEqual(await readopt(IDLE_PANE), ['release worker'], 'an idle worker without the banner is still failed closed')
+})
+
+test('the limit banner lifts a stale Claude poller\'s busy hold and marks the pause', async () => {
+  const sources = ['usageLimitSurface', 'usageLimitBlockReason', 'markSessionLimitPause']
+    .map(name => new RegExp(`\\n(?:async )?function ${name}\\([\\s\\S]*?\\n\\}\\n`).exec(daemon)?.[0] || '')
+  assert.ok(sources.every(Boolean))
+  let pane = LIMIT_BANNER_PANE
+  const session = { id: 'worker', channel: 'CWORK', tmux: 'sab-worker', pid: 4242, teamActiveTaskId: 'task' }
+  const deps = { automationOwnsSession, bulkUpdateBlockReason, claudeUsageLimitSurface, codexUsageLimitSurface, holdsUsageLimitWork,
+    providerOf, targetStartupState, pidAlive: pid => pid === 4242, tmuxCapture: async () => pane, assertTaskMaintenance: () => {},
+    state: { automations: {}, teamTasks: {} }, teamMessageDeliveries: new Map(), ownsAutomationRecord: () => false, saveState: () => {},
+    bulkUpdateContext: () => ({ busySessionIds: new Set(['worker']), questionSessionIds: new Set(), pendingPermissionChannels: new Set(),
+      transitionChannels: new Set(), internalSessionIds: new Set(), restartingSessionIds: new Set(), wakingSessionIds: new Set() }) }
+  const { usageLimitBlockReason, markSessionLimitPause } = new Function('deps', `const { ${Object.keys(deps).join(', ')} } = deps\n` +
+    `${sources.join('\n')}\nreturn { usageLimitBlockReason, markSessionLimitPause }`)(deps)
+  const maintenance = { taskId: 'task' }
+  assert.equal(await usageLimitBlockReason(session, maintenance), null)
+  assert.equal(await markSessionLimitPause(session, 'account'), true)
+  assert.equal(session.usageLimitPause.accountId, 'account')
+  delete session.usageLimitPause
+  pane = IDLE_PANE
+  assert.equal(await usageLimitBlockReason(session, maintenance), 'turn in progress', 'without the banner the poller still holds it')
+  assert.equal(await markSessionLimitPause(session, 'account'), false)
+  assert.equal(session.usageLimitPause, undefined)
 })
 
 test('interactive actions are owner-only and revalidate exact authoritative bindings', () => {

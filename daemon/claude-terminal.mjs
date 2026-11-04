@@ -93,20 +93,41 @@ export function prepareClaudeTerminalDelivery(text, previousFailure = null, now 
 const USAGE_LIMIT_NOTICE = /^\s*⎿\s+.*?\b(?:You['’]ve hit your (?:[\w-]+ )*limit|(?:usage|session|weekly|daily|5-hour) limit reached)\b/i
 const USAGE_LIMIT_MENU_OPTION = /^\s*(?:❯\s*)?1\.\s+Stop and wait for (?:the )?limit to reset\s*$/i
 const USAGE_LIMIT_MENU_FOOTER = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$/i
+const CLAUDE_SPINNER = /[A-Za-z][A-Za-z ]*…\s*\(.*?\)/
+
+// Claude Code 2.1.318 instead ends the turn with a "⚠ … limit reached" banner
+// in the status area under the input box, and no notice row. A reply prints
+// above the box, so only a banner under the rule that closes the box counts,
+// and only while the box is empty (typed input is newer) and no spinner
+// follows the last `⏺` row (a newer turn runs). It is 'ended', never 'menu':
+// its Escape cancels only Claude's own automatic continuation.
+const USAGE_LIMIT_BANNER = /^\s*⚠\uFE0F?\s+(?:You['’]ve hit your (?:[\w-]+ )*limit|(?:[\w-]+ )?(?:usage|session|weekly|daily|5-hour) limit reached)\b/i
+const INPUT_BOX_RULE = /^\s*─{8,}\s*$/
+
+function claudeUsageLimitBanner(lines) {
+  const prompt = lines.findLastIndex(line => /^\s*❯/.test(line))
+  if (prompt < 0 || !/^\s*❯\s*$/.test(lines[prompt])) return null
+  // The next row that is not blank must close the box; anything else there
+  // is typed input.
+  const under = lines.slice(prompt + 1).filter(line => line.trim())
+  if (!INPUT_BOX_RULE.test(under[0] || '') || !under.slice(1).some(line => USAGE_LIMIT_BANNER.test(line))) return null
+  const output = lines.findLastIndex(line => /^\s*⏺/.test(line))
+  return lines.slice(output + 1).some(line => CLAUDE_SPINNER.test(line)) ? null : 'ended'
+}
 
 export function claudeUsageLimitSurface(pane) {
   const lines = String(pane || '').split('\n')
   let notice = -1
   for (let i = lines.length - 1; i >= 0 && notice < 0; i--) if (USAGE_LIMIT_NOTICE.test(lines[i])) notice = i
-  if (notice < 0) return null
+  if (notice < 0) return claudeUsageLimitBanner(lines)
   const later = lines.slice(notice + 1)
   const option = later.findIndex(line => USAGE_LIMIT_MENU_OPTION.test(line))
   const menu = option >= 0 && later.slice(option + 1).some(line => USAGE_LIMIT_MENU_FOOTER.test(line))
   // Newer output, a newer or typed prompt, or a live spinner means the limit
   // no longer describes the current turn. The chooser's own cursor row is not
-  // a prompt.
-  if (later.some(line => /^\s*⏺/.test(line) || /[A-Za-z][A-Za-z ]*…\s*\(.*?\)/.test(line) ||
-      /^\s*[>❯]\s*\S/.test(line) && !(menu && /^\s*❯\s*\d\.\s/.test(line)))) return null
+  // a prompt. A banner below may still show a newer limit.
+  if (later.some(line => /^\s*⏺/.test(line) || CLAUDE_SPINNER.test(line) ||
+      /^\s*[>❯]\s*\S/.test(line) && !(menu && /^\s*❯\s*\d\.\s/.test(line)))) return claudeUsageLimitBanner(lines)
   return menu ? 'menu' : 'ended'
 }
 

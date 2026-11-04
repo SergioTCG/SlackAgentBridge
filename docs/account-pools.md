@@ -432,7 +432,9 @@ the protections that exist for the held work itself:
   delegated task;
 - the ownership of a fully set-up automation;
 - the turn the limit ended. Claude can leave a poller that never saw a spinner,
-  but the pane shows the limit notice as its latest output.
+  but the pane shows the limit notice as its latest output. Claude Code 2.1.318
+  shows a `⚠ … limit reached` banner under the input box instead, which counts
+  while the box is empty and no turn is running.
 
 The account must be exhausted by its own measured usage. The reservation
 estimate for other sessions never moves held work. It hands the session over
@@ -457,6 +459,7 @@ return, a drain or a manual switch waits until the task is idle or reported.
 - **Chooser.** Claude's limit chooser ends with "Switch to usage credits", which
   is paid usage on the exhausted account. SAB sends it one Escape, which cancels
   it and cannot select any option, and refuses the handover if it stays open.
+  The 2.1.318 banner has no chooser and gets no key.
 - **Resume.** The same conversation resumes with the same model and effort. A
   1M-context launch keeps `[1m]` even when the status line reports the base id.
 - **Re-delivery.** If the limit interrupted a turn, SAB re-delivers it exactly
