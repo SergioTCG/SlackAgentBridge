@@ -125,6 +125,18 @@ function reportCoversCompletion(task, report, requiredGeneration = teamTaskWorkG
   return Number.isFinite(observedAt) && Number.isFinite(requestedAt) && observedAt >= requestedAt
 }
 
+// The worker's answer: the first turn to end after it declared completion. A declaration
+// needs its gates clear and there is one per generation, so anything later in the generation
+// is a turn something else started, such as a provider notification. It never replaces this.
+function completionReport(task, requiredGeneration = teamTaskWorkGeneration(task)) {
+  let answer = null
+  for (const report of task?.reports || []) {
+    if (!reportCoversCompletion(task, report, requiredGeneration)) continue
+    if (!answer || Date.parse(report.observedAt) < Date.parse(answer.observedAt)) answer = report
+  }
+  return answer
+}
+
 function providerObservationTime(observedAt, fallback) {
   const numeric = Number(observedAt)
   if (Number.isSafeInteger(numeric) && numeric > 0) return numeric
@@ -1243,8 +1255,10 @@ export function reportTeamTaskTurn(state, taskId, {
   task.warning = warning ? String(warning).slice(0, 2000) : null
   task.turnCompletedAt = nowIso(providerObservedAt)
   task.reports ||= []
+  // Reports age out of the journal, but the answer a release will deliver stays.
+  const answer = completionReport(task)
   while (task.reports.length >= TEAM_MAX_REPORTS) {
-    const delivered = task.reports.findIndex(item => item.deliveryStatus === 'delivered')
+    const delivered = task.reports.findIndex(item => item.deliveryStatus === 'delivered' && item !== answer)
     if (delivered < 0) break
     task.reports.splice(delivered, 1)
   }
@@ -1254,7 +1268,8 @@ export function reportTeamTaskTurn(state, taskId, {
     // the newest authoritative report without rejecting provider finalization.
     // A prior Slack request may have succeeded while its response was lost, so
     // updated content must never reuse that request's client_msg_id.
-    const displaced = task.reports.at(-1)
+    const displacedIndex = task.reports.length - (task.reports.at(-1) === answer ? 2 : 1)
+    const displaced = task.reports[displacedIndex]
     report = {
       id: randomId('report'),
       result: task.result,
@@ -1269,7 +1284,8 @@ export function reportTeamTaskTurn(state, taskId, {
       observedAt: nowIso(providerObservedAt),
       createdAt: nowIso(now),
     }
-    task.reports[task.reports.length - 1] = report
+    task.reports.splice(displacedIndex, 1)
+    task.reports.push(report)
   } else {
     report = {
       id: randomId('report'),
@@ -1329,7 +1345,7 @@ export function releaseTeamTask(state, taskId, {
   const standing = isStandingTeamTask(task)
   const releaseReport = standing
     ? { result: task.completionRequest.summary, warning: null }
-    : (task.reports || []).filter(report => reportCoversCompletion(task, report, requiredGeneration)).at(-1)
+    : completionReport(task, requiredGeneration)
   if (teamTaskProviderWorkGeneration(task) !== requiredGeneration ||
       Number(task.completionRequest.workGeneration) !== requiredGeneration || !releaseReport) {
     throw new TeamError('stale_task_report',
