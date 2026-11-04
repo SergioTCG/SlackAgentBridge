@@ -70,7 +70,7 @@ import {
   dismissClaudeUsageLimitMenu, prepareClaudeTerminalDelivery, resetClaudePollerEvidence, usageLimitResumeInput,
 } from './claude-terminal.mjs'
 import {
-  claudeAssistantTextSinceOffset, staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
+  claudeAssistantTextSinceOffset, notePeerMessageRecords, staleTeamTurnTranscriptPrefixBytes, teamTurnAssistantTranscript,
 } from './claude-transcript.mjs'
 import {
   nextStructuredQuestion, questionBlocks, questionFormFromPane, questionFormMatches, questionFormsFromHook,
@@ -127,7 +127,7 @@ import {
   takeDueTeamSchedules, teamDepth, clearTeamSchedules, pruneOrphanedTeamSchedules,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   PEER_TURN_WARNING, assertPeerTurnAllows, beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearPeerTurn, clearTeamTurn,
-  peerTurnAtStop, peerTurnHolds,
+  peerTurnAtStop, peerTurnHolds, settlePeerTurn, teamTaskPeerReportCoversCompletion,
   beginCoordinatorTaskMessageDelivery,
   completeCoordinatorTaskMessageDelivery, closeTeam,
   consumeCoordinatorDispatch, coordinatorPromptContext,
@@ -1893,7 +1893,6 @@ async function readoptStatus() {
       // lost offset from before the restart doesn't strand mirroring behind, and
       // clear any status left frozen by the restart.
       const idleTask = readoptedTeamTaskFingerprint(s)
-      clearPeerTurn(s) // idle: the turn that message touched is over
       try { const sz = fs.statSync(s.transcript).size; if (Number.isFinite(sz) && sz !== s.offset) { s.offset = sz; log('re-anchored idle session', s.id.slice(0, 8), 'offset→EOF') } } catch {}
       if (ts) { try { await web.chat.delete({ channel: s.channel, ts }) } catch {} }
       if (accountPools.mode === 'auto' && claudeUsageLimitSurface(pane) || accountMaintenanceHoldsTask(s)) {
@@ -1905,6 +1904,8 @@ async function readoptStatus() {
         markBootLimitPause(s)
         if (idleTask) log('re-adopted session paused for its account', s.id.slice(0, 8))
       } else if (idleTask) await releaseIdleReadoptedTeamTaskIfStillIdle(s, idleTask, 'Claude Code')
+      // Idle and not paused: the turn another session's message reached is over.
+      if (!s.usageLimitPause && !accountMaintenanceHoldsTask(s)) clearPeerTurn(s)
     }
   }
   saveState(state)
@@ -1949,6 +1950,7 @@ function discardStaleClaudeTeamTurnTranscript(session, expected) {
     buffer.toString('utf8'), expected, session.claudeTranscriptOffsetTurn,
   )
   if (consumed <= 0) return false
+  notePeerMessageRecords(session, buffer.subarray(0, consumed).toString('utf8'))
   session.offset = from + consumed
   session.claudeTranscriptOffsetTurn = {
     taskId: expected.taskId,
@@ -4966,6 +4968,8 @@ async function notifyTeamReplyFileFailure(task, reply) {
   saveStateNow(state)
 }
 
+const PEER_REPLY_LABEL = ' · _written after a message from another session; unverified_'
+
 async function performTeamReplyDelivery(task, reply) {
   if (reply.text && !reply.textSlackTs) {
     const gates = reply.kind === 'checkpoint'
@@ -4977,7 +4981,7 @@ async function performTeamReplyDelivery(task, reply) {
     // it is a suggestion to weigh, not owner instruction.
     const origin = reply.origin?.kind === 'collaborator'
       ? ` · _collaborator-originated${reply.origin.name ? ` (${String(reply.origin.name).replace(/[<>&*_`]/g, '')})` : ''}_`
-      : reply.origin?.kind === 'peer' ? ' · _written after a message from another session; unverified_' : ''
+      : reply.origin?.kind === 'peer' ? PEER_REPLY_LABEL : ''
     const message = await postSlackMessage(task.sourceChannel, {
       text: `📨 *Team update from* <#${task.targetChannel}> · \`${task.id}\`${origin}\n\n${reply.text}${gates}`,
       unfurl_links: false,
@@ -5011,7 +5015,7 @@ async function performTeamReplyDelivery(task, reply) {
   saveStateNow(state)
   try {
     await uploadTeamFiles(task.sourceChannel, reply.files,
-      `📎 Team reply for \`${task.id}\` from <#${task.targetChannel}>`)
+      `📎 Team reply for \`${task.id}\` from <#${task.targetChannel}>${reply.origin?.kind === 'peer' ? PEER_REPLY_LABEL : ''}`)
     reply.fileDeliveryStatus = 'uploaded'
     saveStateNow(state)
     return true
@@ -5724,12 +5728,12 @@ async function reconcileTeamTasks() {
         } else if (task.status === 'awaiting_release' && teamAutoRelease(state.teams?.[task.teamId]) &&
             teamTaskReleaseReady(task)) {
           await autoReleaseTeamTask(task)
-        } else if (task.status === 'dispatching' && task.replies?.length) {
+        } else if (task.status === 'dispatching' && task.replies?.some(reply => reply.origin?.kind !== 'peer')) {
           // A reply already journaled by the exact authenticated worker proves
           // the delegated prompt was accepted even when Codex omitted its
           // UserPromptSubmit hook. This also heals reply/task pairs written by
           // an older daemon before this acceptance rule existed.
-          const firstReplyAt = Date.parse(task.replies[0]?.createdAt || '')
+          const firstReplyAt = Date.parse(task.replies.find(reply => reply.origin?.kind !== 'peer')?.createdAt || '')
           markTeamTaskRunning(state, task.id, { now: Number.isFinite(firstReplyAt) ? firstReplyAt : now })
           saveStateNow(state)
           await updateTeamTaskAudit(task).catch(error =>
@@ -5860,7 +5864,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
       return false
     }
     const revokedTurn = clearTeamTurn(session)
-    const endedPeerTurn = clearPeerTurn(session)
+    const endedPeerTurn = settlePeerTurn(session)
     if (revokedTurn || endedPeerTurn) saveStateNow(state)
     else saveState(state)
     return false
@@ -5880,7 +5884,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
       return false
     }
     peerTurn = peerTurnAtStop(session, task)
-    clearPeerTurn(session)
+    settlePeerTurn(session)
     const revokedTurn = clearTeamTurn(session)
     if (peerTurn === 'started') {
       // Another session's message started this turn, so it isn't the task's work: it reports
@@ -5891,13 +5895,14 @@ async function finishTeamTaskForSession(session, result, error = null, {
       saveStateNow(state)
       return true
     }
-    if (error) {
+    // A turn another session's message reached can't fail the task by what it ends with.
+    if (error && !peerTurn) {
       failTeamTask(state, task.id, error)
     } else {
-      const reportWarning = warning || (
+      const reportWarning = warning || (peerTurn ? PEER_TURN_WARNING : null) || (
         !finalText && teamTaskCompletionPolicy(task) !== LEGACY_COMPLETION_POLICY
           ? 'The provider turn ended without a stable final response.'
-          : peerTurn === 'joined' ? PEER_TURN_WARNING : null
+          : null
       )
       const reported = reportTeamTaskTurn(state, task.id, {
         targetSessionId: session.id,
@@ -5906,6 +5911,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
         providerWorkGeneration: expectedTeamTaskTurn?.providerWorkGeneration ?? null,
         reportKey,
         observedAt,
+        peerMessage: Boolean(peerTurn),
       })
       if (reported.stale) return false
       if (!reported.created) {
@@ -5933,8 +5939,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
     const report = task.reports?.at(-1)
     if (report) await ensureTeamReportDelivery(task, report).catch(failure =>
       log('team turn report delivery deferred', task.id, String(failure?.message || failure)))
-    // Another session's message reached this turn, so the coordinator decides.
-    if (!peerTurn) await autoReleaseTeamTask(task)
+    await autoReleaseTeamTask(task)
   }
   if (!session.teamActiveTaskId || teamTaskTurnOwnsCurrentLifecycle(session, expectedTeamTaskTurn)) {
     teamTurnProof.delete(session.id)
@@ -7786,7 +7791,7 @@ const autoReleaseRequestId = task =>
 async function autoReleaseTeamTask(task) {
   const team = task && state.teams?.[task.teamId]
   if (!team || team.closedAt || !teamAutoRelease(team) || !teamTaskReleaseReady(task) ||
-      taskMaintenancePending(state, task)) return false
+      teamTaskPeerReportCoversCompletion(task) || taskMaintenancePending(state, task)) return false
   const target = state.sessions?.[task.targetSessionId]
   if (!target || target.channel !== task.targetChannel || state.channels?.[task.targetChannel] !== target.id ||
       boundTeamTaskIdFor(target, task) !== task.id) return false

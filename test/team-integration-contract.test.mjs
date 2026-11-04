@@ -78,7 +78,7 @@ test('team lifecycle recovery cannot rebind, lose finals, or fence a worker inde
   assert.match(daemon, /TEAM_RESTART_PROOF_GRACE_MS/)
   assert.match(daemon, /no live-turn proof returned/)
   assert.match(daemon, /exceeded its seven-day lifetime/)
-  assert.match(daemon, /task\.status === 'dispatching' && task\.replies\?\.length[\s\S]*markTeamTaskRunning\(state, task\.id/)
+  assert.match(daemon, /task\.status === 'dispatching' && task\.replies\?\.some\(reply => reply\.origin\?\.kind !== 'peer'\)[\s\S]*markTeamTaskRunning\(state, task\.id/)
   assert.match(daemon, /const workerProof = !isStandingTeamTask\(task\) && \(appended\.accepted[\s\S]*session\.teamActiveTaskId === task\.id[\s\S]*recordTeamWorkerProof\(session, task\)/)
   assert.match(daemon, /const startCodexStatus = !isStandingTeamTask\(task\) && recordTeamWorkerProof\(session, task\)[\s\S]*saveStateNow\(state\)[\s\S]*updateTeamTaskAudit\(task\)/)
   assert.match(daemon, /target\.teamActiveTaskId !== task\.id/)

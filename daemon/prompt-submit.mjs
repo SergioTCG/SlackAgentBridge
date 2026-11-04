@@ -145,8 +145,9 @@ export function createPromptSubmitHandler({
         activeTurn.taskId === acknowledgedTurn.taskId &&
         activeTurn.providerWorkGeneration === acknowledgedTurn.providerWorkGeneration &&
         teamTaskTurnOwnsCurrentLifecycle(session, acknowledgedTurn))
-      // The coordinator has spoken, so the turn is its work again.
-      clearPeerTurn(session)
+      // The coordinator has spoken, so the turn is its work again. Only a new delivery
+      // counts: a worker pasting an accepted envelope back to itself proves nothing.
+      if (injected || pendingPromptTeamTurn) clearPeerTurn(session)
       // Codex Stop/App Server completion can race the Slack audit below. Start
       // and persist its lifecycle now so that finalization may clear this exact
       // turn. A delayed prompt hook must not recreate a final already claimed,
@@ -241,10 +242,7 @@ export function createPromptSubmitHandler({
         // notifications that Claude Code submits mid-turn keep the current turn's
         // authority. Another session's message also marks the turn it touched.
         clearTeamTurn(session)
-        if (peerMessage && markPeerTurn(state, session)) {
-          log('team peer turn marked', session.teamPeerTurn.taskIds.join(','),
-            session.teamPeerTurn.joinedRunningTurn ? 'joined' : 'started')
-        }
+        if (peerMessage && markPeerTurn(session)) log('team peer turn marked', session.teamPeerTurn.taskIds.join(','))
         saveStateNow(state)
       }
     }

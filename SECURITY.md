@@ -434,10 +434,12 @@ Slack when its scope or progress is no longer appropriate.
   delivery notices, are not mirrored as terminal typing. The recipient's own
   reply is mirrored like any other, and it can repeat what the message said.
   Channel members see that reply. A message from another session ends the current
-  team turn, and the turn it touches can't change gates or declare completion. Its
+  team turn, and the turn it reaches can't change gates or declare completion. Its
   replies wake no one, and a turn it started reports nothing. The mark ends with that
   turn, so a later turn could still act on what the message said, as it could on
-  anything else the worker has read. A lost hook leaves that turn unmarked.
+  anything else the worker has read. A lost hook leaves that turn unmarked. This limits
+  what a message can do through the bridge; it doesn't stop a worker's model acting on
+  one with its other tools.
 - Treat artifact requests as deliberate data egress. Review collaborator access
   before asking an agent to send generated files containing proprietary data.
 

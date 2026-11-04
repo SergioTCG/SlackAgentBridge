@@ -174,6 +174,7 @@ function createBridge({ provider = 'codex', start = Date.parse('2026-10-07T13:00
 // A running delegated task whose start prompt was acknowledged normally.
 async function runningTask(bridge, { turnId = 'turn-lane' } = {}) {
   const { task, prompt } = bridge.dispatchTask('Implement the core storage source for lane 3.')
+  bridge.taskPrompt = prompt
   bridge.advance(1500)
   await bridge.hook(prompt, { turnId })
   assert.equal(bridge.task(task.id).status, 'running', 'precondition: the task start was acknowledged')
@@ -599,8 +600,13 @@ for (const [what, message] of Object.entries(ANOTHER_SESSION_PROMPTS)) {
     assertStillDelegated(bridge, task.id, 1, what)
     assert.equal(JSON.stringify(bridge.worker.teamProviderTurn), journalBefore, 'the delegated turn journal is untouched')
     assert.deepEqual(bridge.worker.teamPeerTurn.taskIds, [task.id])
-    assert.equal(bridge.worker.teamPeerTurn.joinedRunningTurn, true)
-    assert.ok(bridge.effects.logs.some(line => line === `team peer turn marked ${task.id} joined`), 'the operator can see it happened')
+    assert.equal(bridge.worker.teamPeerTurn.awaiting, 1)
+    assert.equal(bridge.worker.teamPeerTurn.seen, null, 'only the transcript says which turn it reached')
+    assert.ok(bridge.effects.logs.some(line => line === `team peer turn marked ${task.id}`), 'the operator can see it happened')
+
+    // A worker pasting the accepted envelope back to itself proves nothing.
+    await bridge.hook(bridge.taskPrompt, { turnId: 'turn-lane' })
+    assert.deepEqual(bridge.worker.teamPeerTurn.taskIds, [task.id], 'the replay does not lift the mark')
 
     // The coordinator's next message is recognized as the same exact work, and lifts the mark.
     const delivered = bridge.deliverMessage(task.id, 'Confirmed, carry on.')
@@ -629,7 +635,7 @@ for (const [what, message] of Object.entries(ANOTHER_SESSION_PROMPTS)) {
     assert.equal(bridge.task(task.id).error ?? null, null)
     assert.equal(bridge.worker.teamActiveTaskId, task.id)
     assert.equal(JSON.stringify(bridge.task(task.id).completionRequest), declared, 'readiness is not invalidated')
-    assert.equal(bridge.worker.teamPeerTurn.joinedRunningTurn, false)
+    assert.deepEqual(bridge.worker.teamPeerTurn.taskIds, [task.id])
     assert.deepEqual(bridge.effects.mirrored, [])
   })
 
@@ -638,7 +644,7 @@ for (const [what, message] of Object.entries(ANOTHER_SESSION_PROMPTS)) {
     const { task, prompt } = bridge.dispatchTask('Implement the core storage source for lane 3.')
     await bridge.hook(message, { pasted: false })
     assert.deepEqual(bridge.effects.failures, [])
-    assert.equal(bridge.worker.teamPeerTurn.joinedRunningTurn, false, 'a dispatching task has no running turn to join')
+    assert.deepEqual(bridge.worker.teamPeerTurn.taskIds, [task.id])
 
     bridge.advance(1500)
     await bridge.hook(prompt, { turnId: 'turn-lane' })
@@ -685,17 +691,16 @@ for (const [what, message] of Object.entries(ANOTHER_SESSION_PROMPTS)) {
     assert.equal(JSON.stringify(bridge.state.sessions['sid-other']), otherBefore, 'another session keeps its state and authority')
   })
 
-  test(`a second ${what.replace(/^an? /, '')} in the turn doesn't change what the first found`, async () => {
+  test(`a second ${what.replace(/^an? /, '')} is counted, so the mark outlasts the turn the first one reached`, async () => {
     const bridge = createBridge({ provider: 'claude' })
     const task = await runningTask(bridge)
     await bridge.hook(message, { pasted: false, turnId: 'turn-lane' })
-    const first = JSON.stringify(bridge.worker.teamPeerTurn)
-    reportTeamTaskTurn(bridge.state, task.id, {
-      targetSessionId: 'sid-worker', result: 'Reported meanwhile.', providerWorkGeneration: 1,
-      reportKey: 'claude:turn-1', now: bridge.now(),
-    })
+    const at = bridge.worker.teamPeerTurn.at
+    bridge.advance(1000)
     await bridge.hook(message, { pasted: false, turnId: 'turn-lane' })
-    assert.equal(JSON.stringify(bridge.worker.teamPeerTurn), first)
+    assert.equal(bridge.worker.teamPeerTurn.awaiting, 2)
+    assert.equal(bridge.worker.teamPeerTurn.at, at)
+    assert.deepEqual(bridge.worker.teamPeerTurn.taskIds, [task.id])
   })
 }
 
@@ -834,7 +839,7 @@ test('a prompt that quotes a task envelope is never that task\'s delivery', asyn
   assert.deepEqual(quotingPeer.effects.reservations, ['provider'], 'it is its own provider input, not the delivery')
   assert.equal(JSON.stringify(quotingPeer.worker.teamProviderTurnPending), stillPending)
   assert.notEqual(quotingPeer.task(peerTask.id).messages[0].deliveryStatus, 'delivered')
-  assert.equal(quotingPeer.worker.teamPeerTurn.joinedRunningTurn, true, 'the mark stands')
+  assert.deepEqual(quotingPeer.worker.teamPeerTurn.taskIds, [peerTask.id], 'the mark stands')
 })
 
 test('the usage limit reset prompt supersedes the pause and keeps the worker\'s task', async () => {

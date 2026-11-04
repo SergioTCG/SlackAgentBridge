@@ -9,14 +9,17 @@ Notable changes to this project. Format based on
 ### Fixed
 
 - A message from another Claude session no longer fails a worker's delegated team
-  task, and can no longer steer one. The turn it touches is marked until that turn
-  ends or the coordinator or owner speaks, for exclusive and standing tasks alike.
-  - That turn can't change gates or declare completion, and its replies are labelled
-    and wake no one.
+  task, and the turn it reaches can't move that task, exclusive or standing. The
+  session is marked from when the message arrives until that turn ends or the
+  coordinator speaks, and the transcript says which turn it reached.
+  - That turn can't change gates or declare completion, its replies are labelled and
+    wake no one, and a provider failure in it doesn't fail the task.
   - If the message started the turn, the turn ends with no report, so it can't change
     the task's result or wake a coordinator.
-  - If it joined a turn already working on the task, that work still reports, with a
-    warning, and isn't auto-released.
+  - If it joined a turn already running, that work still reports, with a warning, and
+    isn't auto-released.
+  - A later turn can still act on what the message said, as on anything else the
+    worker has read.
   - It still ends a coordinator's team turn, it still isn't mirrored, and a task
     envelope quoted inside it is never treated as a delivery.
 - A Claude worker's final answer now reaches its channel and the coordinator's
@@ -50,13 +53,7 @@ Notable changes to this project. Format based on
     task's output.
   - A turn one of these prompts starts on an idle worker reports like any later
     turn: the coordinator sees its reply, and that reply becomes the task's latest
-    result, which a later release delivers.
     result until release.
-  - A message from another Claude session still fails a worker's active task and
-    ends the team turn, because nothing yet stops that session steering a worker to
-    complete its task. The failure now names it instead of a terminal prompt. A
-    standing task stays bound, as before. A task envelope quoted inside it is no
-    longer treated as a delivery.
   - Other typed and pasted input, and Codex and Pi prompts, still fail or revoke as
     before. Typing one of these markers or the exact reset text at the start of a
     prompt counts as a notification, as typing `<task-notification>` already does.

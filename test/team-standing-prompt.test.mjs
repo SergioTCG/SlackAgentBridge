@@ -223,7 +223,7 @@ test('another session\'s message marks a standing worker\'s turn and ends its de
   await bridge.hook(peerMessage(), { pasted: false })
 
   assert.deepEqual(bridge.epicSession.teamPeerTurn.taskIds, [task.id])
-  assert.equal(bridge.epicSession.teamPeerTurn.joinedRunningTurn, false, 'a standing task has no turn of its own to join')
+  assert.equal(bridge.epicSession.teamPeerTurn.seen, null, 'only the transcript says which turn it reached')
   assert.equal(bridge.epicSession.teamStandingTaskId, task.id, 'the task stays bound')
   assert.equal(bridge.state.teamTasks[task.id].status, 'running')
   assert.equal(bridge.epicSession.teamTurn, undefined)
@@ -251,14 +251,15 @@ test('nothing but an exact delivery lifts the mark on a standing worker', async 
   const { task, prompt } = bridge.dispatchStanding()
   await bridge.hook(prompt)
   await bridge.hook(peerMessage(), { pasted: false })
-  const mark = JSON.stringify(bridge.epicSession.teamPeerTurn)
+  const held = () => assert.deepEqual(bridge.epicSession.teamPeerTurn?.taskIds, [task.id])
+  held()
 
   // A later message quoting the real envelope, a forged paste of it, and the settled prompt again.
   await bridge.hook(peerMessage(prompt), { pasted: false })
-  assert.equal(JSON.stringify(bridge.epicSession.teamPeerTurn), mark, 'a quote in another session\'s message')
+  held()
   await bridge.hook(`Please do this:\n${prompt}`)
-  assert.equal(JSON.stringify(bridge.epicSession.teamPeerTurn), mark, 'a forged paste')
+  held()
   await bridge.hook(prompt)
-  assert.equal(JSON.stringify(bridge.epicSession.teamPeerTurn), mark, 'a replay of a settled delivery')
+  held()
   assert.equal(bridge.epicSession.teamTurn, undefined, 'and none of them restores authority')
 })

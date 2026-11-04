@@ -332,16 +332,21 @@ the worker declared completion, so such a turn can't replace the worker's answer
 A message from another Claude session ends the current team turn, so that session
 cannot borrow the authority, but it never replaces a worker's delegated turn. It is
 not mirrored as terminal typing, and a task envelope quoted inside it is never a
-delivery. The turn it touches is marked until that turn ends or the coordinator or
-owner speaks, whether the task is exclusive or standing:
+delivery. The session is marked from when the message arrives until the turn it
+reaches ends or the coordinator speaks. An owner message lifts it too, on a standing
+worker; an exclusive worker takes none. The transcript records which turn the message
+reached, so a turn ending just as it arrives keeps its report. While marked, for
+exclusive and standing tasks alike:
 
-- It cannot change gates or declare completion. The worker gets an error saying why.
-- Its replies are labelled and wake no one.
-- If the message started the turn, the turn ends with no report: no new result, no
-  continuation event, and a provider failure leaves the task alone.
-- If the message joined a turn already working on the task, that work still reports,
-  with a warning, and is not auto-released. The coordinator can message the worker to
-  confirm it, which is what a declaration refused in that turn needs too.
+- Gates and completion are refused, with an error saying why.
+- Replies are labelled and wake no one.
+- A provider failure doesn't fail the task.
+
+If the message started the turn, the turn ends with no report: no new result and no
+continuation event. If it joined a turn already running, that work still reports, with
+a warning, and is not auto-released. The coordinator can release it or message the
+worker, which is also what a refused declaration needs. A later turn can still act on
+what the message said, as on anything else the worker has read.
 
 ## Agent-facing CLI
 

@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import { isPeerMessagePrompt, isProviderInternalPrompt } from './providers.mjs'
+import { notePeerTurnRecord } from './teams.mjs'
 import { providerPromptTurnMarker } from './team-provider-turn.mjs'
 
 function transcriptMessageText(record) {
@@ -32,6 +33,51 @@ function deliveredTeamTurnMarker(record) {
   const text = submittedPromptText(record)
   if (!text || isProviderInternalPrompt('claude', text) || isPeerMessagePrompt('claude', text)) return null
   return providerPromptTurnMarker(text)
+}
+
+// Another session's message has a record of its own: a user record when it started a turn,
+// under a first line Claude Code writes, and a queued command when it joined one.
+function peerMessageRecordKind(record) {
+  if (record?.type === 'user' && record.isMeta === true) {
+    return /^[^\n]*\n<cross-session-message[\s>]/.test(transcriptMessageText(record)) ? 'started' : null
+  }
+  const attachment = record?.type === 'attachment' ? record.attachment : null
+  if (attachment?.type !== 'queued_command' || attachment.isMeta === true) return null
+  return isPeerMessagePrompt('claude', transcriptMessageText({ message: { content: attachment.prompt } })) ? 'joined' : null
+}
+
+const mentionsPeerMessage = (session, text) =>
+  Boolean(session?.teamPeerTurn) && text.includes('cross-session-message')
+
+// A message can start a turn while the previous turn's Stop is still reading, so the unread
+// bytes hold both. Stop at its record, so that each turn gets its own text and the mark
+// reaches the turn that read the message. Nothing changes unless a mark is waiting.
+function beforePeerStartedTurn(session, text) {
+  if (!mentionsPeerMessage(session, text)) return text
+  let cursor = 0
+  let wroteText = false
+  while (cursor < text.length) {
+    const newline = text.indexOf('\n', cursor)
+    if (newline < 0) break
+    let record = null
+    try { record = JSON.parse(text.slice(cursor, newline)) } catch {}
+    if (wroteText && peerMessageRecordKind(record) === 'started') return text.slice(0, cursor)
+    if (record?.type === 'assistant' && transcriptMessageText(record).trim()) wroteText = true
+    cursor = newline + 1
+  }
+  return text
+}
+
+// Tell the mark about every message record a read has just passed.
+export function notePeerMessageRecords(session, text) {
+  if (!mentionsPeerMessage(session, text)) return
+  for (const line of text.split('\n')) {
+    if (!line) continue
+    let record = null
+    try { record = JSON.parse(line) } catch { continue }
+    const kind = peerMessageRecordKind(record)
+    if (kind) notePeerTurnRecord(session, kind)
+  }
 }
 
 function sameTeamTurn(marker, expected) {
@@ -137,7 +183,7 @@ export function claudeAssistantTextSinceOffset(session, advance = false, expecte
   const str = buf.toString('utf8')
   const lastNl = str.lastIndexOf('\n')
   if (lastNl < 0) return '' // no complete line yet; wait for more
-  const complete = str.slice(0, lastNl + 1)
+  const complete = beforePeerStartedTurn(session, str.slice(0, lastNl + 1))
   if (expectedTeamTurn) {
     const selected = teamTurnAssistantTranscript(
       complete, expectedTeamTurn, session.claudeTranscriptOffsetTurn,
@@ -150,6 +196,7 @@ export function claudeAssistantTextSinceOffset(session, advance = false, expecte
           providerWorkGeneration: expectedTeamTurn.providerWorkGeneration,
         }
         if (selected.skippedText) onSkipped?.(selected.skippedText)
+        notePeerMessageRecords(session, Buffer.from(complete, 'utf8').subarray(0, selected.consumedBytes).toString('utf8'))
       }
       return selected.text
     }
@@ -158,9 +205,12 @@ export function claudeAssistantTextSinceOffset(session, advance = false, expecte
     // unbounded read which could attribute another generation's output.
     if (session.claudeTranscriptOffsetTurn) return ''
   }
-  if (advance) session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
+  if (advance) {
+    session.offset = from + Buffer.byteLength(complete, 'utf8')
+    notePeerMessageRecords(session, complete)
+  }
   const out = []
-  for (const line of str.slice(0, lastNl).split('\n')) {
+  for (const line of complete.split('\n')) {
     if (!line.trim()) continue
     let rec
     try { rec = JSON.parse(line) } catch { continue }
