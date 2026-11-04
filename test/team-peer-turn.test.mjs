@@ -4,8 +4,8 @@ import fs from 'node:fs'
 
 import {
   PEER_TURN_WARNING, addTeamWorker, appendTeamTaskReply, assertPeerTurnAllows, claimTeamTaskForSession, clearPeerTurn,
-  createTeam, createTeamTask, markPeerTurn, markTeamTaskRunning, notePeerTurnRecord, peerTurnAtStop, peerTurnHolds,
-  publicTeamReply, reportTeamTaskTurn, requestTeamTaskCompletion, settlePeerTurn, teamTaskPeerReportCoversCompletion,
+  createTeam, createTeamTask, markPeerTurn, markTeamTaskRunning, notePeerTurnOwnWork, notePeerTurnRecord, peerTurnHolds,
+  publicTeamReply, reportTeamTaskTurn, requestTeamTaskCompletion, takePeerTurn, teamTaskPeerReportCoversCompletion,
   teamTaskReleaseReady,
 } from '../daemon/teams.mjs'
 
@@ -58,7 +58,8 @@ test('the mark refuses from the moment it is set, before the transcript says whi
   const { session, task } = worker()
   markPeerTurn(session)
   assert.equal(peerTurnHolds(session, task), true)
-  assert.equal(peerTurnAtStop(session, task), null, 'no Stop owes it anything yet')
+  assert.equal(takePeerTurn(session), null, 'no turn\'s end owes it anything yet')
+  assert.equal(peerTurnHolds(session, task), true, 'and it stays')
   assert.throws(() => assertPeerTurnAllows(session, task, 'declare this task complete'),
     error => error.code === 'peer_turn_denied')
 })
@@ -68,30 +69,58 @@ test('the first record decides what the turn is, and each record is counted', ()
   markPeerTurn(session)
   markPeerTurn(session)
   assert.equal(notePeerTurnRecord(session, 'started'), true)
-  assert.equal(peerTurnAtStop(session, task), 'started')
+  assert.equal(session.teamPeerTurn.seen, 'started')
   notePeerTurnRecord(session, 'joined')
-  assert.equal(peerTurnAtStop(session, task), 'started', 'a later message joining does not change it')
+  assert.equal(session.teamPeerTurn.seen, 'started', 'a later message joining does not change it')
   assert.equal(session.teamPeerTurn.awaiting, 0)
   notePeerTurnRecord(session, 'joined')
   assert.equal(session.teamPeerTurn.awaiting, 0, 'never below zero')
   assert.equal(notePeerTurnRecord({}, 'joined'), false, 'no mark, nothing to note')
+  assert.deepEqual(takePeerTurn(session), { kind: 'started', taskIds: [task.id] })
 })
 
-test('a Stop settles the mark only when the message reached its turn', () => {
-  const { session, task } = worker()
-  assert.equal(settlePeerTurn(session), false, 'no mark')
+test('the session\'s own work turns a started turn into a joined one, and nothing else', () => {
+  const { session } = worker()
+  notePeerTurnOwnWork(session)
+  assert.equal(session.teamPeerTurn, undefined, 'no mark to change')
   markPeerTurn(session)
-  assert.equal(settlePeerTurn(session), false, 'the message has not reached this turn')
+  notePeerTurnOwnWork(session)
+  assert.equal(session.teamPeerTurn.seen, null, 'unseen stays unseen')
+  notePeerTurnRecord(session, 'started')
+  notePeerTurnOwnWork(session)
+  assert.equal(session.teamPeerTurn.seen, 'joined')
+})
+
+test('a turn\'s end takes the mark only when the message reached that turn', () => {
+  const { session, task } = worker()
+  assert.equal(takePeerTurn(session), null, 'no mark')
+  assert.equal(takePeerTurn(null), null)
+  markPeerTurn(session)
+  assert.equal(takePeerTurn(session), null, 'the message has not reached this turn')
   assert.equal(peerTurnHolds(session, task), true)
+  assert.equal(takePeerTurn(session), null, 'nor the next, so it was lost')
+  assert.equal(peerTurnHolds(session, task), false)
+
+  // Once a message reaches its turn, the next gets a fresh allowance.
+  markPeerTurn(session)
+  markPeerTurn(session)
+  assert.equal(takePeerTurn(session), null)
+  notePeerTurnRecord(session, 'joined')
+  assert.equal(takePeerTurn(session).kind, 'joined')
+  assert.equal(takePeerTurn(session), null)
+  assert.equal(peerTurnHolds(session, task), true, 'one turn can end just as the next message arrives')
+  clearPeerTurn(session)
+
+  markPeerTurn(session)
 
   notePeerTurnRecord(session, 'joined')
-  assert.equal(settlePeerTurn(session), true)
+  assert.deepEqual(takePeerTurn(session), { kind: 'joined', taskIds: [task.id] })
   assert.equal(Object.hasOwn(session, 'teamPeerTurn'), false)
 
   markPeerTurn(session)
   markPeerTurn(session)
   notePeerTurnRecord(session, 'started')
-  assert.equal(settlePeerTurn(session), true)
+  assert.equal(takePeerTurn(session).kind, 'started')
   assert.equal(session.teamPeerTurn.seen, null, 'another message on its way keeps the mark')
   assert.equal(session.teamPeerTurn.awaiting, 1)
   assert.equal(peerTurnHolds(session, task), true)
@@ -100,12 +129,10 @@ test('a Stop settles the mark only when the message reached its turn', () => {
 test('the mark covers only the tasks it names', () => {
   const { session, task } = worker()
   markPeerTurn(session)
-  notePeerTurnRecord(session, 'started')
   assert.equal(peerTurnHolds(session, task), true)
   assert.equal(peerTurnHolds(session, { id: 'task_other' }), false)
   assert.equal(peerTurnHolds({}, task), false)
   assert.equal(peerTurnHolds(session, null), false)
-  assert.equal(peerTurnAtStop(session, { id: 'task_other' }), null)
   assert.doesNotThrow(() => assertPeerTurnAllows(session, { id: 'task_other' }, 'declare this task complete'))
 })
 
@@ -119,6 +146,7 @@ test('a marked turn is refused with a reason the worker can act on', () => {
     assert.match(error.message, /another Claude session/)
     assert.match(error.message, /declare this task complete/)
     assert.match(error.message, /sab team reply/)
+    assert.match(error.message, /when it next checks/, 'it says that a labelled reply wakes no one')
     assert.match(error.message, /coordinator lifts this/)
     assert.doesNotMatch(error.message, /later turn/, 'it does not advertise a way around the mark')
     return true
@@ -237,9 +265,17 @@ test('the worker service refuses gates and completion in a marked turn, and labe
   assert.ok(complete.indexOf('assertPeerTurnAllows') < complete.indexOf('requestTeamTaskCompletion('), 'before it is recorded')
 })
 
-test('a Stop follows what the transcript says about its turn', () => {
+test('a turn\'s end follows what the transcript says, taken before anything can yield', () => {
+  const claudeFinal = /async function finalizeTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(claudeFinal, /stopObservedAt: reportObservedAt/, 'a Stop reads only up to a later turn')
+  const read = claudeFinal.indexOf('readNewAssistantText(session, teamTaskTurn')
+  const take = claudeFinal.indexOf('const peerTurn = takePeerTurn(session)')
+  const firstAwaitAfterRead = claudeFinal.indexOf('await ', read)
+  assert.ok(read > 0 && take > read && take < firstAwaitAfterRead, 'right after the read, before any await')
+  assert.match(claudeFinal, /expectedTeamTaskTurn: teamTaskTurn, reportKey, observedAt: reportObservedAt, peerTurn,/)
+
   const finish = between('async function finishTeamTaskForSession(', 'async function finishTeamTaskWithWarningForSession(')
-  assert.match(finish, /peerTurn = peerTurnAtStop\(session, task\)\s*settlePeerTurn\(session\)/)
+  assert.match(finish, /peerTurn = takenPeerTurn\?\.taskIds\.includes\(task\.id\) \? takenPeerTurn\.kind : null/)
   const started = finish.indexOf("if (peerTurn === 'started') {")
   assert.ok(started > 0)
   assert.match(finish.slice(started, finish.indexOf('return true', started)), /saveStateNow\(state\)/)
@@ -250,9 +286,7 @@ test('a Stop follows what the transcript says about its turn', () => {
   assert.match(finish, /warning \|\| \(peerTurn \? PEER_TURN_WARNING : null\) \|\|/, 'and is never reported without its warning')
   assert.match(finish, /peerMessage: Boolean\(peerTurn\),/)
   assert.match(PEER_TURN_WARNING, /another Claude session/)
-
-  // A session holding only a standing task reaches the branch with no bound provider turn.
-  assert.match(finish, /const endedPeerTurn = settlePeerTurn\(session\)\s*if \(revokedTurn \|\| endedPeerTurn\) saveStateNow\(state\)/)
+  assert.doesNotMatch(PEER_TURN_WARNING, /could not declare/, 'a turn may have declared before the message arrived')
 })
 
 test('auto-release refuses a completion such a report covers, on every path', () => {

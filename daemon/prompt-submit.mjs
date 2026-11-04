@@ -122,6 +122,14 @@ export function createPromptSubmitHandler({
       promptTurn: promptTeamTurn, prompt: deliveredPrompt,
       isTaskEnvelope: Boolean(teamTaskId && teamTaskId === promptTeamTurn?.taskId),
     })
+    // The coordinator has spoken, so the turn is its work again. Only a new delivery counts: a
+    // worker pasting an accepted envelope back to itself proves nothing, and a collaborator's
+    // injected text never starts with the envelope. A standing delivery can settle before its
+    // hook arrives, so the record of what the bridge just submitted is what proves it.
+    const coordinatorSpoke = (acknowledgedTurn && (injected || pendingPromptTeamTurn)) || standingAck ||
+      (injected && session.teamStandingTaskId && promptTeamTurn?.taskId === session.teamStandingTaskId &&
+        /^<sab-team-(?:task|message)\b/.test(deliveredPrompt.trimStart()))
+    if (coordinatorSpoke && clearPeerTurn(session)) saveStateNow(state)
     let acknowledgedCoordinatorMessage = null
     if (acknowledgedTurn) {
       // An uncertain tmux delivery may leave only the pending generation for
@@ -145,9 +153,6 @@ export function createPromptSubmitHandler({
         activeTurn.taskId === acknowledgedTurn.taskId &&
         activeTurn.providerWorkGeneration === acknowledgedTurn.providerWorkGeneration &&
         teamTaskTurnOwnsCurrentLifecycle(session, acknowledgedTurn))
-      // The coordinator has spoken, so the turn is its work again. Only a new delivery
-      // counts: a worker pasting an accepted envelope back to itself proves nothing.
-      if (injected || pendingPromptTeamTurn) clearPeerTurn(session)
       // Codex Stop/App Server completion can race the Slack audit below. Start
       // and persist its lifecycle now so that finalization may clear this exact
       // turn. A delayed prompt hook must not recreate a final already claimed,
@@ -201,7 +206,6 @@ export function createPromptSubmitHandler({
         // Authority re-attaches only where the attempt's own fence was
         // released (an uncertain write). An owner, collaborator or
         // continuation turn is never converted into a delegated one.
-        if (clearPeerTurn(session)) saveStateNow(state)
         const ownTeam = coordinatedTeamForChannel(state, session.channel)
         if (ownTeam && !session.teamTurn) {
           beginDelegatedTeamTurn(session, { teamId: ownTeam.id, sourceTaskId: standingAck.task.id })

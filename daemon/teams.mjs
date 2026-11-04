@@ -92,8 +92,8 @@ export const boundTeamTaskIdFor = (session, task) =>
 // The prompt hook marks the session as soon as the message arrives, which can be before the
 // turn in progress ends. Only the transcript says which turn the message reached, so the
 // reader records that when it passes the message's own record: a user record means the
-// message started that turn, a queued command that it joined one already running. A Stop
-// settles the mark only once that has happened, so a turn ending just as a message arrives
+// message started that turn, a queued command that it joined one already running. A turn's
+// end takes the mark only once that has happened, so a turn ending just as a message arrives
 // keeps its report and leaves the mark for the turn that reads it. The mark ends with that
 // turn, or when the coordinator or owner speaks, so a message can't stall a worker whose
 // coordinator is waiting on it.
@@ -116,6 +116,11 @@ export function notePeerTurnRecord(session, kind) {
   return true
 }
 
+// The session's own work reached a turn the message started, so that turn is real work too.
+export function notePeerTurnOwnWork(session) {
+  if (session?.teamPeerTurn?.seen === 'started') session.teamPeerTurn.seen = 'joined'
+}
+
 export function clearPeerTurn(session) {
   if (!session || !Object.hasOwn(session, 'teamPeerTurn')) return false
   delete session.teamPeerTurn
@@ -128,26 +133,33 @@ export const peerTurnHolds = (session, task) =>
 export function assertPeerTurnAllows(session, task, action) {
   if (!peerTurnHolds(session, task)) return
   throw new TeamError('peer_turn_denied',
-    `A message from another Claude session reached this worker, so this turn cannot ${action}. ` +
-    'Use `sab team reply` to tell the coordinator what you need. A message from the coordinator lifts this.', 403)
+    `A message from another Claude session reached this worker, so it cannot ${action} for now. ` +
+    'Tell the coordinator with `sab team reply`, which it sees when it next checks. A message from the coordinator lifts this.', 403)
 }
 
-// How a provider turn ending now relates to a message from another session, if it does.
-export function peerTurnAtStop(session, task) {
-  return peerTurnHolds(session, task) ? session.teamPeerTurn.seen || null : null
-}
-
-// A Stop ended the turn the message reached. Another message on its way keeps the mark for its own turn.
-export function settlePeerTurn(session) {
+// A provider turn ended: what the transcript says it was, if a message reached it. Another
+// message on its way keeps the mark for its own turn. Called right after the turn's final read,
+// before anything can yield to the next turn's reads.
+export function takePeerTurn(session) {
   const mark = session?.teamPeerTurn
-  if (!mark?.seen) return false
-  if (mark.awaiting > 0) mark.seen = null
-  else delete session.teamPeerTurn
-  return true
+  if (!mark) return null
+  if (!mark.seen) {
+    // One turn can end just as the message arrives. By the end of the next, its record must
+    // have appeared, so the message was lost and a mark held for it would stall the worker.
+    mark.endsWithoutRecord = (mark.endsWithoutRecord || 0) + 1
+    if (mark.endsWithoutRecord >= 2) delete session.teamPeerTurn
+    return null
+  }
+  const taken = { kind: mark.seen, taskIds: [...mark.taskIds] }
+  if (mark.awaiting > 0) {
+    mark.seen = null
+    mark.endsWithoutRecord = 0
+  } else delete session.teamPeerTurn
+  return taken
 }
 
-export const PEER_TURN_WARNING = 'A message from another Claude session reached this worker during this turn, ' +
-  'so the turn could not change gates or declare completion. Message the worker to confirm anything here.'
+export const PEER_TURN_WARNING = 'A message from another Claude session reached this worker during this turn. ' +
+  'Its gates and completion were locked from then on. Message the worker to confirm anything here.'
 
 // Authenticated standing-task activity extends its lifetime; it never shortens.
 function renewStandingTask(task, now) {

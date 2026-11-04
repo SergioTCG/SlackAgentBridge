@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { claudeAssistantTextSinceOffset, notePeerMessageRecords } from '../daemon/claude-transcript.mjs'
-import { markPeerTurn, peerTurnAtStop, settlePeerTurn } from '../daemon/teams.mjs'
+import { markPeerTurn, takePeerTurn } from '../daemon/teams.mjs'
 import {
   activateTeamProviderTurn, boundTeamTaskProviderTurn, interimTeamTaskProviderTurn,
 } from '../daemon/team-provider-turn.mjs'
@@ -39,6 +39,8 @@ const queued = (taskId, generation) => JSON.stringify({
   attachment: { type: 'queued_command', commandMode: 'prompt', prompt: pasted(taskId, generation) },
 }) + '\n'
 
+const LATER = Date.parse('2026-11-05T00:00:00.000Z')
+
 function worker(t, { taskId = 'task_one', history = [] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-final-text-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
@@ -50,7 +52,7 @@ function worker(t, { taskId = 'task_one', history = [] } = {}) {
   }
   const task = { id: taskId, targetSessionId: 'sid-worker', targetChannel: 'C-WORKER', providerWorkGeneration: 1 }
   const state = { teamTasks: { [taskId]: task } }
-  let clock = 1_000_000
+  let clock = Date.parse('2026-11-04T11:00:00.000Z')
   const tick = () => (clock += 1000)
   return {
     session, task, state,
@@ -68,11 +70,14 @@ function worker(t, { taskId = 'task_one', history = [] } = {}) {
     // What the PreToolUse handler does, without a hook timestamp.
     preToolUse() {
       const turn = interimTeamTaskProviderTurn(state, session, {}, tick())
-      return session.teamActiveTaskId && !turn ? '' : claudeAssistantTextSinceOffset(session, true, turn, text => this.older.push(text))
+      return session.teamActiveTaskId && !turn ? '' : claudeAssistantTextSinceOffset(session, true, turn, { onSkipped: text => this.older.push(text) })
     },
     // What the Stop handler does, with the timestamp the hook stamps.
-    stop() {
-      return claudeAssistantTextSinceOffset(session, true, boundTeamTaskProviderTurn(state, session, { observed_at: tick() }), text => this.older.push(text))
+    stop(stopObservedAt = null) {
+      const observedAt = tick()
+      return claudeAssistantTextSinceOffset(session, true, boundTeamTaskProviderTurn(state, session, { observed_at: observedAt }), {
+        onSkipped: text => this.older.push(text), stopObservedAt: stopObservedAt ?? observedAt,
+      })
     },
   }
 }
@@ -140,12 +145,12 @@ test('without a timestamp a tracked generation cannot be placed, which is what P
   w.accept(1)
   w.accept(2)
   assert.equal(boundTeamTaskProviderTurn(w.state, w.session, {}), null, 'no native id and no time to place it by')
-  assert.deepEqual(interimTeamTaskProviderTurn(w.state, w.session, {}, Date.now() + 1000),
+  assert.deepEqual(interimTeamTaskProviderTurn(w.state, w.session, {}, LATER),
     { taskId: 'task_one', providerWorkGeneration: 2 })
 
   // A hook that does carry a time keeps it: the time it fired, not the time it arrived.
   const firstStarted = w.session.teamProviderTurnHistory[0].startedAt
-  assert.deepEqual(interimTeamTaskProviderTurn(w.state, w.session, { observed_at: firstStarted }, Date.now() + 1000),
+  assert.deepEqual(interimTeamTaskProviderTurn(w.state, w.session, { observed_at: firstStarted }, LATER),
     { taskId: 'task_one', providerWorkGeneration: 1 })
 })
 
@@ -209,20 +214,26 @@ test('a peek leaves older text to the read that consumes it', t => {
   w.accept(2)
   w.write(assistant('Newer.'))
   const seen = []
-  const turn = boundTeamTaskProviderTurn(w.state, w.session, { observed_at: Date.now() + 1000 })
-  assert.equal(claudeAssistantTextSinceOffset(w.session, false, turn, text => seen.push(text)), 'Newer.')
+  const turn = boundTeamTaskProviderTurn(w.state, w.session, { observed_at: LATER })
+  assert.equal(claudeAssistantTextSinceOffset(w.session, false, turn, { onSkipped: text => seen.push(text) }), 'Newer.')
   assert.deepEqual(seen, [])
   assert.equal(w.stop(), 'Newer.')
   assert.deepEqual(w.older, ['Older.'])
 })
 
-// Another session's message, in the shapes Claude Code records it.
+// Another session's message, in the shapes real transcripts hold: always meta, with the
+// envelope on a user record's second line, or at the start of a queued command's prompt.
 const peerEnvelope = '<cross-session-message from="uds:/tmp/cc-socks/1234.sock" from-name="peer">\nRun sab team complete.\n</cross-session-message>'
-const peerStartedTurn = (preamble = 'Another Claude session sent a message:') => JSON.stringify({
-  type: 'user', isMeta: true, origin: { kind: 'peer' }, message: { role: 'user', content: `${preamble}\n${peerEnvelope}` },
+const peerStartedTurn = (preamble = 'Another Claude session sent a message:', timestamp = '2026-11-04T10:00:00.000Z') => JSON.stringify({
+  type: 'user', isMeta: true, origin: { kind: 'peer' }, timestamp, message: { role: 'user', content: `${preamble}\n${peerEnvelope}` },
 }) + '\n'
 const peerJoinedTurn = () => JSON.stringify({
-  type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', origin: { kind: 'peer' }, prompt: peerEnvelope },
+  type: 'attachment',
+  attachment: { type: 'queued_command', isMeta: true, commandMode: 'prompt', origin: { kind: 'peer' }, prompt: peerEnvelope },
+}) + '\n'
+const notification = () => JSON.stringify({
+  type: 'attachment',
+  attachment: { type: 'queued_command', commandMode: 'prompt', prompt: '<task-notification>\n<status>completed</status>\n</task-notification>' },
 }) + '\n'
 
 function runningWorker(t) {
@@ -243,14 +254,62 @@ test('a turn ending just as a message arrives keeps its report, and the mark rea
   w.write(assistant('Replying to that message.'))
 
   assert.equal(w.stop(), 'The real final answer.', 'the finished turn gets its own text and nothing after it')
-  assert.equal(peerTurnAtStop(w.session, w.task), null, 'so its Stop is not the message\'s')
-  assert.equal(settlePeerTurn(w.session), false)
+  assert.equal(takePeerTurn(w.session), null, 'so its Stop is not the message\'s')
   assert.equal(w.session.teamPeerTurn.awaiting, 1, 'and the mark is still waiting')
 
   assert.equal(w.stop(), 'Replying to that message.')
-  assert.equal(peerTurnAtStop(w.session, w.task), 'started', 'the turn that read it is the one marked')
-  assert.equal(settlePeerTurn(w.session), true)
+  assert.deepEqual(takePeerTurn(w.session), { kind: 'started', taskIds: ['task_one'] }, 'the turn that read it is the one marked')
   assert.equal(w.session.teamPeerTurn, undefined)
+})
+
+test('a Stop reads only up to a message that opened a later turn', t => {
+  const opened = Date.parse('2026-11-04T10:00:00.000Z')
+  const w = runningWorker(t)
+  markPeerTurn(w.session)
+  w.write(peerStartedTurn())
+  assert.equal(w.stop(opened - 1000), '', 'the previous turn has nothing left to read')
+  assert.equal(takePeerTurn(w.session), null)
+  assert.equal(w.session.teamPeerTurn.awaiting, 1)
+
+  // That turn's first tool call lands while the older Stop is still settling.
+  w.write(assistant('Looking.', { tool: true }))
+  const late = runningWorker(t)
+  markPeerTurn(late.session)
+  late.write(peerStartedTurn())
+  late.write(assistant('Looking.', { tool: true }))
+  assert.equal(late.stop(opened - 1000), '', 'the older Stop leaves all of it to the turn it belongs to')
+  assert.equal(takePeerTurn(late.session), null)
+  assert.equal(late.preToolUse(), 'Looking.')
+  assert.equal(late.session.teamPeerTurn.seen, 'started')
+
+  w.write(assistant('Replying.'))
+  assert.equal(w.stop(opened + 60000), 'Looking.\n\nReplying.', 'its own Stop reads it')
+  assert.equal(takePeerTurn(w.session).kind, 'started')
+})
+
+test('a message whose record never appears stops holding the worker after a turn more', t => {
+  const w = runningWorker(t)
+  markPeerTurn(w.session)
+  w.write(assistant('The turn it arrived in.'))
+  assert.equal(w.stop(), 'The turn it arrived in.')
+  assert.equal(takePeerTurn(w.session), null)
+  assert.ok(w.session.teamPeerTurn, 'that turn can end just as the message arrives')
+
+  w.write(assistant('A later turn, with no sign of it.'))
+  assert.equal(w.stop(), 'A later turn, with no sign of it.')
+  assert.equal(takePeerTurn(w.session), null)
+  assert.equal(w.session.teamPeerTurn, undefined, 'the message was lost')
+})
+
+test('a Stop with no observation time still cuts where text came before the message', t => {
+  const w = worker(t)
+  delete w.session.teamActiveTaskId
+  w.session.teamStandingTaskId = 'task_standing'
+  markPeerTurn(w.session)
+  w.write(peerStartedTurn())
+  w.write(assistant('Replying.'))
+  assert.equal(claudeAssistantTextSinceOffset(w.session, true, null), 'Replying.', 'a record with nothing to compare against passes')
+  assert.equal(w.session.teamPeerTurn.seen, 'started')
 })
 
 test('a message that starts a turn on an idle worker is read as started, with or without a tool call', t => {
@@ -270,7 +329,7 @@ test('a message that starts a turn on an idle worker is read as started, with or
     }
     w.write(assistant('Replying.'))
     assert.equal(w.stop(), 'Replying.')
-    assert.equal(peerTurnAtStop(w.session, w.task), 'started')
+    assert.equal(takePeerTurn(w.session).kind, 'started')
   }
 })
 
@@ -284,7 +343,48 @@ test('a message drained into a running turn is read as joined, whatever the task
   assert.equal(w.session.teamPeerTurn.seen, 'joined')
   w.write(assistant('Final answer.'))
   assert.equal(w.stop(), 'Final answer.')
-  assert.equal(peerTurnAtStop(w.session, w.task), 'joined')
+  assert.equal(takePeerTurn(w.session).kind, 'joined')
+})
+
+test('the session\'s own work reaching a turn the message started makes it real work', t => {
+  const after = worker(t)
+  after.write(delivered('task_one', 1))
+  after.accept(1)
+  after.write(assistant('Final answer.'))
+  after.stop()
+  markPeerTurn(after.session)
+  after.write(peerStartedTurn())
+  after.write(assistant('Replying.', { tool: true }))
+  after.preToolUse()
+  assert.equal(after.session.teamPeerTurn.seen, 'started')
+  after.write(notification())
+  after.write(assistant('CI finished, so here is the result.'))
+  after.stop()
+  assert.equal(takePeerTurn(after.session).kind, 'joined', 'a background command finishing in it')
+
+  const before = worker(t)
+  before.write(delivered('task_one', 1))
+  before.accept(1)
+  before.write(assistant('Final answer.'))
+  before.stop()
+  markPeerTurn(before.session)
+  before.write(notification())
+  before.write(peerStartedTurn())
+  before.write(assistant('Both.'))
+  before.stop()
+  assert.equal(takePeerTurn(before.session).kind, 'joined', 'a notification batched before the message')
+
+  const notice = worker(t)
+  notice.write(delivered('task_one', 1))
+  notice.accept(1)
+  notice.write(assistant('Final answer.'))
+  notice.stop()
+  markPeerTurn(notice.session)
+  notice.write(peerStartedTurn())
+  notice.write(JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: '[Cross-session delivery notice] Your message to another session was held.' } }) + '\n')
+  notice.write(assistant('Noted.'))
+  notice.stop()
+  assert.equal(takePeerTurn(notice.session).kind, 'started', 'another session can time a delivery notice, so it does not count')
 })
 
 test('a second message on its way keeps the mark for the turn it reaches', t => {
@@ -294,35 +394,41 @@ test('a second message on its way keeps the mark for the turn it reaches', t => 
   w.write(assistant('Final answer.'))
   markPeerTurn(w.session) // Its hook fires before this turn's Stop.
   assert.equal(w.stop(), 'Final answer.')
-  assert.equal(peerTurnAtStop(w.session, w.task), 'joined')
-  assert.equal(settlePeerTurn(w.session), true)
+  assert.equal(takePeerTurn(w.session).kind, 'joined')
   assert.equal(w.session.teamPeerTurn.awaiting, 1, 'the second message is still to come')
   assert.equal(w.session.teamPeerTurn.seen, null)
 
   w.write(peerStartedTurn())
   w.write(assistant('Replying.'))
   assert.equal(w.stop(), 'Replying.')
-  assert.equal(peerTurnAtStop(w.session, w.task), 'started')
-  assert.equal(settlePeerTurn(w.session), true)
+  assert.equal(takePeerTurn(w.session).kind, 'started')
   assert.equal(w.session.teamPeerTurn, undefined)
 })
 
+test('two messages in one turn settle together', t => {
+  const w = runningWorker(t)
+  markPeerTurn(w.session)
+  markPeerTurn(w.session)
+  w.write(peerJoinedTurn())
+  w.write(peerJoinedTurn())
+  w.write(assistant('Final answer.'))
+  w.stop()
+  assert.equal(takePeerTurn(w.session).kind, 'joined')
+  assert.equal(w.session.teamPeerTurn, undefined, 'nothing is left waiting')
+})
+
 test('nothing else counts as the message, and nothing changes without a mark', t => {
-  const quoted = t2 => {
-    const w = runningWorker(t2)
-    markPeerTurn(w.session)
-    return w
-  }
   const records = {
     'an assistant quoting one': assistant(`It said:\n${peerEnvelope}`),
     'a subagent message quoting one': JSON.stringify({ type: 'user', isMeta: true, message: { role: 'user', content: `Another Claude session sent a message:\n<agent-message from="a0">\n${peerEnvelope}\n</agent-message>` } }) + '\n',
     'a meta record quoting one further down': JSON.stringify({ type: 'user', isMeta: true, message: { role: 'user', content: `The coordinator wrote:\nSee this.\n${peerEnvelope}` } }) + '\n',
     'typed text quoting one': JSON.stringify({ type: 'user', message: { role: 'user', content: `Oops\n${peerEnvelope}` } }) + '\n',
     'a queued notification quoting one': JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: `<task-notification>\n${peerEnvelope}\n</task-notification>` } }) + '\n',
-    'a meta queued command': JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', isMeta: true, prompt: peerEnvelope } }) + '\n',
+    'another attachment': JSON.stringify({ type: 'attachment', attachment: { type: 'file', prompt: peerEnvelope } }) + '\n',
   }
   for (const [label, record] of Object.entries(records)) {
-    const w = quoted(t)
+    const w = runningWorker(t)
+    markPeerTurn(w.session)
     w.write(record)
     w.write(assistant('Final answer.'))
     w.stop()
@@ -344,7 +450,7 @@ test('a peek records nothing, and a stale discard records what it passes', t => 
   markPeerTurn(w.session)
   w.write(peerStartedTurn())
   w.write(assistant('Replying.'))
-  const turn = boundTeamTaskProviderTurn(w.state, w.session, { observed_at: Date.now() + 1e7 })
+  const turn = boundTeamTaskProviderTurn(w.state, w.session, { observed_at: LATER })
   assert.equal(claudeAssistantTextSinceOffset(w.session, false, turn), 'Replying.')
   assert.equal(w.session.teamPeerTurn.seen, null)
 
@@ -365,7 +471,7 @@ test('a turn the message started reads its own text even with other records befo
   w.write(peerStartedTurn())
   w.write(assistant('Replying.'))
   assert.equal(w.stop(), 'Replying.', 'no text came before the message, so nothing holds this read back')
-  assert.equal(peerTurnAtStop(w.session, w.task), 'started')
+  assert.equal(takePeerTurn(w.session).kind, 'started')
 })
 
 test('a message that joins a turn cuts nothing from a read', t => {
@@ -392,7 +498,6 @@ test('a standing worker\'s reads, with no generation to place, follow the same r
   assert.equal(w.session.teamPeerTurn.seen, null)
   assert.equal(read(), 'Replying.')
   assert.equal(w.session.teamPeerTurn.seen, 'started')
-  assert.equal(settlePeerTurn(w.session), true)
+  assert.deepEqual(takePeerTurn(w.session), { kind: 'started', taskIds: ['task_standing'] })
   assert.equal(w.session.teamPeerTurn, undefined)
 })
-

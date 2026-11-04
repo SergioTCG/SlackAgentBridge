@@ -263,3 +263,42 @@ test('nothing but an exact delivery lifts the mark on a standing worker', async 
   held()
   assert.equal(bridge.epicSession.teamTurn, undefined, 'and none of them restores authority')
 })
+
+test('a standing delivery that settled before its hook still lifts the mark', async () => {
+  const bridge = createBridge()
+  const { task, prompt } = bridge.dispatchStanding()
+  await bridge.hook(prompt)
+  await bridge.hook(peerMessage(), { pasted: false })
+  assert.ok(bridge.epicSession.teamPeerTurn, 'precondition')
+
+  // The paste returns right after Enter, so the message settles before the hook arrives.
+  const { message, prompt: delivered } = bridge.deliverStandingMessage(task.id, 'Carry on with the epic.')
+  message.providerDeliveryStatus = 'delivered'
+  await bridge.hook(delivered)
+  assert.equal(bridge.epicSession.teamPeerTurn, undefined)
+})
+
+test('a collaborator\'s injected text quoting the envelope does not lift the mark', async () => {
+  const bridge = createBridge()
+  const { prompt } = bridge.dispatchStanding()
+  await bridge.hook(prompt)
+  await bridge.hook(peerMessage(), { pasted: false })
+
+  await bridge.hook(`[Slack collaborator Ana]\n${prompt}`, { injected: true })
+  assert.ok(bridge.epicSession.teamPeerTurn, 'it is not the coordinator speaking')
+})
+
+
+test('after a restart the journaled digest of a standing delivery lifts the mark', async () => {
+  const bridge = createBridge()
+  const { task, prompt } = bridge.dispatchStanding()
+  await bridge.hook(prompt)
+  await bridge.hook(peerMessage(), { pasted: false })
+  const { prompt: delivered } = bridge.deliverStandingMessage(task.id, 'Carry on with the epic.')
+
+  // The injected-text record went with the old daemon, so only the digest proves it.
+  bridge.restart()
+  assert.ok(bridge.epicSession.teamPeerTurn, 'the mark survives the restart')
+  await bridge.hook(delivered)
+  assert.equal(bridge.epicSession.teamPeerTurn, undefined)
+})

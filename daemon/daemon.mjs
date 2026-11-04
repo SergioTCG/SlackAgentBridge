@@ -127,7 +127,7 @@ import {
   takeDueTeamSchedules, teamDepth, clearTeamSchedules, pruneOrphanedTeamSchedules,
   assertCoordinatorDispatch, assertCoordinatorTaskControl, assertTeamTaskRetry, beginCollaboratorTeamTurn,
   PEER_TURN_WARNING, assertPeerTurnAllows, beginContinuationTeamTurn, beginOwnerTeamTurn, cancelQueuedTeamTask, claimTeamTaskForSession, clearPeerTurn, clearTeamTurn,
-  peerTurnAtStop, peerTurnHolds, settlePeerTurn, teamTaskPeerReportCoversCompletion,
+  peerTurnHolds, takePeerTurn, teamTaskPeerReportCoversCompletion,
   beginCoordinatorTaskMessageDelivery,
   completeCoordinatorTaskMessageDelivery, closeTeam,
   consumeCoordinatorDispatch, coordinatorPromptContext,
@@ -1505,7 +1505,11 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
     clearStatusDeferred(session)
     void clearQuestionForm(session).catch(error => log('deferred question clear error', String(error?.message || error)))
     const older = []
-    const rawText = readNewAssistantText(session, teamTaskTurn, skipped => older.push(skipped))
+    const rawText = readNewAssistantText(session, teamTaskTurn, {
+      onSkipped: skipped => older.push(skipped), stopObservedAt: reportObservedAt,
+    })
+    // Take this before anything below yields, because the next turn's reads can move the mark on.
+    const peerTurn = takePeerTurn(session)
     const delivery = prepareClaudeTerminalDelivery(
       rawText || terminalFailure?.text || '',
       claudeTerminalFailures.get(session.id),
@@ -1538,7 +1542,7 @@ async function finalizeTurn(session, { terminalFailure = null, teamTaskTurn = cu
         ])).digest('base64url')}`
       : null
     const finalizedTask = await finishTeamTaskForSession(session, finalText, taskFailure, {
-      expectedTeamTaskTurn: teamTaskTurn, reportKey, observedAt: reportObservedAt,
+      expectedTeamTaskTurn: teamTaskTurn, reportKey, observedAt: reportObservedAt, peerTurn,
     })
     // Slack delivery above can yield while a coordinator follow-up enters the
     // same Claude process. Never clear that newer input reservation.
@@ -1927,15 +1931,15 @@ async function waitTranscriptSettle(file, maxMs = 4000) {
   }
 }
 
-function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = null, onSkipped = null) {
+function assistantTextSinceOffset(session, advance = false, expectedTeamTurn = null, options = {}) {
   if (providerOf(session) !== 'claude') return ''
-  return claudeAssistantTextSinceOffset(session, advance, expectedTeamTurn, onSkipped)
+  return claudeAssistantTextSinceOffset(session, advance, expectedTeamTurn, options)
 }
 
 const peekNewAssistantText = (session, expectedTeamTurn = null) =>
   assistantTextSinceOffset(session, false, expectedTeamTurn)
-const readNewAssistantText = (session, expectedTeamTurn = null, onSkipped = null) =>
-  assistantTextSinceOffset(session, true, expectedTeamTurn, onSkipped)
+const readNewAssistantText = (session, expectedTeamTurn = null, options = {}) =>
+  assistantTextSinceOffset(session, true, expectedTeamTurn, options)
 
 function discardStaleClaudeTeamTurnTranscript(session, expected) {
   if (providerOf(session) !== 'claude' || !session.transcript || !fs.existsSync(session.transcript)) return false
@@ -2718,7 +2722,7 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     const older = []
     const text = session.teamActiveTaskId && !teamTaskTurn
       ? ''
-      : readNewAssistantText(session, teamTaskTurn, skipped => older.push(skipped))
+      : readNewAssistantText(session, teamTaskTurn, { onSkipped: skipped => older.push(skipped) })
     if (teamTaskTurn && session.claudeTranscriptOffsetTurn?.taskId === teamTaskTurn.taskId &&
         Number(session.claudeTranscriptOffsetTurn.providerWorkGeneration) ===
           teamTaskTurn.providerWorkGeneration) {
@@ -5852,6 +5856,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
   expectedTeamTaskTurn = currentTeamTaskProviderTurn(session),
   reportKey = null,
   observedAt = Date.now(),
+  peerTurn: takenPeerTurn = null,
 } = {}) {
   // `null` is an authenticated non-match, not permission to borrow the latest
   // mutable task binding. Legacy untracked tasks are synthesized by
@@ -5864,8 +5869,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
       return false
     }
     const revokedTurn = clearTeamTurn(session)
-    const endedPeerTurn = settlePeerTurn(session)
-    if (revokedTurn || endedPeerTurn) saveStateNow(state)
+    if (revokedTurn) saveStateNow(state)
     else saveState(state)
     return false
   }
@@ -5883,8 +5887,7 @@ async function finishTeamTaskForSession(session, result, error = null, {
         teamTaskProviderWorkGeneration(task))
       return false
     }
-    peerTurn = peerTurnAtStop(session, task)
-    settlePeerTurn(session)
+    peerTurn = takenPeerTurn?.taskIds.includes(task.id) ? takenPeerTurn.kind : null
     const revokedTurn = clearTeamTurn(session)
     if (peerTurn === 'started') {
       // Another session's message started this turn, so it isn't the task's work: it reports

@@ -335,16 +335,18 @@ not mirrored as terminal typing, and a task envelope quoted inside it is never a
 delivery. The session is marked from when the message arrives until the turn it
 reaches ends or the coordinator speaks. An owner message lifts it too, on a standing
 worker; an exclusive worker takes none. The transcript records which turn the message
-reached, so a turn ending just as it arrives keeps its report. While marked, for
-exclusive and standing tasks alike:
+reached, so a turn ending just as it arrives keeps its report. If no record appears
+by the end of the next turn, the message was lost and the mark is dropped. While
+marked, for exclusive and standing tasks alike:
 
 - Gates and completion are refused, with an error saying why.
 - Replies are labelled and wake no one.
-- A provider failure doesn't fail the task.
+- A provider failure in the turn it reached doesn't fail the task.
 
 If the message started the turn, the turn ends with no report: no new result and no
-continuation event. If it joined a turn already running, that work still reports, with
-a warning, and is not auto-released. The coordinator can release it or message the
+continuation event. If it joined a turn already running, or the session's own work
+reached the turn it started, that work still reports, with a warning, and is not
+auto-released. The coordinator can release it or message the
 worker, which is also what a refused declaration needs. A later turn can still act on
 what the message said, as on anything else the worker has read.
 
