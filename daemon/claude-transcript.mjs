@@ -46,7 +46,8 @@ function sameTeamTurn(marker, expected) {
 // Select assistant text from one exact task generation. The returned byte count
 // includes any stale complete-line prefix before that generation, but stops at
 // the next task marker. This lets the current finalizer retire older output
-// without ever attributing it to the current task report.
+// without ever attributing it to the current task report. The older text comes
+// back separately as skippedText, because the channel should still show it.
 export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
   const input = String(text || '')
   let cursor = 0
@@ -55,6 +56,13 @@ export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
   let promptObservedAt = Number.isSafeInteger(Number(offsetTurn?.observedAt))
     ? Number(offsetTurn.observedAt) : null
   const output = []
+  const skipped = []
+  const selection = bytes => ({
+    text: output.join('\n\n'),
+    consumedBytes: bytes,
+    ...(promptObservedAt ? { promptObservedAt } : {}),
+    ...(skipped.length ? { skippedText: skipped.join('\n\n') } : {}),
+  })
   while (cursor < input.length) {
     const newline = input.indexOf('\n', cursor)
     if (newline < 0) break
@@ -64,11 +72,7 @@ export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
     const marker = deliveredTeamTurnMarker(record)
     if (marker) {
       if (collecting && !sameTeamTurn(marker, expected)) {
-        return {
-          text: output.join('\n\n'),
-          consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
-          ...(promptObservedAt ? { promptObservedAt } : {}),
-        }
+        return selection(Buffer.byteLength(input.slice(0, cursor), 'utf8'))
       }
       collecting = sameTeamTurn(marker, expected)
       matched ||= collecting
@@ -76,18 +80,14 @@ export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
         const timestamp = Date.parse(String(record.timestamp || ''))
         if (Number.isFinite(timestamp)) promptObservedAt = timestamp
       }
-    } else if (collecting && record?.type === 'assistant') {
+    } else if (record?.type === 'assistant') {
       const assistant = transcriptMessageText(record).trim()
-      if (assistant) output.push(assistant)
+      if (assistant) (collecting ? output : skipped).push(assistant)
     }
     cursor = newline + 1
   }
   if (!matched) return null
-  return {
-    text: output.join('\n\n'),
-    consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
-    ...(promptObservedAt ? { promptObservedAt } : {}),
-  }
+  return selection(Buffer.byteLength(input.slice(0, cursor), 'utf8'))
 }
 
 // Return the complete-line byte prefix belonging to an older Claude team turn.
@@ -124,7 +124,7 @@ export function staleTeamTurnTranscriptPrefixBytes(text, expected, offsetTurn = 
 // Reads assistant text written since session.offset. Only COMPLETE lines are
 // parsed, so a record being flushed is never cut in half. Poller failure
 // detection peeks without advancing; final delivery advances atomically.
-export function claudeAssistantTextSinceOffset(session, advance = false, expectedTeamTurn = null) {
+export function claudeAssistantTextSinceOffset(session, advance = false, expectedTeamTurn = null, onSkipped = null) {
   const f = session.transcript
   if (!f || !fs.existsSync(f)) return ''
   const size = fs.statSync(f).size
@@ -149,6 +149,7 @@ export function claudeAssistantTextSinceOffset(session, advance = false, expecte
           taskId: expectedTeamTurn.taskId,
           providerWorkGeneration: expectedTeamTurn.providerWorkGeneration,
         }
+        if (selected.skippedText) onSkipped?.(selected.skippedText)
       }
       return selected.text
     }

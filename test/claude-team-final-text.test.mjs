@@ -62,14 +62,16 @@ function worker(t, { taskId = 'task_one', history = [] } = {}) {
         turn: { taskId, providerWorkGeneration: generation }, startedAt: at, acceptedAt: at,
       })
     },
+    // Older text a read passed, which the daemon posts to the channel but never reports.
+    older: [],
     // What the PreToolUse handler does, without a hook timestamp.
     preToolUse() {
       const turn = interimTeamTaskProviderTurn(state, session, {}, tick())
-      return session.teamActiveTaskId && !turn ? '' : claudeAssistantTextSinceOffset(session, true, turn)
+      return session.teamActiveTaskId && !turn ? '' : claudeAssistantTextSinceOffset(session, true, turn, text => this.older.push(text))
     },
     // What the Stop handler does, with the timestamp the hook stamps.
     stop() {
-      return claudeAssistantTextSinceOffset(session, true, boundTeamTaskProviderTurn(state, session, { observed_at: tick() }))
+      return claudeAssistantTextSinceOffset(session, true, boundTeamTaskProviderTurn(state, session, { observed_at: tick() }), text => this.older.push(text))
     },
   }
 }
@@ -162,7 +164,7 @@ test('an unbounded read passes the delivery marker, and the final can no longer 
   assert.equal(w.stop(), '', 'the marker is behind the offset, so Stop reads nothing')
 })
 
-test('text no generation owns is not attributed to the next one', t => {
+test('text no generation owns is not attributed to the next one, but reaches the channel', t => {
   const w = worker(t)
   w.write(delivered('task_one', 1))
   w.accept(1)
@@ -173,4 +175,42 @@ test('text no generation owns is not attributed to the next one', t => {
   w.accept(2)
   w.write(assistant('Final answer 2.'))
   assert.equal(w.stop(), 'Final answer 2.')
+  assert.deepEqual(w.older, ['Written after the final.'])
+})
+
+test('a follow-up accepted before its marker lands holds the read, and the text before it is not lost', t => {
+  const w = worker(t)
+  w.write(delivered('task_one', 1))
+  w.accept(1)
+  w.write(assistant('Working.', { tool: true }))
+  assert.equal(w.preToolUse(), 'Working.')
+
+  // The paste returned, so generation 2 is accepted, while the worker is still writing.
+  w.accept(2)
+  w.write(assistant('Prose before the follow-up lands.', { tool: true }))
+  assert.equal(w.preToolUse(), '', 'nothing can be placed in generation 2 yet')
+  assert.deepEqual(w.older, [])
+
+  w.write(queued('task_one', 2))
+  w.write(assistant('Now the follow-up.', { tool: true }))
+  assert.equal(w.preToolUse(), 'Now the follow-up.')
+  assert.deepEqual(w.older, ['Prose before the follow-up lands.'], 'it reaches the channel, not generation 2')
+})
+
+test('a peek leaves older text to the read that consumes it', t => {
+  const w = worker(t)
+  w.write(delivered('task_one', 1))
+  w.accept(1)
+  w.write(assistant('Final answer 1.'))
+  assert.equal(w.stop(), 'Final answer 1.')
+  w.write(assistant('Older.'))
+  w.write(delivered('task_one', 2))
+  w.accept(2)
+  w.write(assistant('Newer.'))
+  const seen = []
+  const turn = boundTeamTaskProviderTurn(w.state, w.session, { observed_at: Date.now() + 1000 })
+  assert.equal(claudeAssistantTextSinceOffset(w.session, false, turn, text => seen.push(text)), 'Newer.')
+  assert.deepEqual(seen, [])
+  assert.equal(w.stop(), 'Newer.')
+  assert.deepEqual(w.older, ['Older.'])
 })

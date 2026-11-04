@@ -65,6 +65,7 @@ test('a current generation reads only its own assistant text when an older final
   }), {
     text: 'Generation two final.',
     consumedBytes: Buffer.byteLength(transcript),
+    skippedText: 'Generation one final.',
   })
 })
 
@@ -135,6 +136,8 @@ test('a new Claude generation does not inherit an earlier terminal failure', () 
   }), {
     text: '',
     consumedBytes: Buffer.byteLength(oldFailure + nextPrompt),
+    // The channel still shows it, but it is no part of this generation or its lifecycle.
+    skippedText: 'Login expired · Please run /login',
   })
 })
 
@@ -246,6 +249,7 @@ test('a queued delivery marks its generation', () => {
   assert.deepEqual(teamTurnAssistantTranscript(transcript, { taskId: 'task_one', providerWorkGeneration: 2 }), {
     text: 'Follow-up.',
     consumedBytes: Buffer.byteLength(transcript),
+    skippedText: 'First ask.',
   })
 })
 

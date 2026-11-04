@@ -17,8 +17,10 @@ Notable changes to this project. Format based on
   - A follow-up delivered mid-turn had the same effect, because the reader ignored
     how Claude Code records it. It now reads those too.
   - A task whose generation can't be placed is no longer read past its marker.
-  - A final answer that is a provider failure now fails the task in these turns too,
-    as it already did in a task's first turn.
+  - Text written just before a follow-up's marker reaches the channel, not the report.
+  - A provider failure the poller detects, such as an overload Claude Code ends with
+    no Stop, now fails the task in these turns too, as it already did in a task's
+    first turn. `sab team continue` recovers it.
 - The prompt Claude Code submits when a usage limit resets no longer fails a
   worker's delegated team task, ends a coordinator's team turn or appears in the
   channel as terminal typing. The task failed while the worker carried on, as

@@ -314,7 +314,7 @@ test('provider turn reporting preserves task and process ownership until explici
   'a stale Claude Stop must settle its transcript before advancing past the old generation')
   assert.ok(claudeFinal.indexOf('teamTaskTurnOwnsCurrentLifecycle') < claudeFinal.indexOf('readNewAssistantText'),
     'a stale Claude final must be rejected before transcript consumption')
-  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn\)/,
+  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn, skipped => older\.push\(skipped\)\)/,
     'Claude final output must be selected from the exact task generation')
   const codexFinal = /async function finalizeCodexTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
   assert.match(codexFinal,
@@ -603,8 +603,16 @@ test('Claude interim streaming persists and reuses its exact transcript generati
     daemon.indexOf("if (ev === 'Stop')"),
   )
   assert.match(preTool,
-    /interimTeamTaskProviderTurn\(state, session, body, observedAt\)[\s\S]*session\.teamActiveTaskId && !teamTaskTurn \? '' : readNewAssistantText\(session, teamTaskTurn\)/,
+    /interimTeamTaskProviderTurn\(state, session, body, observedAt\)[\s\S]*session\.teamActiveTaskId && !teamTaskTurn\s*\? ''\s*: readNewAssistantText\(session, teamTaskTurn, skipped => older\.push\(skipped\)\)/,
   'PreToolUse must stream only the exact provider work generation, and never read a task it cannot place')
+  assert.match(preTool, /const shown = \[\.\.\.older, text\]\.filter\(Boolean\)\.join\('\\n\\n'\)/,
+    'text from before a marker still reaches the channel')
+  const claudeFinal = /async function finalizeTurn\([\s\S]*?\n}/.exec(daemon)?.[0] || ''
+  assert.match(claudeFinal, /readNewAssistantText\(session, teamTaskTurn, skipped => older\.push\(skipped\)\)/)
+  assert.match(claudeFinal, /if \(older\.length && !recoveringDeferredOutput\) \{\s*await postProviderOutput\(session\.channel, older\.join/,
+    'a Stop posts older text to the channel')
+  assert.ok(!/older/.test(claudeFinal.slice(claudeFinal.indexOf('finishTeamTaskForSession('))),
+    'and never passes it to the report')
   assert.match(preTool,
     /claudeTranscriptOffsetTurn[\s\S]*saveStateNow\(state\)/,
   'the transcript generation at the advanced offset must survive daemon restart')
