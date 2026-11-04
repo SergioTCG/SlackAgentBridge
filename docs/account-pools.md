@@ -430,9 +430,14 @@ updated terms, first-run screens, the Claude in Chrome dialog, or the
 bypass-permissions prompt) would strand any session moved onto it. So an
 automatic move needs evidence, less than a day old, that the target account's
 own credential reference starts:
-- a session that reached SessionStart on it;
+- a session that freshly started on it (compaction and `/clear` do not count);
 - a committed, identity-verified switch onto it; or
 - SAB's own hidden launch check.
+
+The monitor chooses among the logins known to start, by the usual headroom
+rules. An account with more headroom whose login is not yet confirmed does not
+hold the move; its check keeps running, and it is chosen once that passes. New
+sessions likewise start only on a confirmed profile or on the Mac's own login.
 
 The check runs one login at a time, for an active Claude account whose usage
 reading works but whose evidence is missing or stale. It starts Claude in a
@@ -440,12 +445,14 @@ throwaway `ccs-probe-*` terminal, from the same profile seeding a session gets,
 with a clean environment, no prompt and no `CCS_BRIDGE`, so nothing reaches the
 model and its hooks never reach SAB. It trusts only its own folder
 (`~/.config/ccs/login-probe`), as `claude-consent.sh` does, and answers nothing
-else. A screen that blocks the launch is reported to the owner once, with the
-command to open it, and checked again after 30 minutes. A profile held by a
-renewal or sign-in is skipped and tried later. Legacy tokens are never launched
-and, as before, never earn automatic moves. Codex logins earn evidence from real
-starts only. On upgrade, committed verified switches at the current registry
-revision count as evidence.
+else. A screen that blocks the launch is reported to the owner once per failing
+streak, with the command to open it, and checked again after 30 minutes. A
+profile held by a renewal or sign-in is skipped and tried later. A check that a
+daemon restart cut short leaves a terminal, which the next boot removes. Legacy
+tokens are never launched and, as before, never earn automatic moves. Codex
+logins earn evidence from real starts only, and keep it, since SAB cannot check
+them again by itself. On upgrade, committed verified switches at the current
+registry revision count as evidence.
 
 **Waits are visible.** A session at its own account's usage limit that does not
 move gets its reason logged once per change, `/sab-account` shows it, and the
@@ -453,27 +460,31 @@ owner hears once per account and reason, after a delay:
 
 | Reason | Owner notice after |
 |---|---|
-| No account in the group has capacity (with the next reset) | 2 minutes |
+| No account in the group has capacity (with the time the first one regains it) | 2 minutes |
 | The target login's launch check has not passed | 5 minutes |
 | Blocked by a safe-boundary rule (for example a question, a permission, or automation setup) | 15 minutes |
 | Usage-limit moves halted, or an earlier handover here uncertain | at once |
 
 A turn still running on an account below 100% is a normal wait and is not
-reported. Once the current account's own usage is exhausted, `/sab-account`
-shows the move by measured capacity rather than the reservation estimate.
+reported. A wait that drops out for a missed reading is the same wait: an
+episode ends only 30 minutes after its last sighting. Once the current
+account's own usage is exhausted, `/sab-account` shows the move by measured
+capacity rather than the reservation estimate.
 
-**Owner switches at a limit.** When the pool has measured the session's own
-account exhausted and its turn visibly stopped at the limit (the pane's limit
-notice, or a pause marker), `/sab-account`, the account picker and
+**Owner switches at a limit.** In auto mode, when the pool has measured the
+session's own account exhausted and its turn visibly stopped at the limit (the
+pane's limit notice, or a pause marker), `/sab-account`, the account picker and
 `sab account pool switch` take the usage-limit path. So a session sitting at
-its limit can be switched without `/sab-kill` first. Any other refusal names the
-safe-boundary rule it hit.
+its limit can be switched without `/sab-kill` first. That path goes only where
+an automatic move could: a verified login known to start, never a legacy token.
+If it ends uncertain, only its own channel is fenced; automatic moves elsewhere
+carry on. Any other refusal names the safe-boundary rule it hit.
 
 **The Mac's own login.** Claude records which account the Mac's own login holds
 in `~/.claude.json`. SAB compares it with the account that lists `native-default`
-on every reading. On a mismatch the owner hears once, new sessions start
-through a profile instead of the Mac's login, and the Mac's login earns no
-launch evidence. The mismatch ends when the login, or the registry, matches
+on every reading. On a mismatch the owner hears once, in auto mode new sessions
+start through a profile with capacity instead of the Mac's login, and the Mac's
+login earns no Claude launch evidence. The mismatch ends when the login, or the registry, matches
 again.
 
 **Automation terminals.** A resume, an account switch or a reboot gives a

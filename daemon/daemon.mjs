@@ -253,6 +253,16 @@ async function probeClaudeLaunch(account) {
     await execFile('tmux', ['kill-session', '-t', name], { timeout: 5000 }).catch(() => {})
   }
 }
+// Only SAB's launch check names terminals ccs-probe-*. One a daemon restart cut
+// short would otherwise keep its Claude running forever.
+async function removeOrphanedLaunchProbes() {
+  let names = []
+  try { names = (await execFile('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 5000 })).stdout.split('\n') } catch { return }
+  for (const name of names.filter(item => /^ccs-probe-[0-9a-f]{10}$/.test(item))) {
+    await execFile('tmux', ['kill-session', '-t', name], { timeout: 5000 }).catch(() => {})
+    log('removed a launch check terminal left by a restart', name)
+  }
+}
 // The account the Mac's own Claude login is signed in to, from Claude's own
 // config, which holds no token. Parsed again only when the file changes.
 let nativeIdentityCache = null
@@ -2809,10 +2819,11 @@ async function processHook(body, ppid, tmux, flags, account, requestedProvider =
     // A switch target is provisional until its private handoff-readiness turn
     // succeeds. Never create/rebind a Slack channel or mirror startup noise yet.
     if (targetClaim) return
-    await completeAuthoritativeSessionStart(session, provider, body.source)
-    // A session that reached SessionStart on its account's own login is that
-    // login's launch evidence for automatic moves.
-    accountPools.noteLaunch(session)
+    const started = await completeAuthoritativeSessionStart(session, provider, body.source)
+    // A session that freshly started on its account's own login is that
+    // login's launch evidence for automatic moves. Compaction and /clear start
+    // no process, and a repeat start in the same terminal proves nothing new.
+    if (started && !['compact', 'clear'].includes(body.source)) accountPools.noteLaunch(session)
     return
   }
   if (ev === 'UserPromptSubmit') {
@@ -10192,6 +10203,7 @@ setInterval(async () => {
   repairDurableTeamBindings()
   await recoverHooklessCodexResumes()
   await flushSettledDeferredTeamProviderFinals()
+  await removeOrphanedLaunchProbes()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   await recoverInterruptedTeamContinuations() // adopt a proven live wake; never replay an uncertain one
   startTeamReconciler() // status adoption must fence workers that were already busy before restart

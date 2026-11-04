@@ -190,7 +190,7 @@ test('the daemon wires the launch check, the Mac login reader and the owner limi
   assert.match(daemon, /nativeLoginIdentity: async \(\) => readNativeClaudeIdentity\(\),/)
   assert.match(daemon, /probeLaunch: account => probeClaudeLaunch\(account\),/)
   assert.match(daemon, /atUsageLimit: async session => Boolean\(session\.usageLimitPause\) \|\|\n\s*Boolean\(session\.tmux && usageLimitSurface\(providerOf\(session\), await tmuxCapture\(session\.tmux\)\)\),/)
-  assert.match(daemon, /await completeAuthoritativeSessionStart\(session, provider, body\.source\)\n(?:\s*\/\/.*\n)*\s*accountPools\.noteLaunch\(session\)\n\s*return/)
+  assert.match(daemon, /const started = await completeAuthoritativeSessionStart\(session, provider, body\.source\)\n(?:\s*\/\/.*\n)*\s*if \(started && !\['compact', 'clear'\]\.includes\(body\.source\)\) accountPools\.noteLaunch\(session\)\n\s*return/)
 })
 
 test('/sab-account words the wait reasons and refusals plainly', () => {
@@ -205,4 +205,15 @@ test('/sab-account words the wait reasons and refusals plainly', () => {
 test('a screen that shows for one look and then gives way to the prompt is not a failure', async () => {
   const passing = probe({ panes: Array(7).fill('loading').concat(["We've updated our Consumer Terms.", IDLE_PANE]) })
   try { assert.deepEqual(await passing.run(), { ok: true }) } finally { passing.cleanup() }
+})
+
+test('a launch check terminal a restart cut short is removed at boot, and nothing else', async () => {
+  const removed = [], logs = []
+  const remove = new AsyncFunction('deps', `const { execFile, log } = deps\n${declaration('removeOrphanedLaunchProbes')}\nreturn removeOrphanedLaunchProbes()`)
+  await remove({ log: (...args) => logs.push(args), execFile: async (command, args) => {
+    if (args[0] === 'list-sessions') return { stdout: ['sab-res-abc', 'ccs-probe-0123456789', 'ccs-probe-look-x', 'my-shell', ''].join('\n') }
+    removed.push(args.at(-1)); return { stdout: '' }
+  } })
+  assert.deepEqual(removed, ['ccs-probe-0123456789'])
+  assert.ok(daemon.indexOf('await removeOrphanedLaunchProbes()') < daemon.indexOf('await readoptStatus() // recover live status'))
 })

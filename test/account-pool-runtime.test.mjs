@@ -251,6 +251,7 @@ test('scope-limited legacy manual switching is visibly unverified and never auth
   const { runtime, session, state, notices } = setup({ verifyIdentity: async () => 'scope-unavailable' })
   await runtime.switchAccount(session, 'second', { requestId: 'legacy-manual' })
   assert.equal(Object.keys(state.accountPools.proofs).length, 0)
+  assert.equal(Object.keys(state.accountPools.launchChecks || {}).length, 0, 'an unverified switch is no launch evidence')
   assert.equal(runtime.status(session.channel).pendingSwitch.identityVerified, false)
   assert.match(notices.at(-1).notice, /does not authorize automatic/)
 })

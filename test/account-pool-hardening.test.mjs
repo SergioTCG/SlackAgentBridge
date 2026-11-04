@@ -157,7 +157,7 @@ test('sessions with nowhere to go are reported once, with the next reset, after 
   assert.equal(f.owner.length, 0, 'a brief wait stays quiet')
   f.advance(3 * 60000); await f.runtime.tick(); await settle()
   assert.equal(f.owner.length, 1)
-  assert.match(f.owner[0], /^⏳ 1 session on \*busy@example\.test\* is at its usage limit, and no account in the group has capacity left\. The next reset is <!date\^\d+\^\{date_short_pretty\} at \{time\}\|[^>]+>; SAB moves it then\.$/)
+  assert.match(f.owner[0], /^⏳ 1 session on \*busy@example\.test\* is at its usage limit, and no account in the group has capacity left\. The first account regains capacity <!date\^\d+\^\{date_short_pretty\} at \{time\}\|[^>]+>; SAB moves it then\.$/)
   f.advance(10 * 60000); await f.runtime.tick(); await settle()
   assert.equal(f.owner.length, 1, 'once per episode')
   assert.equal(f.logs.filter(args => args[0] === 'usage-limit move waiting').length, 1, 'one log line per change')
@@ -174,6 +174,8 @@ test('a stuck episode ends when its sessions move, so a later one is reported ag
   quota = { busy: 100, spare: 10, token: 100 }
   g.advance(6 * 60000); await g.runtime.tick(); await settle()
   assert.equal(g.restarts.length, 1)
+  assert.equal(Object.keys(g.state.accountPools.waitingNotices).length, 1, 'kept a while, in case the wait comes back')
+  g.advance(31 * 60000); await g.runtime.tick(); await settle()
   assert.deepEqual(g.state.accountPools.waitingNotices, {}, 'the episode is over')
 })
 
@@ -215,6 +217,7 @@ test('the status names the measured-capacity target once the current account is 
 test("a Mac login signed in to another account is reported once and is never used for new sessions", async () => {
   let email = 'stranger@example.test'
   const f = setup({ quota: { busy: 10, spare: 10, token: 100 }, nativeLoginIdentity: async () => ({ email }) })
+  f.runtime.noteLaunch(f.helper)
   assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }), null, 'before the check, a ready native login is kept')
   await f.runtime.tick(); await settle()
   assert.deepEqual(f.owner, [nativeIdentityNotice({ observed: 'stranger@example.test', expected: 'busy@example.test' })])
@@ -241,6 +244,7 @@ test("an owner's switch of a session stopped at its usage limit takes the usage-
   const f = setup({ blockReason: session => session.teamActiveTaskId ? 'delegated team task in progress' : null, atUsageLimit: async () => atLimit })
   const tasks = holdTask(f)
   await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  f.runtime.noteLaunch(f.helper)
   await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'plain' }),
     error => error.message === 'account_switch_blocked' && error.blockReason === 'delegated team task in progress')
   assert.equal(f.restarts.length, 0)
@@ -264,6 +268,7 @@ test("an owner's switch on an account that still has capacity keeps the ordinary
 test('a refusal from the usage-limit rule names its reason', async () => {
   const f = setup({ usageLimitBlockReason: async () => 'question awaiting an answer', atUsageLimit: async () => true })
   await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  f.runtime.noteLaunch(f.helper)
   await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'question' }), error => error.blockReason === 'question awaiting an answer')
 })
 
@@ -302,4 +307,128 @@ test('the monitor does not inspect a session it cannot move for want of launch e
   await f.runtime.tick()
   assert.equal(inspected, 1)
   assert.equal(f.restarts.length, 1)
+})
+
+test('the monitor moves to the best login known to start, not the best by headroom', async () => {
+  // A legacy token has the most headroom but can never be an automatic target.
+  const f = setup({ quota: { busy: 100, spare: 10, token: 5 } })
+  f.runtime.noteLaunch(f.helper)
+  await f.runtime.tick()
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.session.account, 'spare')
+})
+
+test('a login whose launch check fails does not hold moves to another that starts', async () => {
+  const registry = compileAccountRegistry({ ...enrollment(), accounts: [...enrollment().accounts,
+    { key: 'third', provider: 'claude', email: 'third@example.test', identityConfirmed: true, credentials: [{ kind: 'claude-profile', profile: 'third' }] }],
+  groups: [{ key: 'mine', name: 'Mine', members: ['busy', 'spare', 'token', 'third'], preferred: { claude: 'busy' } }] }, { legacyAccounts: 'token=PRIVATE-TOKEN\n' })
+  const f = setup({ quota: { busy: 100, spare: 10, token: 100, third: 40 }, readRegistry: () => registry,
+    probeLaunch: async account => account.key === 'spare' ? { ok: false, reason: 'terms' } : { ok: true } })
+  for (let i = 0; i < 6 && !f.restarts.length; i++) { await f.runtime.tick(); await settle() }
+  assert.equal(f.restarts.length, 1)
+  assert.equal(f.session.account, 'third', 'spare had more headroom, but its login does not start')
+})
+
+test('a Codex login keeps what a real start proved, since SAB cannot check it again by itself', async () => {
+  let time = start
+  const record = compileAccountRegistry({ schemaVersion: 1, requestId: 'codex-evidence', accounts: [
+    { key: 'one', provider: 'codex', email: 'one@example.test', identityConfirmed: true, credentials: [{ kind: 'codex-profile', profile: 'one' }] },
+    { key: 'two', provider: 'codex', email: 'two@example.test', identityConfirmed: true, credentials: [{ kind: 'codex-profile', profile: 'two' }] },
+  ], groups: [{ key: 'mine', name: 'Mine', members: ['one', 'two'] }], routing: { defaultGroup: 'mine', channels: {} } })
+  const session = { id: 'codex-one', channel: 'CONE', provider: 'codex', pid: 500, tmux: 'sab-one', cwd: '/c', account: 'one',
+    model: 'gpt', requestedModel: 'gpt', effort: 'high', requestedEffort: 'high', launchFlags: '--yolo' }
+  const helper = { id: 'codex-two', channel: 'CTWO', provider: 'codex', pid: null, tmux: 'sab-two', cwd: '/c', account: 'two',
+    model: 'gpt', requestedModel: 'gpt', effort: 'high', requestedEffort: 'high', launchFlags: '--yolo' }
+  const state = { channels: { CONE: session.id, CTWO: helper.id }, sessions: { [session.id]: session, [helper.id]: helper } }
+  const restarts = [], quota = { one: 99, two: 10 }
+  const runtime = createAccountPoolRuntime({ state, mode: 'auto', readRegistry: () => record, persist: () => {}, now: () => time,
+    usageLimitBlockReason: async () => null, verifyIdentity: async () => 'verified', probeLaunch: async () => assert.fail('Codex is never launched by SAB'),
+    readQuota: async account => normalizeQuotaObservation({ provider: 'codex', observedAt: time, identity: { email: account.email, principalId: account.id },
+      quota: { ordinaryUsageAllowed: true, rateLimits: { limitId: 'codex', primary: { usedPercent: quota[account.key], resetsAt: Math.floor((time + 3600000) / 1000) } } } }),
+    restart: async (current, profile, options) => { restarts.push(options); current.account = profile; current.pid = 501 } })
+  runtime.noteLaunch(helper)
+  time += 30 * 3600000
+  await runtime.tick()
+  assert.equal(restarts.length, 1)
+  assert.equal(session.account, 'two')
+})
+
+test("an owner's switch at a limit goes only where an automatic move could: a verified login known to start", async () => {
+  const f = setup({ quota: { busy: 100, spare: 10, token: 10 }, atUsageLimit: async () => true })
+  holdTask(f)
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare'); await f.runtime.refresh('token')
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'unchecked' }),
+    error => error.blockReason === "SAB has not yet confirmed that spare@example.test's login starts")
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'token', { requestId: 'legacy' }),
+    error => error.blockReason === 'a legacy token login cannot take held work at a usage limit')
+  assert.equal(f.restarts.length, 0)
+})
+
+test("an owner's uncertain usage-limit switch fences its own channel, not every automatic move", async () => {
+  const f = setup({ atUsageLimit: async () => true, restart: async (current, alias, options) => {
+    current.account = alias; current.accountKind = 'claude-profile'; current.pid = 200
+    if (current.channel === 'CMINE') throw new Error('replacement never became ready')
+  } })
+  const second = { id: 'native-two', channel: 'CTWO', cwd: '/two', tmux: 'sab-two', pid: 102, model: 'opus', effort: 'max', launchFlags: '--dsp',
+    account: 'busy', accountKind: 'claude-profile' }
+  f.state.sessions[second.id] = second; f.state.channels.CTWO = second.id
+  await f.runtime.refresh('busy'); await f.runtime.refresh('spare')
+  f.runtime.noteLaunch(f.helper)
+  await assert.rejects(f.runtime.ownerSwitch(f.session, 'spare', { requestId: 'owner-uncertain' }), /uncertain/)
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted')
+  await f.runtime.tick()
+  assert.equal(f.state.accountPools.switches.CTWO.phase, 'committed', 'automatic moves carry on')
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted', 'its own channel stays fenced')
+})
+
+test('a halt lists the sessions it holds back, not the uncertain one itself', async () => {
+  // The uncertain handover failed before the session's account changed, so it is still at its limit.
+  const f = setup({ restart: async (current, alias) => {
+    if (current.channel === 'CMINE') throw new Error('replacement never became ready')
+    current.account = alias; current.accountKind = 'claude-profile'; current.pid = 200
+  } })
+  const second = { id: 'native-two', channel: 'CTWO', cwd: '/two', tmux: 'sab-two', pid: 102, model: 'opus', effort: 'max', launchFlags: '--dsp',
+    account: 'busy', accountKind: 'claude-profile' }
+  f.state.sessions[second.id] = second; f.state.channels.CTWO = second.id
+  f.runtime.noteLaunch(f.helper)
+  await f.runtime.tick(); await f.runtime.tick(); await settle()
+  assert.equal(f.state.accountPools.switches.CMINE.phase, 'interrupted')
+  assert.equal(f.runtime.status('CMINE').waiting, 'interrupted')
+  assert.equal(f.runtime.status('CTWO').waiting, 'halted:CMINE')
+  const halted = f.owner.filter(message => message.startsWith('⚠️ Usage-limit moves are halted'))
+  assert.equal(halted.length, 1)
+  assert.match(halted[0], /^⚠️ Usage-limit moves are halted, so 1 session on/)
+})
+
+test('a missed reading does not start a new wait episode or repeat its notice', async () => {
+  let failing = false
+  const g = setup({ quota: undefined, readQuota: async account => {
+    if (failing) throw new Error('throttled')
+    return normalizeQuotaObservation({ provider: 'claude', observedAt: g.at(), identity: { email: account.email, principalId: account.id },
+      quota: { five_hour: { utilization: 100, resets_at: new Date(g.at() + 3600000).toISOString() } } })
+  } })
+  await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.owner.length, 1)
+  failing = true; g.advance(6 * 60000); await g.runtime.tick(); await settle()
+  failing = false; g.advance(6 * 60000); await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.owner.length, 1, 'still the same wait')
+})
+
+test('the "no capacity" notice gives the time an account really regains capacity', async () => {
+  const g = setup({ quota: undefined, readQuota: async account => normalizeQuotaObservation({ provider: 'claude', observedAt: g.at(),
+    identity: { email: account.email, principalId: account.id }, quota: {
+      five_hour: { utilization: account.key === 'busy' ? 100 : 20, resets_at: new Date(g.at() + 3600000).toISOString() },
+      seven_day: { utilization: 100, resets_at: new Date(g.at() + (account.key === 'spare' ? 50 : 96) * 3600000).toISOString() } } }) })
+  await g.runtime.tick(); g.advance(3 * 60000); await g.runtime.tick(); await settle()
+  assert.equal(g.owner.length, 1)
+  const seconds = Number(/<!date\^(\d+)\^/.exec(g.owner[0])[1])
+  assert.ok(Math.abs(seconds * 1000 - (start + 50 * 3600000)) < 10 * 60000, 'spare\'s weekly reset, not anyone\'s next 5-hour window')
+})
+
+test('a new session never starts on a profile whose launch check failed', async () => {
+  const f = setup({ quota: { busy: 100, spare: 10, token: 100 }, probeLaunch: async account => account.key === 'spare' ? { ok: false, reason: 'terms' } : { ok: true } })
+  for (let i = 0; i < 3; i++) { await f.runtime.tick(); await settle() }
+  assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }), null)
+  f.runtime.noteLaunch(f.helper)
+  assert.equal(f.runtime.launchSelection({ channelId: 'CNEW', provider: 'claude' }).account, 'spare', 'a real start proves it again')
 })

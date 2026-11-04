@@ -27,7 +27,9 @@ Notable changes to this project. Format based on
   old that the target's login starts: a session start on it, a committed switch
   onto it, or SAB's own hidden launch check. That check starts Claude with no
   prompt in a throwaway terminal, and reports a sign-in, terms, first-run,
-  Chrome or permissions screen that would strand a moved session.
+  Chrome or permissions screen that would strand a moved session. The monitor
+  picks the best account whose login is known to start, so an unconfirmed one
+  never holds the move.
 - A session at its account's usage limit that cannot move is no longer silent.
   Its reason is logged, `/sab-account` shows it, and the owner hears once per
   account and reason: when no account has capacity (with the next reset), when
@@ -43,8 +45,10 @@ Notable changes to this project. Format based on
   turns already were, so the handover or the reset resumes it; any other turn
   ends.
 - An owner's `/sab-account`, account picker or `sab account pool switch` on a
-  session stopped at its usage limit takes the usage-limit path, instead of
-  refusing it as busy until `/sab-kill`. Other refusals name the rule they hit.
+  session stopped at its usage limit takes the usage-limit path in auto mode,
+  instead of refusing it as busy until `/sab-kill`. It goes only to a verified
+  login known to start, and an uncertain outcome fences only its own channel.
+  Other refusals name the rule they hit.
 - An automation's record follows its session to a new terminal after a resume,
   an account switch or a reboot, and stale records are healed at boot. A stale
   record made the owner's stop fail as non-exact.
