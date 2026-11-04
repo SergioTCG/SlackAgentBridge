@@ -1,3 +1,4 @@
+import { isPeerMessagePrompt, isProviderInternalPrompt } from './providers.mjs'
 import { providerPromptTurnMarker } from './team-provider-turn.mjs'
 
 function transcriptMessageText(record) {
@@ -9,6 +10,18 @@ function transcriptMessageText(record) {
     if (item?.type === 'text') return String(item.text || '')
     return ''
   }).filter(Boolean).join('\n')
+}
+
+// A task envelope marks a delivery only in a prompt the bridge submitted. Claude Code's
+// own records can quote one without being one: a meta record holds a subagent's or another
+// session's message in full, a notification can quote team output, and a compact summary
+// can quote the conversation. This refuses what the prompt hook refuses and leaves the rest
+// alone, so a new delivery wrapper can't hide a real boundary.
+function deliveredTeamTurnMarker(record) {
+  if (record?.type !== 'user' || record.isMeta === true || record.isCompactSummary === true) return null
+  const text = transcriptMessageText(record)
+  if (isProviderInternalPrompt('claude', text) || isPeerMessagePrompt('claude', text)) return null
+  return providerPromptTurnMarker(text)
 }
 
 function sameTeamTurn(marker, expected) {
@@ -38,22 +51,20 @@ export function teamTurnAssistantTranscript(text, expected, offsetTurn = null) {
     const completeLine = input.slice(cursor, newline)
     let record = null
     try { record = JSON.parse(completeLine) } catch {}
-    if (record?.type === 'user') {
-      const marker = providerPromptTurnMarker(transcriptMessageText(record))
-      if (marker) {
-        if (collecting && !sameTeamTurn(marker, expected)) {
-          return {
-            text: output.join('\n\n'),
-            consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
-            ...(promptObservedAt ? { promptObservedAt } : {}),
-          }
+    const marker = deliveredTeamTurnMarker(record)
+    if (marker) {
+      if (collecting && !sameTeamTurn(marker, expected)) {
+        return {
+          text: output.join('\n\n'),
+          consumedBytes: Buffer.byteLength(input.slice(0, cursor), 'utf8'),
+          ...(promptObservedAt ? { promptObservedAt } : {}),
         }
-        collecting = sameTeamTurn(marker, expected)
-        matched ||= collecting
-        if (collecting) {
-          const timestamp = Date.parse(String(record.timestamp || ''))
-          if (Number.isFinite(timestamp)) promptObservedAt = timestamp
-        }
+      }
+      collecting = sameTeamTurn(marker, expected)
+      matched ||= collecting
+      if (collecting) {
+        const timestamp = Date.parse(String(record.timestamp || ''))
+        if (Number.isFinite(timestamp)) promptObservedAt = timestamp
       }
     } else if (collecting && record?.type === 'assistant') {
       const assistant = transcriptMessageText(record).trim()
@@ -89,13 +100,11 @@ export function staleTeamTurnTranscriptPrefixBytes(text, expected, offsetTurn = 
     const completeLine = input.slice(cursor, newline)
     let record = null
     try { record = JSON.parse(completeLine) } catch {}
-    if (record?.type === 'user') {
-      const marker = providerPromptTurnMarker(transcriptMessageText(record))
-      if (marker && (marker.taskId !== taskId ||
-          (Number.isSafeInteger(marker.providerWorkGeneration) &&
-            marker.providerWorkGeneration > generation))) {
-        return Buffer.byteLength(input.slice(0, cursor), 'utf8')
-      }
+    const marker = deliveredTeamTurnMarker(record)
+    if (marker && (marker.taskId !== taskId ||
+        (Number.isSafeInteger(marker.providerWorkGeneration) &&
+          marker.providerWorkGeneration > generation))) {
+      return Buffer.byteLength(input.slice(0, cursor), 'utf8')
     }
     cursor = newline + 1
   }

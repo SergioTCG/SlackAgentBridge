@@ -97,24 +97,32 @@ export const isSupersededHook = (event, storedPid, eventPid) =>
 // drains queued notifications, and UserPromptSubmit carries no origin field.
 // Only the leading envelope that Claude Code writes identifies them. Typed
 // prompts and slash commands arrive as raw text, pasted text inside
-// `<pasted_content>`, Slack channel messages inside `<channel>`, and peer
-// messages in their own envelopes, so none of those match.
-const CLAUDE_INTERNAL_PROMPT = /^<(?:task-notification|system-reminder)>/
+// `<pasted_content>`, Slack channel messages inside `<channel>`, and another
+// session's messages in their own envelope, so none of those match.
+// Three more report on this session's own work in the same way:
+// - `<agent-message>`: a message from this session's own subagent;
+// - `[Cross-session delivery notice]`: what became of a message this session sent;
+// - the prompt it submits when a usage limit resets, telling the session to continue. It
+//   has no envelope, so only its exact text identifies it, and other wording stays local
+//   input and fails visibly. It can reach a session that has since moved on.
+const CLAUDE_INTERNAL_PROMPT = /^(?:<(?:task-notification|system-reminder)>|<agent-message(?:\s[^>]*)?>|\[Cross-session delivery notice\])/
+const CLAUDE_USAGE_LIMIT_RESET_PROMPT = 'Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.'
 export function isProviderInternalPrompt(provider, prompt) {
-  return normalizeProvider(provider) === 'claude' &&
-    CLAUDE_INTERNAL_PROMPT.test(String(prompt || '').trimStart())
+  if (normalizeProvider(provider) !== 'claude') return false
+  const text = String(prompt || '').trim()
+  return CLAUDE_INTERNAL_PROMPT.test(text) || text === CLAUDE_USAGE_LIMIT_RESET_PROMPT
 }
 
-// Claude Code also submits peer traffic as prompts of its own, whether the recipient
-// is idle or mid-turn, each under a leading marker it writes:
-// - `<cross-session-message>`: a message from another session;
-// - `<agent-message>`: a message from this session's own subagent;
-// - `[Cross-session delivery notice]`: what became of a message this session sent.
-// Every envelope attribute is optional, so only the marker identifies them. Text that
-// merely quotes one, or pastes it inside `<pasted_content>`, is still someone's input.
-// This decides what the terminal mirror posts and nothing else: these prompts are
-// deliberately not provider-internal, so they keep their existing team-authority effect.
-const CLAUDE_PEER_PROMPT = /^(?:<(?:cross-session-message|agent-message)(?:\s[^>]*)?>|\[Cross-session delivery notice\])/
+// Claude Code also submits a message from another session as a prompt of its own, whether
+// the recipient is idle or mid-turn, under a leading `<cross-session-message>`. Every
+// envelope attribute is optional, so only the marker identifies it. Text that merely quotes
+// one, or pastes it inside `<pasted_content>`, is still someone's input. It isn't typing, so
+// the terminal mirror skips it, and a task envelope quoted in it is never a delivery. It is
+// deliberately not provider-internal: it counts as local input, failing a worker's active
+// delegated task and ending a team turn. Nothing marks a turn it starts, so if that task
+// survived, that session could steer the worker to complete it, and the turn's report could
+// wake a coordinator. A standing task stays bound, so that gap remains there.
+const CLAUDE_PEER_PROMPT = /^<cross-session-message(?:\s[^>]*)?>/
 export function isPeerMessagePrompt(provider, prompt) {
   return normalizeProvider(provider) === 'claude' &&
     CLAUDE_PEER_PROMPT.test(String(prompt || '').trimStart())

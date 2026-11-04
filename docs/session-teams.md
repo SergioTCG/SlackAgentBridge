@@ -319,7 +319,22 @@ session. Local terminal input, session replacement, interruption, team removal,
 and provider switching revoke or invalidate stale authority. Claude Code's own
 background-command, subagent, and Monitor notifications are not local input.
 Claude Code submits them as prompts, even mid-turn, but they neither revoke the
-current turn's authority nor replace a worker's delegated turn.
+current turn's authority nor replace a worker's delegated turn. A subagent's
+message to its parent, a delivery notice and the prompt Claude Code submits when a
+usage limit resets report on the session's own work in the same way, so they are
+treated the same. The reset prompt can reach a session that has since moved on. A
+task envelope quoted inside one is never a delivery. None of them begins a team
+turn. A turn one of them starts on an idle worker reports like any later turn in
+the same work generation: the coordinator sees its reply, and that reply becomes
+the task's latest result, which a later release delivers.
+
+A message from another Claude session counts as local input. It fails a worker's
+active delegated task and ends the current team turn, though it is not mirrored as
+terminal typing and a task envelope quoted inside it is never a delivery. Nothing
+marks a turn it starts, so if the task survived, that session could steer the worker
+to complete it, and the turn's report could wake a coordinator or renew its dispatch
+budget. A standing task stays bound, so a worker that follows such a message can still
+move it.
 
 ## Agent-facing CLI
 

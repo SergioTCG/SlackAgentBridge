@@ -72,11 +72,14 @@ export function createPromptSubmitHandler({
       consumeInjected(sid, p)
       return
     }
-    // A provider notification is never a delegated-task delivery, even when its
-    // payload quotes a task envelope (for example a Monitor tailing team output).
+    // A provider notification or peer traffic is never a delegated-task delivery,
+    // even when its payload quotes a task envelope (for example a Monitor tailing
+    // team output, or a peer relaying a task).
     const providerInternal = isProviderInternalPrompt(provider, p)
-    const teamTaskId = providerInternal ? null : taskMarker(p)
-    const promptTeamTurn = providerInternal ? null : providerPromptTurnMarker(p)
+    const peerMessage = isPeerMessagePrompt(provider, p)
+    const neverDelivery = providerInternal || peerMessage
+    const teamTaskId = neverDelivery ? null : taskMarker(p)
+    const promptTeamTurn = neverDelivery ? null : providerPromptTurnMarker(p)
     // The journal holds a digest of the exact text the bridge submitted; Claude
     // Code may wrap that pasted text in a <pasted_content> envelope.
     const deliveredPrompt = unwrapPastedContent(p)
@@ -115,7 +118,7 @@ export function createPromptSubmitHandler({
     const staleSameTaskPrompt = Boolean(task && promptTeamTurn?.taskId === task.id &&
       Number.isSafeInteger(promptTeamTurn.providerWorkGeneration) &&
       promptTeamTurn.providerWorkGeneration < teamTaskProviderWorkGeneration(task))
-    const standingAck = providerInternal ? null : standingTeamPromptAcknowledgement(state, session, {
+    const standingAck = neverDelivery ? null : standingTeamPromptAcknowledgement(state, session, {
       promptTurn: promptTeamTurn, prompt: deliveredPrompt,
       isTaskEnvelope: Boolean(teamTaskId && teamTaskId === promptTeamTurn?.taskId),
     })
@@ -228,21 +231,24 @@ export function createPromptSubmitHandler({
         prompt: p, activeTaskId: session.teamActiveTaskId, injected, automationEcho, providerInternal,
       })
       if (localPromptEffect === 'fail_task') {
-        await failTeamTaskForSession(session, 'A local terminal prompt replaced the delegated worker turn.')
+        await failTeamTaskForSession(session, peerMessage
+          ? 'A message from another Claude session replaced the delegated worker turn.'
+          : 'A local terminal prompt replaced the delegated worker turn.')
       } else if (localPromptEffect === 'revoke_turn') {
-        // Local terminal input and uncorrelated prompts do not inherit a prior
-        // Slack owner's lateral team authority. Provider notifications that
-        // Claude Code submits mid-turn keep the current turn's authority.
+        // Local terminal input, uncorrelated prompts and another session's message
+        // do not inherit a prior Slack owner's lateral team authority. Provider
+        // notifications that Claude Code submits mid-turn keep the current turn's
+        // authority.
         clearTeamTurn(session)
         saveStateNow(state)
       }
     }
     // Mirror only genuine typing: skip the bridge's own input, recognized by its
     // injected-text record or, once that expires, its persisted team journal,
-    // peer messages and their delivery notices, and system-injected content
-    // (task notifications, reminders, echoes).
+    // another session's messages, and system-injected content (task notifications,
+    // subagent messages, delivery notices, reminders, echoes).
     if (p && !automationEcho && !injected && !acknowledgedTurn && !journaledDelivery && !standingAck &&
-        !isPeerMessagePrompt(provider, p) &&
+        !peerMessage && !providerInternal &&
         !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }

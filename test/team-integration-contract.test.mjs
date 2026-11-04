@@ -356,7 +356,7 @@ test('delayed older-generation team prompt hooks cannot fail newer work', () => 
   const promptHook = promptHookModule.slice(promptHookModule.indexOf('return async function handlePromptSubmit('))
   const stalePromptGuard = promptHook.indexOf('const staleSameTaskPrompt =')
   const stalePromptBranch = promptHook.indexOf('else if (staleSameTaskPrompt)')
-  const localPromptFailure = promptHook.indexOf("await failTeamTaskForSession(session, 'A local terminal prompt replaced")
+  const localPromptFailure = promptHook.indexOf("if (localPromptEffect === 'fail_task')")
   assert.ok(stalePromptGuard >= 0 && stalePromptBranch > stalePromptGuard &&
     localPromptFailure > stalePromptBranch,
   'a delayed older-generation prompt for the active task must be ignored before local-input failure')

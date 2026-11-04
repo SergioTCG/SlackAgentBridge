@@ -312,9 +312,10 @@ export function providerPromptAcknowledgesTask(session, {
 }
 
 // A native prompt that is not this session's delegated-task delivery is either
-// local input or something the provider generated itself. Local input replaces
-// a delegated worker turn and ends a coordinator's lateral team authority. A
-// provider notification (background command, subagent, Monitor event) runs
+// local input or something the provider generated itself. Local input, including
+// another session's message, replaces a delegated worker turn and ends a
+// coordinator's lateral team authority. A provider notification (background
+// command, subagent, Monitor event, delivery notice, usage-limit reset) runs
 // inside or after the current turn and changes neither. SAB's own injections
 // and automation echoes keep their existing handling.
 export function unacknowledgedPromptTeamEffect({
