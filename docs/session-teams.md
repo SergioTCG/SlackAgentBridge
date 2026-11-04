@@ -326,7 +326,8 @@ treated the same. The reset prompt can reach a session that has since moved on. 
 task envelope quoted inside one is never a delivery. None of them begins a team
 turn. A turn one of them starts on an idle worker reports like any later turn in
 the same work generation: the coordinator sees its reply, and that reply becomes
-the task's latest result, which a later release delivers.
+the task's latest result until release. A release delivers the first report after
+the worker declared completion, so such a turn can't replace the worker's answer.
 
 A message from another Claude session ends the current team turn, so that session
 cannot borrow the authority, but it never replaces a worker's delegated turn. It is

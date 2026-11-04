@@ -32,6 +32,11 @@ Notable changes to this project. Format based on
   - A provider failure the poller detects, such as an overload Claude Code ends with
     no Stop, now fails the task in these turns too, as it already did in a task's
     first turn. `sab team continue` recovers it.
+- A task's release now delivers the worker's answer, the first report after it
+  declared completion. A later turn in the same generation, such as one a background
+  notification started, could replace that result, turn a clean task into
+  `completed_with_warning`, or push the answer out of the journal once reports hit
+  their cap.
 - The prompt Claude Code submits when a usage limit resets no longer fails a
   worker's delegated team task, ends a coordinator's team turn or appears in the
   channel as terminal typing. The task failed while the worker carried on, as
@@ -46,6 +51,12 @@ Notable changes to this project. Format based on
   - A turn one of these prompts starts on an idle worker reports like any later
     turn: the coordinator sees its reply, and that reply becomes the task's latest
     result, which a later release delivers.
+    result until release.
+  - A message from another Claude session still fails a worker's active task and
+    ends the team turn, because nothing yet stops that session steering a worker to
+    complete its task. The failure now names it instead of a terminal prompt. A
+    standing task stays bound, as before. A task envelope quoted inside it is no
+    longer treated as a delivery.
   - Other typed and pasted input, and Codex and Pi prompts, still fail or revoke as
     before. Typing one of these markers or the exact reset text at the start of a
     prompt counts as a notification, as typing `<task-notification>` already does.
