@@ -6,6 +6,19 @@ Notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- A starting Claude session no longer reads its MCP config empty and starts
+  without the slack-bridge server. Every launch rewrote the shared
+  `mcp.json` in place, and a Claude starting during another launch's rewrite
+  could find it empty. It then showed `server:slack-bridge · no MCP server
+  configured with that name`, and neither Slack messages nor a delegated task
+  ever reached it. The more sessions started together, the likelier this was.
+  A launch now leaves the file alone when it already holds the right content,
+  and otherwise replaces it with a rename, so a reader always gets a whole
+  file. A failed write no longer damages the shared file or leaves a temporary
+  file behind.
+
 ## [2.5.2] — 2026-11-04
 
 ### Fixed

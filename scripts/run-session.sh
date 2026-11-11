@@ -91,9 +91,25 @@ run_claude() {
     unset acct_tok
   fi
   mkdir -p "$CONFIG_DIR"
-  cat > "$CONFIG_DIR/mcp.json" <<EOF
+  # Every launch shares this file, and other launches may be reading it right
+  # now, so it is never truncated in place. The content goes to a private file
+  # beside it first. An unchanged file is left alone, and a changed one is
+  # replaced by a rename, so a reader gets the old file or the new one, whole.
+  mcp_config="$CONFIG_DIR/mcp.json"
+  mcp_tmp="$(mktemp "$mcp_config.XXXXXX")" || return 1
+  if ! cat > "$mcp_tmp" <<EOF
 { "mcpServers": { "slack-bridge": { "command": "node", "args": ["$BRIDGE/channel/server.mjs"] } } }
 EOF
+  then
+    rm -f "$mcp_tmp"
+    return 1
+  fi
+  if cmp -s "$mcp_tmp" "$mcp_config"; then
+    rm -f "$mcp_tmp"
+  elif ! mv -f "$mcp_tmp" "$mcp_config"; then
+    rm -f "$mcp_tmp"
+    return 1
+  fi
   if [ -n "$startup_status_file" ]; then
     status=0
     claude --mcp-config "$CONFIG_DIR/mcp.json" \
